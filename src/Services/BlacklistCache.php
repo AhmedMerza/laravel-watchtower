@@ -30,6 +30,13 @@ use Watchtower\Models\BlacklistedIp;
  */
 class BlacklistCache
 {
+    /**
+     * Set to true after the deprecation warning for `cache.connection` has
+     * been emitted, so we surface it once per process rather than every
+     * time the service is resolved (and especially not once per request).
+     */
+    private static bool $deprecationWarningEmitted = false;
+
     private string $keyPrefix;
 
     private string $indexKey;
@@ -45,6 +52,54 @@ class BlacklistCache
         $this->indexKey = $this->keyPrefix.':_index';
         $this->ttlSeconds = (int) ($config['ttl_hours'] ?? 24) * 3600;
         $this->store = $config['store'] ?? null;
+
+        $this->warnIfDeprecatedConnectionConfigSet($config);
+    }
+
+    /**
+     * Emit a one-shot deprecation warning if the user still has a value in
+     * `watchtower.cache.connection` (or the env var that feeds it). The
+     * pre-rename code passed that value directly to `Redis::connection(...)`;
+     * the post-rename code defers to Laravel's cache config and ignores it.
+     * Without this warning, users who relied on a separate Redis connection
+     * via `WATCHTOWER_REDIS_CONNECTION` would silently lose isolation and
+     * only find out via traffic anomalies.
+     */
+    private function warnIfDeprecatedConnectionConfigSet(array $config): void
+    {
+        if (self::$deprecationWarningEmitted) {
+            return;
+        }
+
+        $connection = $config['connection'] ?? null;
+
+        if ($connection === null || $connection === '') {
+            return;
+        }
+
+        self::$deprecationWarningEmitted = true;
+
+        try {
+            \Illuminate\Support\Facades\Log::channel(config('watchtower.log_channel', 'stack'))
+                ->warning('Watchtower: `watchtower.cache.connection` (env: WATCHTOWER_REDIS_CONNECTION / GUARD_REDIS_CONNECTION) is deprecated and now ignored. The package defers to Laravel\'s cache config. To isolate Watchtower on a specific Redis connection, define a custom cache store in config/cache.php and set WATCHTOWER_CACHE_STORE to its name.', [
+                    'configured_connection' => $connection,
+                ]);
+        } catch (\Throwable) {
+            // Log channel resolution failure must not break service construction.
+            // The warning is best-effort; users can still discover the change
+            // via the CHANGELOG and config docblock.
+        }
+    }
+
+    /**
+     * Reset the static deprecation-warning flag. Test-only — lets each test
+     * exercise the warning path independently.
+     *
+     * @internal
+     */
+    public static function resetDeprecationWarningFlag(): void
+    {
+        self::$deprecationWarningEmitted = false;
     }
 
     /**
@@ -94,6 +149,27 @@ class BlacklistCache
      * fresh per-IP keys and an updated index. If the DB read fails (e.g.
      * migration not run yet), the existing cache state is left intact —
      * we'd rather serve stale-but-correct entries than wipe everything.
+     *
+     * ⚠️ Atomicity caveat: rebuild is NOT atomic across the cache backend.
+     * The sequence is (1) forget old per-IP keys, (2) write new per-IP
+     * keys, (3) write new index. If the process is killed between steps —
+     * or if the cache backend partially fails mid-iteration — the cache
+     * can end up in an inconsistent state:
+     *
+     *   - Worst case: an IP unblocked in the DB but whose forget call
+     *     failed remains in the cache as "yes blocked" until its TTL
+     *     expires (default 24h). A legitimate user is locked out for
+     *     that window.
+     *   - The TTL safety net bounds the worst case; subsequent rebuilds
+     *     read the new index (written last) and forget the right keys
+     *     on the next pass.
+     *
+     * This trade-off is accepted for v1 because (a) rebuilds are fast
+     * (sub-millisecond on Redis for typical blocklists), (b) crashes
+     * mid-rebuild are rare, and (c) the alternative — a versioned key
+     * prefix — adds an extra cache `get` to the request path. Revisit if
+     * real-world reports show stale-entry issues; the migration path is
+     * a versioned-prefix scheme that orphans old keys naturally via TTL.
      */
     public function rebuild(): void
     {
