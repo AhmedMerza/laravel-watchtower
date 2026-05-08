@@ -2,22 +2,21 @@
 
 declare(strict_types=1);
 
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Queue;
-use Illuminate\Support\Facades\Redis;
 use Watchtower\Enums\BlockSource;
 use Watchtower\Events\IpBlocked;
 use Watchtower\Models\BlacklistedIp;
 use Watchtower\Services\BlacklistCache;
 
 beforeEach(function () {
-    // Mock Redis so feature tests don't require a real Redis connection
-    Redis::shouldReceive('connection')->andReturnSelf()->byDefault();
-    Redis::shouldReceive('del')->andReturn(1)->byDefault();
-    Redis::shouldReceive('hmset')->andReturn(true)->byDefault();
-    Redis::shouldReceive('expire')->andReturn(true)->byDefault();
-    Redis::shouldReceive('exists')->andReturn(0)->byDefault();
-    Redis::shouldReceive('hget')->andReturn(null)->byDefault();
+    // Use the array cache store — real cache, no Redis-facade mocking.
+    // Watchtower's BlacklistCache reads `watchtower.cache.store`, so we
+    // pin both that and Laravel's default cache to 'array' for isolation.
+    config()->set('cache.default', 'array');
+    config()->set('watchtower.cache.store', 'array');
+    Cache::flush();
 
     Event::fake();
     Queue::fake();
@@ -76,10 +75,9 @@ it('returns the correct status for a blocked IP', function () {
         'expires_at' => null,
     ]);
 
-    // status() checks Redis as truth — simulate a permanent block (empty string)
-    Redis::shouldReceive('hget')
-        ->with('watchtower:blacklist', '10.0.0.3')
-        ->andReturn('');
+    // status() checks the cache as truth — write a permanent-block entry
+    // (empty string value) for the IP so isBlocked() returns true.
+    Cache::store('array')->put('watchtower:blacklist:ip:10.0.0.3', '', 3600);
 
     $response = $this->getJson('/logscope/watchtower/api/status/10.0.0.3');
 

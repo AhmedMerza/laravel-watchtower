@@ -2,17 +2,14 @@
 
 declare(strict_types=1);
 
-use Illuminate\Support\Facades\Redis;
+use Illuminate\Support\Facades\Cache;
 use Watchtower\Enums\BlockSource;
 use Watchtower\Models\BlacklistedIp;
 
 beforeEach(function () {
-    Redis::shouldReceive('connection')->andReturnSelf()->byDefault();
-    Redis::shouldReceive('del')->andReturn(1)->byDefault();
-    Redis::shouldReceive('hmset')->andReturn(true)->byDefault();
-    Redis::shouldReceive('expire')->andReturn(true)->byDefault();
-    Redis::shouldReceive('exists')->andReturn(0)->byDefault();
-    Redis::shouldReceive('hget')->andReturn(null)->byDefault();
+    config()->set('cache.default', 'array');
+    config()->set('watchtower.cache.store', 'array');
+    Cache::flush();
 });
 
 it('deletes expired temporary blocks', function () {
@@ -59,11 +56,11 @@ it('never deletes permanent blocks (expires_at is null)', function () {
 });
 
 it('only rebuilds the cache when records were deleted', function () {
-    // No expired blocks exist, so rebuild() (which calls del) must not be called.
-    // warmOnBoot() won't trigger del here because Redis::exists() is mocked to
-    // return 1 (key exists), so it short-circuits before calling rebuild().
-    Redis::shouldReceive('exists')->andReturn(1)->byDefault();
-    Redis::shouldNotReceive('del');
+    // Pre-populate the cache index with a sentinel — rebuild() would clear
+    // and rewrite it. If cleanup correctly skips rebuild when no records
+    // are deleted, the sentinel survives.
+    Cache::store('array')->put('watchtower:blacklist:_index', ['preserved.sentinel.ip'], 3600);
+    Cache::store('array')->put('watchtower:blacklist:ip:preserved.sentinel.ip', '', 3600);
 
     BlacklistedIp::create([
         'ip'         => '4.4.4.4',
@@ -73,6 +70,9 @@ it('only rebuilds the cache when records were deleted', function () {
     ]);
 
     $this->artisan('watchtower:cleanup')->assertSuccessful();
+
+    // No expired blocks → rebuild() shouldn't have been called → sentinel remains.
+    expect(Cache::store('array')->get('watchtower:blacklist:_index'))->toBe(['preserved.sentinel.ip']);
 });
 
 it('reports nothing to clean up when the table is empty', function () {

@@ -2,9 +2,9 @@
 
 declare(strict_types=1);
 
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Queue;
-use Illuminate\Support\Facades\Redis;
 use Watchtower\Enums\BlockSource;
 use Watchtower\Models\BlacklistedIp;
 use Watchtower\Services\AutoBlockService;
@@ -12,12 +12,10 @@ use Watchtower\Services\BlacklistCache;
 use Watchtower\Services\BlacklistService;
 
 beforeEach(function () {
-    Redis::shouldReceive('connection')->andReturnSelf()->byDefault();
-    Redis::shouldReceive('del')->andReturn(1)->byDefault();
-    Redis::shouldReceive('hmset')->andReturn(true)->byDefault();
-    Redis::shouldReceive('expire')->andReturn(true)->byDefault();
-    Redis::shouldReceive('exists')->andReturn(0)->byDefault();
-    Redis::shouldReceive('hget')->andReturn(null)->byDefault();
+    // Use the array cache store — real cache, no Redis-facade mocking.
+    config()->set('cache.default', 'array');
+    config()->set('watchtower.cache.store', 'array');
+    Cache::flush();
 
     Event::fake();
     Queue::fake();
@@ -195,9 +193,11 @@ it('skips IPs that are already blocked', function () {
         'source_env' => 'testing',
     ]);
 
-    Redis::shouldReceive('hget')
-        ->with('watchtower:blacklist', '3.3.3.3')
-        ->andReturn('');
+    // Pin the cache state directly — `isBlocked('3.3.3.3')` should return
+    // true before AutoBlockService runs, so the rule's `if ($this->blacklist->isBlocked($ip)) continue;`
+    // skip path fires. Without this, the test passes for the wrong reason
+    // (BlacklistService::block dedupes via updateOrCreate).
+    Cache::store('array')->put('watchtower:blacklist:ip:3.3.3.3', '', 3600);
 
     \Illuminate\Support\Facades\DB::table('log_entries')->insert([
         'id'          => \Illuminate\Support\Str::ulid(),

@@ -2,16 +2,14 @@
 
 declare(strict_types=1);
 
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
-use Illuminate\Support\Facades\Redis;
 use Watchtower\Models\BlacklistedIp;
 
 beforeEach(function () {
-    Redis::shouldReceive('connection')->andReturnSelf()->byDefault();
-    Redis::shouldReceive('del')->andReturn(1)->byDefault();
-    Redis::shouldReceive('hmset')->andReturn(true)->byDefault();
-    Redis::shouldReceive('expire')->andReturn(true)->byDefault();
-    Redis::shouldReceive('exists')->andReturn(0)->byDefault();
+    config()->set('cache.default', 'array');
+    config()->set('watchtower.cache.store', 'array');
+    Cache::flush();
 
     config()->set('watchtower.sync.master_url', 'https://master.example.com');
     config()->set('watchtower.sync.secret', 'test-secret');

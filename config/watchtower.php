@@ -42,19 +42,61 @@ return [
 
     /*
     |--------------------------------------------------------------------------
-    | Redis Cache
+    | Cache
     |--------------------------------------------------------------------------
     |
-    | Watchtower uses a Redis Hash to check blocks on every request with zero DB
-    | hits. The hash is rebuilt on every block/unblock and refreshed on sync.
-    | TTL is a safety net — the hash is always explicitly rebuilt on changes.
+    | Watchtower checks blocked IPs against Laravel's cache on every request
+    | so the request path is one cache lookup with no DB hit. Any cache
+    | driver Laravel supports works: redis, memcached, file, database,
+    | array, dynamodb. Redis is recommended for production (lowest
+    | request-time latency); file is fine for low-volume single-server
+    | deployments.
+    |
+    | 'store'      - The cache store to use. null (default) = your
+    |                application's default cache store (config/cache.php
+    |                → 'default'). Set to a specific store name (e.g.
+    |                'redis', 'file') to override per-package without
+    |                touching cache.default.
+    |
+    |                If you want a SEPARATE Redis connection just for
+    |                Watchtower, define a custom cache store in
+    |                config/cache.php and set WATCHTOWER_CACHE_STORE to
+    |                its name. Example:
+    |
+    |                    // config/cache.php
+    |                    'stores' => [
+    |                        'watchtower' => [
+    |                            'driver' => 'redis',
+    |                            'connection' => 'watchtower-redis',
+    |                        ],
+    |                    ],
+    |
+    | 'key'        - Cache key prefix. Per-IP entries land at
+    |                `{key}:ip:{ip}` and the index sidecar at
+    |                `{key}:_index`. Change the prefix only if it
+    |                conflicts with another package's cache keys.
+    |
+    | 'ttl_hours'  - Safety-net TTL on every cache entry. The cache is
+    |                explicitly rebuilt on every block/unblock and on
+    |                watchtower:sync, so the TTL is a backstop for the
+    |                rare case where the rebuild silently failed (e.g.
+    |                DB unavailable mid-flush).
+    |
+    | DEPRECATED:
+    | 'connection' - No longer honored. Pre-rename versions used this to
+    |                pick a Redis connection directly. Now we defer to
+    |                Laravel's cache config — to use a non-default Redis
+    |                connection, define a custom cache store as shown
+    |                above. The key remains in config for backward
+    |                compatibility but reading it has no effect.
     |
     */
 
     'cache' => [
+        'store'      => env('WATCHTOWER_CACHE_STORE'),
         'key'        => 'watchtower:blacklist',
         'ttl_hours'  => 24,
-        'connection' => env('WATCHTOWER_REDIS_CONNECTION', env('GUARD_REDIS_CONNECTION', 'default')),
+        'connection' => env('WATCHTOWER_REDIS_CONNECTION', env('GUARD_REDIS_CONNECTION')),
     ],
 
     /*

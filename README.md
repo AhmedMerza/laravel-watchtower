@@ -39,10 +39,10 @@ Admin blocks IP in LogScope UI (staging)
     └─► Queued job pushes block to master env
             │
             └─► Every other env pulls from master via watchtower:sync (every 5 min)
-                    └─► Redis rebuilt → all environments protected
+                    └─► Cache rebuilt → all environments protected
 ```
 
-Every incoming request is checked against a **Redis Hash** before any middleware, session, auth, or route runs. No DB hit per request.
+Every incoming request is checked against Laravel's cache (Redis, Memcached, file, database — your choice via `WATCHTOWER_CACHE_STORE`) before any middleware, session, auth, or route runs. No DB hit per request.
 
 ---
 
@@ -63,8 +63,8 @@ Every incoming request is checked against a **Redis Hash** before any middleware
 
 - PHP 8.2+
 - Laravel 10+
-- Redis
-- [ahmedmerza/logscope](https://github.com/AhmedMerza/laravel-logscope) >= 1.5.2
+- A configured Laravel cache store (any driver — redis, memcached, file, database, array). Redis is recommended for production.
+- [ahmedmerza/logscope](https://github.com/AhmedMerza/laravel-logscope) >= 1.5.2 *(optional — only needed if you want the in-detail-panel Block-IP button)*
 
 ---
 
