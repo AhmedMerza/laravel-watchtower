@@ -3,13 +3,23 @@
 [![License](https://img.shields.io/github/license/AhmedMerza/laravel-watchtower?style=flat-square)](LICENSE.md)
 [![PHP Version](https://img.shields.io/badge/php-%3E%3D8.2-blue?style=flat-square)](https://php.net)
 
-> **Active blocking and cross-server coordination at the edge of your Laravel app** — block bad actors in your management UI, and every other environment sees the block within minutes. No Cloudflare, no AWS WAF, no infrastructure changes. Optional integration with LogScope adds one-click block from any log entry.
+> **Active blocking and cross-server coordination at the edge of your Laravel app** — block a bad actor in one environment and every other environment sees the block within minutes. No Cloudflare, no AWS WAF, no infrastructure changes. Block over a JSON API standalone, or one-click from any log entry when LogScope is installed.
 
 > **Status — heading to v1.0.** Core IP blocking, cross-environment push/pull sync, the cache abstraction (works on **any** Laravel cache driver — Redis is no longer required), and the opt-in auto-block engine (with `block` / `warn` / `disabled` modes) are all in place and tested. LogScope is fully optional — a dev/suggest dependency you install only if you want one-click blocking from the log detail panel.
 >
-> Still landing before `v1.0.0`: a **built-in authorization path for standalone installs** (today you wrap the routes in your own auth — see [Standalone](#standalone-no-logscope)) and a richer management UI.
+> Still landing before `v1.0.0`: a **built-in authorization path for standalone installs** (today you wrap the routes in your own auth — see [Standalone](#standalone-no-logscope)) and a **standalone management UI** (today the standalone interface is the JSON API below; LogScope users get the in-panel Block-IP button).
 
 ## Quick Start
+
+> **Not on Packagist yet.** Until the first tagged release is published, install from the GitHub repo. Add it as a VCS repository in your app's `composer.json`:
+>
+> ```json
+> "repositories": [
+>     { "type": "vcs", "url": "https://github.com/AhmedMerza/laravel-watchtower" }
+> ]
+> ```
+>
+> then run `composer require ahmedmerza/laravel-watchtower:dev-main`. The commands below assume the package is installed.
 
 **With LogScope:**
 
@@ -27,7 +37,7 @@ composer require ahmedmerza/laravel-watchtower
 php artisan watchtower:install
 ```
 
-Routes mount at `/watchtower/api/...` (configurable via `WATCHTOWER_ROUTE_PREFIX`). Until v1.1 ships proper standalone auth, wrap them in your own auth middleware via `config/watchtower.php` → `routes.middleware` (e.g. `['web', 'auth']` plus a Gate check), or set `WATCHTOWER_ROUTES_ENABLED=false` if you don't need the UI yet.
+A JSON management API mounts at `/watchtower/api/...` (configurable via `WATCHTOWER_ROUTE_PREFIX`) — `POST /api/block`, `DELETE /api/block/{ip}`, `GET /api/status/{ip}`, `GET /api/blocks`. There is no standalone HTML UI yet (that's coming before v1.0 — see the status note above); standalone, you drive blocks through this API. Until v1.1 ships proper standalone auth, wrap the routes in your own auth middleware via `config/watchtower.php` → `routes.middleware` (e.g. `['web', 'auth']` plus a Gate check), or set `WATCHTOWER_ROUTES_ENABLED=false` to disable them entirely.
 
 ---
 
