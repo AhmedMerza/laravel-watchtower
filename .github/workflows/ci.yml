@@ -21,7 +21,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Validate the declared dependency floor (illuminate >=10.0) on the
+          # Validate the declared dependency floor (illuminate >=11.0) on the
           # lowest supported PHP, then the latest stable deps across all PHPs.
           - php: '8.2'
             dependency-version: prefer-lowest
