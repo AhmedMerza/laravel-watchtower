@@ -21,19 +21,19 @@
     "require": {
         "php": "^8.2",
         "spatie/laravel-package-tools": "^1.16",
-        "illuminate/contracts": ">=10.0",
-        "illuminate/support": ">=10.0",
-        "illuminate/cache": ">=10.0",
-        "illuminate/http": ">=10.0"
+        "illuminate/contracts": ">=11.0",
+        "illuminate/support": ">=11.0",
+        "illuminate/cache": ">=11.0",
+        "illuminate/http": ">=11.0"
     },
     "require-dev": {
         "ahmedmerza/logscope": ">=1.5.2",
         "laravel/pint": "^1.14",
-        "nunomaduro/collision": "^7.0|^8.0",
+        "nunomaduro/collision": "^8.0",
         "larastan/larastan": "^2.0|^3.0",
-        "orchestra/testbench": "^8.0|^9.0|^10.0",
-        "pestphp/pest": "^2.0|^3.0|^4.0",
-        "pestphp/pest-plugin-laravel": "^2.0|^3.0|^4.0",
+        "orchestra/testbench": "^9.5|^10.0",
+        "pestphp/pest": "^3.0|^4.0",
+        "pestphp/pest-plugin-laravel": "^3.0|^4.0",
         "phpstan/extension-installer": "^1.4",
         "phpstan/phpstan-deprecation-rules": "^1.0|^2.0"
     },
@@ -53,7 +53,7 @@
     "scripts": {
         "post-autoload-dump": "@composer run prepare",
         "prepare": "@php vendor/bin/testbench package:discover --ansi",
-        "analyse": "vendor/bin/phpstan analyse",
+        "analyse": "vendor/bin/phpstan analyse --memory-limit=1G",
         "test": "vendor/bin/pest",
         "test-coverage": "vendor/bin/pest --coverage",
         "format": "vendor/bin/pint"

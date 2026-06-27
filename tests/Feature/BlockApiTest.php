@@ -5,6 +5,7 @@ declare(strict_types=1);
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Queue;
+use LogScope\Http\Middleware\Authorize;
 use Watchtower\Enums\BlockSource;
 use Watchtower\Events\IpBlocked;
 use Watchtower\Models\BlacklistedIp;
@@ -22,7 +23,7 @@ beforeEach(function () {
     Queue::fake();
 
     // Bypass LogScope's Authorize middleware in tests
-    $this->withoutMiddleware(\LogScope\Http\Middleware\Authorize::class);
+    $this->withoutMiddleware(Authorize::class);
 });
 
 it('blocks an IP via the API and updates the database', function () {

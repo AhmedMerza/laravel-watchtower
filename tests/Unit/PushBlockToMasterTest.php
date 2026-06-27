@@ -42,7 +42,7 @@ it('throws a RuntimeException on non-2xx response so the queue retries', functio
     ]);
 
     expect(fn () => (new PushBlockToMaster($this->record))->handle())
-        ->toThrow(\RuntimeException::class, 'HTTP 500');
+        ->toThrow(RuntimeException::class, 'HTTP 500');
 });
 
 it('does nothing when master URL is not configured', function () {
@@ -59,8 +59,8 @@ it('logs a warning on final failure via failed()', function () {
     Log::shouldReceive('channel')->with('stack')->andReturnSelf();
     Log::shouldReceive('warning')->once()->with(
         'Watchtower: PushBlockToMaster failed',
-        \Mockery::on(fn ($ctx) => $ctx['ip'] === '1.2.3.4')
+        Mockery::on(fn ($ctx) => $ctx['ip'] === '1.2.3.4')
     );
 
-    (new PushBlockToMaster($this->record))->failed(new \RuntimeException('connection refused'));
+    (new PushBlockToMaster($this->record))->failed(new RuntimeException('connection refused'));
 });

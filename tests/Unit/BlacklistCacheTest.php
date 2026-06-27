@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Schema;
 use Watchtower\Enums\BlockSource;
 use Watchtower\Models\BlacklistedIp;
 use Watchtower\Services\BlacklistCache;
@@ -150,7 +151,7 @@ it('keeps existing cache state when DB read fails on rebuild', function () {
     Cache::store('array')->put('watchtower:blacklist:ip:preserved.ip', '', 3600);
 
     // Simulate a DB failure by dropping the table
-    \Illuminate\Support\Facades\Schema::drop('blacklisted_ips');
+    Schema::drop('blacklisted_ips');
 
     $this->cache->rebuild();
 

@@ -5,8 +5,10 @@ declare(strict_types=1);
 namespace Watchtower\Tests;
 
 use Illuminate\Database\Eloquent\Factories\Factory;
-use Watchtower\WatchtowerServiceProvider;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\File;
 use Orchestra\Testbench\TestCase as Orchestra;
+use Watchtower\WatchtowerServiceProvider;
 
 class TestCase extends Orchestra
 {
@@ -36,13 +38,13 @@ class TestCase extends Orchestra
         ]);
 
         // Run Guard migration
-        foreach (\Illuminate\Support\Facades\File::allFiles(__DIR__.'/../database/migrations') as $migration) {
+        foreach (File::allFiles(__DIR__.'/../database/migrations') as $migration) {
             (include $migration->getRealPath())->up();
         }
 
         // Create a minimal log_entries table so AutoBlockService tests can run
         // without requiring the full LogScope package to be installed.
-        \Illuminate\Support\Facades\DB::statement('
+        DB::statement('
             CREATE TABLE IF NOT EXISTS log_entries (
                 id VARCHAR(26) PRIMARY KEY,
                 level VARCHAR(20) NOT NULL,

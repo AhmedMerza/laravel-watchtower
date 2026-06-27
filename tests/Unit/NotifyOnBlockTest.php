@@ -53,9 +53,9 @@ it('catches exceptions and does not re-throw', function () {
     config()->set('watchtower.log_channel', 'stack');
 
     Http::fake([
-        'hooks.example.com/notify' => fn () => throw new \Exception('connection failed'),
+        'hooks.example.com/notify' => fn () => throw new Exception('connection failed'),
     ]);
 
     // Should not throw — exceptions are caught and logged
-    expect(fn () => $this->listener->handle($this->event))->not->toThrow(\Exception::class);
+    expect(fn () => $this->listener->handle($this->event))->not->toThrow(Exception::class);
 });

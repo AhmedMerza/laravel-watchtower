@@ -5,8 +5,9 @@ declare(strict_types=1);
 namespace Watchtower\Services;
 
 use Carbon\Carbon;
-use Illuminate\Cache\Repository;
+use Illuminate\Contracts\Cache\Repository;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Log;
 use Watchtower\Models\BlacklistedIp;
 
 /**
@@ -80,7 +81,7 @@ class BlacklistCache
         self::$deprecationWarningEmitted = true;
 
         try {
-            \Illuminate\Support\Facades\Log::channel(config('watchtower.log_channel', 'stack'))
+            Log::channel(config('watchtower.log_channel', 'stack'))
                 ->warning('Watchtower: `watchtower.cache.connection` (env: WATCHTOWER_REDIS_CONNECTION / GUARD_REDIS_CONNECTION) is deprecated and now ignored. The package defers to Laravel\'s cache config. To isolate Watchtower on a specific Redis connection, define a custom cache store in config/cache.php and set WATCHTOWER_CACHE_STORE to its name.', [
                     'configured_connection' => $connection,
                 ]);
@@ -176,7 +177,7 @@ class BlacklistCache
         try {
             $blocks = BlacklistedIp::active()->get(['ip', 'expires_at']);
         } catch (\Throwable $e) {
-            \Illuminate\Support\Facades\Log::channel(config('watchtower.log_channel', 'stack'))
+            Log::channel(config('watchtower.log_channel', 'stack'))
                 ->warning('Watchtower: cache rebuild failed, keeping existing cache data', [
                     'error' => $e->getMessage(),
                 ]);
@@ -234,7 +235,7 @@ class BlacklistCache
 
             $this->rebuild();
         } catch (\Throwable $e) {
-            \Illuminate\Support\Facades\Log::channel(config('watchtower.log_channel', 'stack'))
+            Log::channel(config('watchtower.log_channel', 'stack'))
                 ->warning('Watchtower: warmOnBoot failed, skipping cache warm-up', [
                     'error' => $e->getMessage(),
                 ]);

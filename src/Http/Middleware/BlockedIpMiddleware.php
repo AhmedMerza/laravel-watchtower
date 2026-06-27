@@ -6,8 +6,8 @@ namespace Watchtower\Http\Middleware;
 
 use Closure;
 use Illuminate\Http\Request;
-use Watchtower\Services\BlacklistCache;
 use Symfony\Component\HttpFoundation\Response;
+use Watchtower\Services\BlacklistCache;
 
 class BlockedIpMiddleware
 {

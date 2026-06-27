@@ -4,6 +4,10 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- **Minimum Laravel version raised to 11.0** (`illuminate/* >=11.0`). The service provider uses the `Illuminate\Support\Facades\Schedule` facade, which only exists from Laravel 11 — the previous `>=10.0` constraint never actually worked on Laravel 10. Laravel 10 is also past its security-support window. Surfaced by a new `prefer-lowest` CI job.
+
 ### Added
 
 - **Cache abstraction — Redis is no longer a hard dependency.** `BlacklistCache` now uses `Cache::store(config('watchtower.cache.store'))` instead of direct Redis facade calls. Any cache driver Laravel supports works: redis, memcached, file, database, array, dynamodb. New env var `WATCHTOWER_CACHE_STORE` (default falls back to your app's `cache.default`). Internally the cache uses per-IP keys (`{prefix}:ip:{ip}`) plus a sidecar index (`{prefix}:_index`) so `rebuild()` can clear stale entries on any driver — no `Cache::tags()` requirement (file/database stores don't support tagging). `composer.json` `require` swaps `illuminate/redis` → `illuminate/cache`. The legacy `watchtower.cache.connection` config key is deprecated but still in the config schema (ignored by the new code); users wanting a non-default Redis connection should now configure a custom cache store in `config/cache.php` and point `WATCHTOWER_CACHE_STORE` at it. Performance: request-time is unchanged (one cache `get`); rebuilds do N+1 writes vs. the previous single HMSET, but rebuilds are rare (only on block/unblock/sync).

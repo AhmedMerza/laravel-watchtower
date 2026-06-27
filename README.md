@@ -64,7 +64,7 @@ Every incoming request is checked against Laravel's cache (Redis, Memcached, fil
 ## 📋 Requirements
 
 - PHP 8.2+
-- Laravel 10+
+- Laravel 11+
 - A configured Laravel cache store (any driver — redis, memcached, file, database, array). Redis is recommended for production.
 - [ahmedmerza/logscope](https://github.com/AhmedMerza/laravel-logscope) >= 1.5.2 *(optional — only needed if you want the in-detail-panel Block-IP button)*
 
@@ -174,11 +174,10 @@ Route::post('/watchtower/api/block', function (Request $request) {
 **On satellites**, schedule the sync command:
 
 ```php
-// Laravel 11+ (routes/console.php)
-Schedule::command('watchtower:sync')->everyFiveMinutes();
+// routes/console.php
+use Illuminate\Support\Facades\Schedule;
 
-// Laravel 10 (app/Console/Kernel.php)
-$schedule->command('watchtower:sync')->everyFiveMinutes();
+Schedule::command('watchtower:sync')->everyFiveMinutes();
 ```
 
 ### How Push + Pull Work Together
