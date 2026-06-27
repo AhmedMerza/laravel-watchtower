@@ -5,7 +5,9 @@
 
 > **Active blocking and cross-server coordination at the edge of your Laravel app** — block bad actors in your management UI, and every other environment sees the block within minutes. No Cloudflare, no AWS WAF, no infrastructure changes. Optional integration with LogScope adds one-click block from any log entry.
 
-> ⚠️ **This README is mid-rewrite.** The package was renamed from `ahmedmerza/logscope-guard` to `ahmedmerza/laravel-watchtower`. Most code examples below still describe the LogScope-integrated experience accurately; standalone-first documentation is landing in a follow-up PR.
+> **Status — heading to v1.0.** Core IP blocking, cross-environment push/pull sync, the cache abstraction (works on **any** Laravel cache driver — Redis is no longer required), and the opt-in auto-block engine (with `block` / `warn` / `disabled` modes) are all in place and tested. LogScope is fully optional — a dev/suggest dependency you install only if you want one-click blocking from the log detail panel.
+>
+> Still landing before `v1.0.0`: a **built-in authorization path for standalone installs** (today you wrap the routes in your own auth — see [Standalone](#standalone-no-logscope)) and a richer management UI.
 
 ## Quick Start
 
@@ -18,14 +20,14 @@ php artisan watchtower:install
 
 A **Block IP** button now appears in your LogScope detail panel whenever a log entry has an IP address.
 
-**Standalone (no LogScope):**
+<a id="standalone-no-logscope"></a>**Standalone (no LogScope):**
 
 ```bash
 composer require ahmedmerza/laravel-watchtower
 php artisan watchtower:install
 ```
 
-Routes mount at `/watchtower/api/...`. Until v1.1 ships proper standalone auth, wrap them in your own auth middleware via `config/watchtower.php` → `routes.middleware` (e.g. `['web', 'auth']` plus a Gate check), or set `WATCHTOWER_ROUTES_ENABLED=false` if you don't need the UI yet.
+Routes mount at `/watchtower/api/...` (configurable via `WATCHTOWER_ROUTE_PREFIX`). Until v1.1 ships proper standalone auth, wrap them in your own auth middleware via `config/watchtower.php` → `routes.middleware` (e.g. `['web', 'auth']` plus a Gate check), or set `WATCHTOWER_ROUTES_ENABLED=false` if you don't need the UI yet.
 
 ---
 
@@ -34,7 +36,7 @@ Routes mount at `/watchtower/api/...`. Until v1.1 ships proper standalone auth, 
 ```
 Admin blocks IP in LogScope UI (staging)
     │
-    ├─► DB row created + Redis hash rebuilt → staging protected immediately
+    ├─► DB row created + cache rebuilt → staging protected immediately
     │
     └─► Queued job pushes block to master env
             │
@@ -82,7 +84,7 @@ WATCHTOWER_ENABLED=true
 WATCHTOWER_NEVER_BLOCK_IPS=127.0.0.1,::1,your.own.ip
 ```
 
-> **Important:** Add your own IP to `WATCHTOWER_NEVER_BLOCK_IPS` before enabling. You cannot be blocked by an IP on this list — it is checked before any block operation and before Redis.
+> **Important:** Add your own IP to `WATCHTOWER_NEVER_BLOCK_IPS` before enabling. You cannot be blocked by an IP on this list — it is checked before any block operation, before the cache, and before the DB.
 
 ---
 
@@ -95,8 +97,14 @@ WATCHTOWER_ENABLED=true
 # IPs that can never be blocked (comma-separated) — prevents self-lockout
 WATCHTOWER_NEVER_BLOCK_IPS=127.0.0.1,::1
 
-# Redis connection to use for the blacklist hash
-WATCHTOWER_REDIS_CONNECTION=default
+# Cache store for the blocklist. Blank = your app's default cache store.
+# Any Laravel driver works: redis, memcached, file, database, array, dynamodb.
+WATCHTOWER_CACHE_STORE=
+
+# Management routes (standalone mode)
+WATCHTOWER_ROUTES_ENABLED=true
+WATCHTOWER_ROUTE_PREFIX=watchtower
+# WATCHTOWER_ROUTE_DOMAIN=admin.example.com
 
 # Cross-environment sync
 WATCHTOWER_MASTER_URL=https://your-master-app.com
@@ -104,6 +112,7 @@ WATCHTOWER_SYNC_SECRET=a-long-random-secret
 
 # Auto-block engine (disabled by default)
 WATCHTOWER_AUTO_BLOCK_ENABLED=false
+WATCHTOWER_AUTO_BLOCK_MODE=block   # block | warn | disabled
 WATCHTOWER_AUTO_BLOCK_DURATION=60
 
 # Webhook notification on every block (optional — useful for n8n, Slack, WhatsApp)
@@ -185,18 +194,30 @@ Block on staging → staging protected instantly → master updated asynchronous
 
 ## 🤖 Auto-Block Rules
 
-Automatically block IPs based on log patterns. Disabled by default.
+Automatically block IPs based on log patterns. Disabled by default, and ships with an **empty `rules` array** — you opt in by defining rules yourself.
+
+> ⚠️ **Tune carefully or lock real users out.** An overly broad rule can block legitimate traffic across every environment. Start each new rule in `warn` mode (below), validate it against real traffic, then flip it to `block`.
 
 ```env
 WATCHTOWER_AUTO_BLOCK_ENABLED=true
+WATCHTOWER_AUTO_BLOCK_MODE=block   # block | warn | disabled (global default)
 WATCHTOWER_AUTO_BLOCK_DURATION=60  # minutes
 ```
+
+**Modes** (global default, overridable per rule):
+
+| Mode | Behaviour |
+|------|-----------|
+| `block` | Actually block matching IPs (production behaviour). |
+| `warn` | Match the rule and emit a structured `would_have_blocked: true` log entry on the configured log channel — but **do not** block. Use this to validate a rule against live traffic before trusting it. |
+| `disabled` | Skip the rule entirely. A per-rule kill switch without deleting the definition. |
 
 Define rules in `config/watchtower.php`:
 
 ```php
 'auto_block' => [
     'enabled'                => env('WATCHTOWER_AUTO_BLOCK_ENABLED', false),
+    'mode'                   => env('WATCHTOWER_AUTO_BLOCK_MODE', 'block'),
     'block_duration_minutes' => 60,
     'rules' => [
         // Block IPs that generate 50+ errors in 5 minutes
@@ -206,12 +227,13 @@ Define rules in `config/watchtower.php`:
             'count'            => 50,
             'window_minutes'   => 5,
         ],
-        // Block IPs that hit 404 more than 100 times in 10 minutes
+        // Same rule, but only warn while you tune it (per-rule mode override)
         [
             'level'            => 'warning',
             'message_contains' => '404',
             'count'            => 100,
             'window_minutes'   => 10,
+            'mode'             => 'warn',
         ],
     ],
 ],
@@ -233,10 +255,10 @@ Rules run every minute via the scheduler. Add the scheduler to your server if no
 # First-time setup (publish config + run migration)
 php artisan watchtower:install
 
-# Pull blacklist from master and rebuild local Redis cache
+# Pull blacklist from master and rebuild the local cache
 php artisan watchtower:sync
 
-# Delete expired temporary blocks and rebuild the Redis cache
+# Delete expired temporary blocks and rebuild the cache
 # Runs automatically every day — set WATCHTOWER_CLEANUP_ENABLED=false to manage manually
 # Permanent blocks (no expiry) are never touched
 php artisan watchtower:cleanup
@@ -250,7 +272,7 @@ php artisan watchtower:cleanup
 
 **HMAC signatures:** All sync requests are signed with `WATCHTOWER_SYNC_SECRET` using `hash_hmac('sha256', ...)`. Use a long, random secret and keep it identical across environments.
 
-**Redis TTL:** The blacklist Redis hash has a 24-hour TTL as a safety net. If Redis is flushed, the cache rebuilds from DB automatically on the next request boot.
+**Cache TTL:** Each per-IP cache entry carries a 24-hour TTL (configurable via `cache.ttl_hours`) as a safety net. The cache is explicitly rebuilt on every block/unblock and on `watchtower:sync`; if the store is flushed, it warms from the DB automatically on the next request boot.
 
 ---
 
