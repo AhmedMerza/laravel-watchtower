@@ -8,3 +8,11 @@ parameters:
         - config
         - database
     tmpDir: build/phpstan
+    ignoreErrors:
+        # `env()` is correct inside a package's own publishable config file.
+        # Larastan's "config directory" detection assumes an application
+        # layout and doesn't recognize a package config, so it false-positives
+        # here. Scoped to this one file so app-level misuse is still caught.
+        -
+            identifier: larastan.noEnvCallsOutsideOfConfig
+            path: config/watchtower.php

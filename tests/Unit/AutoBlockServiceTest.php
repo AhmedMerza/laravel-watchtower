@@ -3,8 +3,11 @@
 declare(strict_types=1);
 
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Queue;
+use Illuminate\Support\Str;
 use Watchtower\Enums\BlockSource;
 use Watchtower\Models\BlacklistedIp;
 use Watchtower\Services\AutoBlockService;
@@ -32,8 +35,8 @@ it('does nothing when auto-block is disabled', function () {
     config()->set('watchtower.auto_block.enabled', false);
 
     // Create a log entry that would normally trigger a block
-    \Illuminate\Support\Facades\DB::table('log_entries')->insert([
-        'id'          => \Illuminate\Support\Str::ulid(),
+    DB::table('log_entries')->insert([
+        'id'          => Str::ulid(),
         'level'       => 'error',
         'message'     => 'Something went wrong',
         'ip_address'  => '1.2.3.4',
@@ -71,8 +74,8 @@ it('blocks an IP that exceeds the rule threshold', function () {
     ]]);
 
     foreach (range(1, 3) as $i) {
-        \Illuminate\Support\Facades\DB::table('log_entries')->insert([
-            'id'          => \Illuminate\Support\Str::ulid(),
+        DB::table('log_entries')->insert([
+            'id'          => Str::ulid(),
             'level'       => 'error',
             'message'     => 'Error occurred',
             'ip_address'  => '5.5.5.5',
@@ -99,8 +102,8 @@ it('does not block an IP below the threshold', function () {
     ]]);
 
     foreach (range(1, 5) as $i) {
-        \Illuminate\Support\Facades\DB::table('log_entries')->insert([
-            'id'          => \Illuminate\Support\Str::ulid(),
+        DB::table('log_entries')->insert([
+            'id'          => Str::ulid(),
             'level'       => 'error',
             'message'     => 'Error occurred',
             'ip_address'  => '6.6.6.6',
@@ -125,8 +128,8 @@ it('matches message_contains filter correctly', function () {
 
     // This IP sends 404 messages — should be blocked
     foreach (range(1, 2) as $i) {
-        \Illuminate\Support\Facades\DB::table('log_entries')->insert([
-            'id'          => \Illuminate\Support\Str::ulid(),
+        DB::table('log_entries')->insert([
+            'id'          => Str::ulid(),
             'level'       => 'warning',
             'message'     => 'Route not found 404',
             'ip_address'  => '7.7.7.7',
@@ -138,8 +141,8 @@ it('matches message_contains filter correctly', function () {
 
     // This IP sends different messages — should not be blocked
     foreach (range(1, 2) as $i) {
-        \Illuminate\Support\Facades\DB::table('log_entries')->insert([
-            'id'          => \Illuminate\Support\Str::ulid(),
+        DB::table('log_entries')->insert([
+            'id'          => Str::ulid(),
             'level'       => 'warning',
             'message'     => 'Something else happened',
             'ip_address'  => '8.8.8.8',
@@ -164,8 +167,8 @@ it('skips IPs in the never-block whitelist', function () {
         'window_minutes'   => 5,
     ]]);
 
-    \Illuminate\Support\Facades\DB::table('log_entries')->insert([
-        'id'          => \Illuminate\Support\Str::ulid(),
+    DB::table('log_entries')->insert([
+        'id'          => Str::ulid(),
         'level'       => 'error',
         'message'     => 'Error',
         'ip_address'  => '9.9.9.9',
@@ -199,8 +202,8 @@ it('skips IPs that are already blocked', function () {
     // (BlacklistService::block dedupes via updateOrCreate).
     Cache::store('array')->put('watchtower:blacklist:ip:3.3.3.3', '', 3600);
 
-    \Illuminate\Support\Facades\DB::table('log_entries')->insert([
-        'id'          => \Illuminate\Support\Str::ulid(),
+    DB::table('log_entries')->insert([
+        'id'          => Str::ulid(),
         'level'       => 'error',
         'message'     => 'Error',
         'ip_address'  => '3.3.3.3',
@@ -223,8 +226,8 @@ it('ignores log entries outside the time window', function () {
         'window_minutes'   => 5,
     ]]);
 
-    \Illuminate\Support\Facades\DB::table('log_entries')->insert([
-        'id'          => \Illuminate\Support\Str::ulid(),
+    DB::table('log_entries')->insert([
+        'id'          => Str::ulid(),
         'level'       => 'error',
         'message'     => 'Old error',
         'ip_address'  => '4.4.4.4',
@@ -253,8 +256,8 @@ it('warn mode logs a would-have-blocked entry and does NOT block', function () {
     ]]);
 
     foreach (range(1, 2) as $i) {
-        \Illuminate\Support\Facades\DB::table('log_entries')->insert([
-            'id'          => \Illuminate\Support\Str::ulid(),
+        DB::table('log_entries')->insert([
+            'id'          => Str::ulid(),
             'level'       => 'error',
             'message'     => 'Boom',
             'ip_address'  => '11.11.11.11',
@@ -264,7 +267,7 @@ it('warn mode logs a would-have-blocked entry and does NOT block', function () {
         ]);
     }
 
-    $logChannel = \Mockery::mock();
+    $logChannel = Mockery::mock();
     $logChannel->shouldReceive('warning')
         ->once()
         ->withArgs(function (string $message, array $context): bool {
@@ -275,7 +278,7 @@ it('warn mode logs a would-have-blocked entry and does NOT block', function () {
                 && $context['window_minutes'] === 5
                 && is_int($context['rule_index']);
         });
-    \Illuminate\Support\Facades\Log::shouldReceive('channel')->andReturn($logChannel);
+    Log::shouldReceive('channel')->andReturn($logChannel);
 
     $this->service->run();
 
@@ -292,8 +295,8 @@ it('block mode (default) still blocks when no mode is configured anywhere', func
         'window_minutes'   => 5,
     ]]);
 
-    \Illuminate\Support\Facades\DB::table('log_entries')->insert([
-        'id'          => \Illuminate\Support\Str::ulid(),
+    DB::table('log_entries')->insert([
+        'id'          => Str::ulid(),
         'level'       => 'error',
         'message'     => 'Boom',
         'ip_address'  => '12.12.12.12',
@@ -317,8 +320,8 @@ it('per-rule mode overrides global mode (rule=block wins over global=warn)', fun
         'mode'             => 'block', // per-rule override
     ]]);
 
-    \Illuminate\Support\Facades\DB::table('log_entries')->insert([
-        'id'          => \Illuminate\Support\Str::ulid(),
+    DB::table('log_entries')->insert([
+        'id'          => Str::ulid(),
         'level'       => 'error',
         'message'     => 'Boom',
         'ip_address'  => '13.13.13.13',
@@ -342,8 +345,8 @@ it('per-rule mode overrides global mode (rule=warn wins over global=block)', fun
         'mode'             => 'warn', // per-rule override
     ]]);
 
-    \Illuminate\Support\Facades\DB::table('log_entries')->insert([
-        'id'          => \Illuminate\Support\Str::ulid(),
+    DB::table('log_entries')->insert([
+        'id'          => Str::ulid(),
         'level'       => 'error',
         'message'     => 'Boom',
         'ip_address'  => '14.14.14.14',
@@ -353,9 +356,9 @@ it('per-rule mode overrides global mode (rule=warn wins over global=block)', fun
     ]);
 
     // Mock the log channel so we don't need real logging infra
-    $logChannel = \Mockery::mock();
+    $logChannel = Mockery::mock();
     $logChannel->shouldReceive('warning')->once();
-    \Illuminate\Support\Facades\Log::shouldReceive('channel')->andReturn($logChannel);
+    Log::shouldReceive('channel')->andReturn($logChannel);
 
     $this->service->run();
 
@@ -371,8 +374,8 @@ it('disabled mode skips the rule entirely (no block, no warn log)', function () 
         'mode'             => 'disabled',
     ]]);
 
-    \Illuminate\Support\Facades\DB::table('log_entries')->insert([
-        'id'          => \Illuminate\Support\Str::ulid(),
+    DB::table('log_entries')->insert([
+        'id'          => Str::ulid(),
         'level'       => 'error',
         'message'     => 'Boom',
         'ip_address'  => '15.15.15.15',
@@ -386,12 +389,12 @@ it('disabled mode skips the rule entirely (no block, no warn log)', function () 
     // disabled-mode path still ran applyRule() and emitted warns. Allow other
     // log methods so unrelated code paths (debug, etc.) don't false-positive
     // this assertion if anything else happens to resolve a channel.
-    $logChannel = \Mockery::mock();
+    $logChannel = Mockery::mock();
     $logChannel->shouldNotReceive('warning');
     $logChannel->shouldReceive('debug')->zeroOrMoreTimes();
     $logChannel->shouldReceive('info')->zeroOrMoreTimes();
     $logChannel->shouldReceive('error')->zeroOrMoreTimes();
-    \Illuminate\Support\Facades\Log::shouldReceive('channel')->andReturn($logChannel);
+    Log::shouldReceive('channel')->andReturn($logChannel);
 
     $this->service->run();
 
@@ -407,8 +410,8 @@ it('invalid global mode value falls back to block', function () {
         'window_minutes'   => 5,
     ]]);
 
-    \Illuminate\Support\Facades\DB::table('log_entries')->insert([
-        'id'          => \Illuminate\Support\Str::ulid(),
+    DB::table('log_entries')->insert([
+        'id'          => Str::ulid(),
         'level'       => 'error',
         'message'     => 'Boom',
         'ip_address'  => '16.16.16.16',

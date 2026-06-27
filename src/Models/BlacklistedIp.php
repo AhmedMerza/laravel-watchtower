@@ -7,8 +7,21 @@ namespace Watchtower\Models;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Concerns\HasUlids;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Carbon;
 use Watchtower\Enums\BlockSource;
 
+/**
+ * @property string $id
+ * @property string $ip
+ * @property string|null $reason
+ * @property string|null $source_env
+ * @property BlockSource $source
+ * @property Carbon|null $expires_at
+ * @property string|null $blocked_by
+ * @property string|null $log_entry_id
+ * @property Carbon|null $created_at
+ * @property Carbon|null $updated_at
+ */
 class BlacklistedIp extends Model
 {
     use HasUlids;

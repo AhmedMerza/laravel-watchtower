@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
-use Watchtower\Models\BlacklistedIp;
 
 beforeEach(function () {
     config()->set('cache.default', 'array');

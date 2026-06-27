@@ -61,6 +61,7 @@ class SyncCommand extends Command
 
                 if ($existing && $existing->source !== BlockSource::Sync) {
                     $skipped++;
+
                     continue;
                 }
 

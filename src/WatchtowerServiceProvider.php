@@ -8,6 +8,8 @@ use Illuminate\Contracts\Http\Kernel;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Route;
 use Illuminate\Support\Facades\Schedule;
+use Spatie\LaravelPackageTools\Package;
+use Spatie\LaravelPackageTools\PackageServiceProvider;
 use Watchtower\Console\Commands\CleanupCommand;
 use Watchtower\Console\Commands\InstallCommand;
 use Watchtower\Console\Commands\SyncCommand;
@@ -18,8 +20,6 @@ use Watchtower\Listeners\NotifyOnBlock;
 use Watchtower\Services\AutoBlockService;
 use Watchtower\Services\BlacklistCache;
 use Watchtower\Services\BlacklistService;
-use Spatie\LaravelPackageTools\Package;
-use Spatie\LaravelPackageTools\PackageServiceProvider;
 
 class WatchtowerServiceProvider extends PackageServiceProvider
 {
