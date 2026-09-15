@@ -1,5 +1,5 @@
 {
-    "name": "ahmedmerza/laravel-watchtower",
+    "name": "ahmedmerza/watchtower",
     "description": "Active blocking and cross-server coordination at the edge of your Laravel app — IPs (with bots and exploit paths in v1.0).",
     "keywords": [
         "laravel",
