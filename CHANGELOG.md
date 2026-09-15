@@ -4,6 +4,11 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Blocks were ignored behind a load balancer or reverse proxy.** The blocking middleware was prepended to the global stack, ahead of `TrustProxies`, so `$request->ip()` returned the proxy's address and never matched a blocked client IP. It is now inserted directly after `TrustProxies` (or an app subclass of it), still ahead of sessions, auth and routing. If `TrustProxies` isn't in the global stack, it still goes first. ([#14](https://github.com/AhmedMerza/laravel-watchtower/issues/14))
+- **A cache outage no longer makes every request return 500.** If the blocklist lookup throws (Redis down, a mistyped `WATCHTOWER_CACHE_STORE`), the request is let through unchecked and the failure is logged at `error` on `watchtower.log_channel`, at most once a minute across all workers. ([#13](https://github.com/AhmedMerza/laravel-watchtower/issues/13))
+
 ### Changed
 
 - **Minimum Laravel version raised to 11.0** (`illuminate/* >=11.0`). The service provider uses the `Illuminate\Support\Facades\Schedule` facade, which only exists from Laravel 11 — the previous `>=10.0` constraint never actually worked on Laravel 10. Laravel 10 is also past its security-support window. Surfaced by a new `prefer-lowest` CI job.

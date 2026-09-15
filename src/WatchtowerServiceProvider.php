@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Watchtower;
 
 use Illuminate\Contracts\Http\Kernel;
+use Illuminate\Http\Middleware\TrustProxies;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Route;
 use Illuminate\Support\Facades\Schedule;
@@ -47,8 +48,7 @@ class WatchtowerServiceProvider extends PackageServiceProvider
             return;
         }
 
-        // Must run before sessions, auth, and LogScope's CaptureRequestContext
-        $this->app->make(Kernel::class)->prependMiddleware(BlockedIpMiddleware::class);
+        $this->registerMiddleware();
 
         // Warm Redis from DB on boot if the key is missing (e.g. after Redis flush)
         $this->app->booted(function () {
@@ -72,6 +72,27 @@ class WatchtowerServiceProvider extends PackageServiceProvider
                 ->name('watchtower:cleanup')
                 ->withoutOverlapping();
         }
+    }
+
+    /**
+     * Place the middleware directly after TrustProxies. Earlier, `$request->ip()`
+     * is the load balancer's address rather than the client's, so blocks never
+     * match; any later and sessions, auth and routing run for blocked IPs.
+     * Without TrustProxies in the global stack, it goes first.
+     */
+    protected function registerMiddleware(): void
+    {
+        $kernel = $this->app->make(Kernel::class);
+        $middleware = $kernel->getGlobalMiddleware();
+
+        // is_a() also matches an app's own subclass, e.g. App\Http\Middleware\TrustProxies
+        $trustProxies = collect($middleware)->search(
+            fn ($class) => is_string($class) && is_a($class, TrustProxies::class, true)
+        );
+
+        array_splice($middleware, $trustProxies === false ? 0 : $trustProxies + 1, 0, [BlockedIpMiddleware::class]);
+
+        $kernel->setGlobalMiddleware($middleware);
     }
 
     protected function registerRoutes(): void

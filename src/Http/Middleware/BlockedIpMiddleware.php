@@ -6,11 +6,14 @@ namespace Watchtower\Http\Middleware;
 
 use Closure;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Log;
 use Symfony\Component\HttpFoundation\Response;
 use Watchtower\Services\BlacklistCache;
 
 class BlockedIpMiddleware
 {
+    private const FAILURE_LOG_INTERVAL = 60;
+
     public function __construct(private readonly BlacklistCache $cache) {}
 
     public function handle(Request $request, Closure $next): Response
@@ -32,7 +35,16 @@ class BlockedIpMiddleware
             return $next($request);
         }
 
-        if ($this->cache->isBlocked($normalized)) {
+        try {
+            $blocked = $this->cache->isBlocked($normalized);
+        } catch (\Throwable $e) {
+            // Fail open: a cache outage must not turn every request into a 500.
+            $this->reportCacheFailure($e);
+
+            return $next($request);
+        }
+
+        if ($blocked) {
             $blockConfig = config('watchtower.block_response');
 
             if ($blockConfig['redirect']) {
@@ -43,6 +55,34 @@ class BlockedIpMiddleware
         }
 
         return $next($request);
+    }
+
+    /**
+     * Log the failure at most once per window. A static wouldn't hold the
+     * window under PHP-FPM, where statics reset every request, so the marker
+     * file's mtime carries it across workers instead.
+     */
+    private function reportCacheFailure(\Throwable $e): void
+    {
+        $marker = storage_path('framework/watchtower-cache-failure');
+
+        clearstatcache(true, $marker);
+        $lastLoggedAt = @filemtime($marker);
+
+        if ($lastLoggedAt !== false && time() - $lastLoggedAt < self::FAILURE_LOG_INTERVAL) {
+            return;
+        }
+
+        @touch($marker);
+
+        try {
+            Log::channel(config('watchtower.log_channel', 'stack'))
+                ->error('Watchtower: blocklist cache lookup failed, letting requests through unchecked', [
+                    'error' => $e->getMessage(),
+                ]);
+        } catch (\Throwable) {
+            // A broken log channel must not undo the fail-open.
+        }
     }
 
     private function normalizeIp(string $ip): string
