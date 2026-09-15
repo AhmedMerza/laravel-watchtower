@@ -19,12 +19,12 @@
 > ]
 > ```
 >
-> then run `composer require ahmedmerza/laravel-watchtower:dev-main`. The commands below assume the package is installed.
+> then run `composer require ahmedmerza/watchtower:dev-main`. The commands below assume the package is installed.
 
 **With LogScope:**
 
 ```bash
-composer require ahmedmerza/laravel-watchtower
+composer require ahmedmerza/watchtower
 php artisan watchtower:install
 ```
 
@@ -33,7 +33,7 @@ A **Block IP** button now appears in your LogScope detail panel whenever a log e
 <a id="standalone-no-logscope"></a>**Standalone (no LogScope):**
 
 ```bash
-composer require ahmedmerza/laravel-watchtower
+composer require ahmedmerza/watchtower
 php artisan watchtower:install
 ```
 
@@ -83,7 +83,7 @@ Every incoming request is checked against Laravel's cache (Redis, Memcached, fil
 ## 📦 Installation
 
 ```bash
-composer require ahmedmerza/laravel-watchtower
+composer require ahmedmerza/watchtower
 php artisan watchtower:install
 ```
 

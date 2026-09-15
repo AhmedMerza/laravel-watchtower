@@ -15,7 +15,7 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 ### Changed (BREAKING — single rename release)
 
-- **Package renamed: `ahmedmerza/logscope-guard` → `ahmedmerza/laravel-watchtower`.** Reflects the strategic pivot away from "LogScope addon" toward "standalone Laravel app-edge blocker, with optional LogScope integration."
+- **Package renamed: `ahmedmerza/logscope-guard` → `ahmedmerza/watchtower`.** Reflects the strategic pivot away from "LogScope addon" toward "standalone Laravel app-edge blocker, with optional LogScope integration."
 - **Namespace renamed: `LogScopeGuard\` → `Watchtower\`.** All `use LogScopeGuard\…` imports must be updated.
 - **Service provider renamed: `LogScopeGuardServiceProvider` → `WatchtowerServiceProvider`.**
 - **Config file renamed: `config/logscope-guard.php` → `config/watchtower.php`.** Re-run `php artisan vendor:publish --tag="watchtower-config" --force` if you've published a customized version.
@@ -32,6 +32,6 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 ### Notes for migration
 
-- The transitional meta-package `ahmedmerza/logscope-guard` will be published as a thin wrapper that just `require`s `ahmedmerza/laravel-watchtower` for one release, then deprecated. Existing users can upgrade in two steps if needed: first to the meta-package release, then to the new name directly.
+- The transitional meta-package `ahmedmerza/logscope-guard` will be published as a thin wrapper that just `require`s `ahmedmerza/watchtower` for one release, then deprecated. Existing users can upgrade in two steps if needed: first to the meta-package release, then to the new name directly.
 
 
