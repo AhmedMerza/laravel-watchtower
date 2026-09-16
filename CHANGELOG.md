@@ -8,6 +8,7 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 - **Blocks were ignored behind a load balancer or reverse proxy.** The blocking middleware was prepended to the global stack, ahead of `TrustProxies`, so `$request->ip()` returned the proxy's address and never matched a blocked client IP. It is now inserted directly after `TrustProxies` (or an app subclass of it), still ahead of sessions, auth and routing. If `TrustProxies` isn't in the global stack, it still goes first. ([#14](https://github.com/AhmedMerza/laravel-watchtower/issues/14))
 - **A cache outage no longer makes every request return 500.** If the blocklist lookup throws (Redis down, a mistyped `WATCHTOWER_CACHE_STORE`), the request is let through unchecked and the failure is logged at `error` on `watchtower.log_channel`, at most once a minute across all workers. ([#13](https://github.com/AhmedMerza/laravel-watchtower/issues/13))
+- **A cache or DB outage no longer floods the log from the boot-time cache warm-up.** `warmOnBoot()` runs on every request, and each failure wrote its own `warning` — so an outage produced a log line per request regardless of the throttle above. A failed warm-up now stands down for a minute, which also drops the repeated doomed round-trip to the dead backend. ([#13](https://github.com/AhmedMerza/laravel-watchtower/issues/13))
 
 ### Changed
 

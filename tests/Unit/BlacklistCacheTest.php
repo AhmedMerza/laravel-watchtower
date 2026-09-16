@@ -212,6 +212,47 @@ it('warmOnBoot does not throw when the cache backend is unavailable', function (
     expect(true)->toBeTrue(); // reaching this line = success
 });
 
+it('warns once per window, not once per request, while the cache is down', function () {
+    // warmOnBoot runs on every request via the provider's booted callback.
+    // Before the failure window it logged a warning every time, so a Redis
+    // outage on a busy app filled the disk with one line per request.
+    config()->set('watchtower.cache.store', 'this-store-does-not-exist');
+    $this->cache = new BlacklistCache;
+
+    Log::shouldReceive('channel')->andReturnSelf();
+    Log::shouldReceive('warning')->once();
+
+    $this->cache->warmOnBoot();
+    $this->cache->warmOnBoot();
+    $this->cache->warmOnBoot();
+});
+
+it('warns again once the failure window has passed', function () {
+    config()->set('watchtower.cache.store', 'this-store-does-not-exist');
+    $this->cache = new BlacklistCache;
+
+    Log::shouldReceive('channel')->andReturnSelf();
+    Log::shouldReceive('warning')->twice();
+
+    $this->cache->warmOnBoot();
+
+    touch(storage_path('framework/watchtower-warm-failure'), time() - 61);
+
+    $this->cache->warmOnBoot();
+});
+
+it('stands the warm-up down when the DB read fails, not just the cache', function () {
+    // Cache reachable but empty, DB gone: rebuild() logs and swallows, so
+    // without asking it for a verdict warmOnBoot would retry every request.
+    Schema::drop('blacklisted_ips');
+
+    Log::shouldReceive('channel')->andReturnSelf();
+    Log::shouldReceive('warning')->once();
+
+    $this->cache->warmOnBoot();
+    $this->cache->warmOnBoot();
+});
+
 it('respects a custom cache key prefix from config', function () {
     config()->set('watchtower.cache.key', 'custom:prefix');
     $this->cache = new BlacklistCache;

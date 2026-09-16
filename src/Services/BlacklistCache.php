@@ -9,6 +9,7 @@ use Illuminate\Contracts\Cache\Repository;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 use Watchtower\Models\BlacklistedIp;
+use Watchtower\Support\FailureWindow;
 
 /**
  * Stores the active blacklist in Laravel's cache so the request-path
@@ -171,8 +172,10 @@ class BlacklistCache
      * prefix — adds an extra cache `get` to the request path. Revisit if
      * real-world reports show stale-entry issues; the migration path is
      * a versioned-prefix scheme that orphans old keys naturally via TTL.
+     *
+     * @return bool false if the DB read failed and the cache was left as-is.
      */
-    public function rebuild(): void
+    public function rebuild(): bool
     {
         try {
             $blocks = BlacklistedIp::active()->get(['ip', 'expires_at']);
@@ -182,7 +185,7 @@ class BlacklistCache
                     'error' => $e->getMessage(),
                 ]);
 
-            return;
+            return false;
         }
 
         $cache = $this->cache();
@@ -197,7 +200,7 @@ class BlacklistCache
         if ($blocks->isEmpty()) {
             $cache->forget($this->indexKey);
 
-            return;
+            return true;
         }
 
         $newIndex = [];
@@ -211,6 +214,8 @@ class BlacklistCache
         }
 
         $cache->put($this->indexKey, $newIndex, $this->ttlSeconds);
+
+        return true;
     }
 
     /**
@@ -225,16 +230,30 @@ class BlacklistCache
      * limiting. In all of those, we'd rather skip the warm-up and let the
      * first block/unblock trigger a rebuild than crash the whole app.
      * The failure surfaces via the configured log channel.
+     *
+     * This runs on every request (the service provider's `booted` callback),
+     * so a failure stands the warm-up down for a minute. Otherwise an outage
+     * repeats the same doomed round-trip and writes a warning on every
+     * single request, which fills the disk while the cache is already down.
      */
     public function warmOnBoot(): void
     {
+        if (FailureWindow::isOpen('warm')) {
+            return;
+        }
+
         try {
             if ($this->cache()->has($this->indexKey)) {
                 return;
             }
 
-            $this->rebuild();
+            // rebuild() logs and swallows its own DB failure, so ask it.
+            if (! $this->rebuild()) {
+                FailureWindow::open('warm');
+            }
         } catch (\Throwable $e) {
+            FailureWindow::open('warm');
+
             Log::channel(config('watchtower.log_channel', 'stack'))
                 ->warning('Watchtower: warmOnBoot failed, skipping cache warm-up', [
                     'error' => $e->getMessage(),

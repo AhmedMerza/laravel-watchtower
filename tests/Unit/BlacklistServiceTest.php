@@ -13,7 +13,7 @@ use Watchtower\Services\BlacklistService;
 
 beforeEach(function () {
     $this->cache = Mockery::mock(BlacklistCache::class);
-    $this->cache->shouldReceive('rebuild')->andReturn(null)->byDefault();
+    $this->cache->shouldReceive('rebuild')->andReturn(true)->byDefault();
     $this->cache->shouldReceive('warmOnBoot')->andReturn(null)->byDefault();
 
     $this->service = new BlacklistService($this->cache);

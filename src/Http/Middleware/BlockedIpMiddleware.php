@@ -9,11 +9,10 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 use Symfony\Component\HttpFoundation\Response;
 use Watchtower\Services\BlacklistCache;
+use Watchtower\Support\FailureWindow;
 
 class BlockedIpMiddleware
 {
-    private const FAILURE_LOG_INTERVAL = 60;
-
     public function __construct(private readonly BlacklistCache $cache) {}
 
     public function handle(Request $request, Closure $next): Response
@@ -58,22 +57,16 @@ class BlockedIpMiddleware
     }
 
     /**
-     * Log the failure at most once per window. A static wouldn't hold the
-     * window under PHP-FPM, where statics reset every request, so the marker
-     * file's mtime carries it across workers instead.
+     * Log the failure at most once per window — every request hits this
+     * during an outage, and a log line per request fills the disk.
      */
     private function reportCacheFailure(\Throwable $e): void
     {
-        $marker = storage_path('framework/watchtower-cache-failure');
-
-        clearstatcache(true, $marker);
-        $lastLoggedAt = @filemtime($marker);
-
-        if ($lastLoggedAt !== false && time() - $lastLoggedAt < self::FAILURE_LOG_INTERVAL) {
+        if (FailureWindow::isOpen('cache')) {
             return;
         }
 
-        @touch($marker);
+        FailureWindow::open('cache');
 
         try {
             Log::channel(config('watchtower.log_channel', 'stack'))
