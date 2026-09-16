@@ -162,15 +162,20 @@ class WatchtowerServiceProvider extends PackageServiceProvider
             $middleware = (array) config('watchtower.routes.middleware', ['web']);
         }
 
+        // Named so the UI can build its URLs with route() instead of guessing
+        // the prefix. The prefix is config-driven and has changed once already
+        // (the guard → watchtower rename), which silently 404'd the Block IP
+        // button for a whole release.
         Route::group([
             'prefix'     => $prefix,
             'middleware' => $middleware,
             'domain'     => $domain,
+            'as'         => 'watchtower.api.',
         ], function () {
-            Route::post('/api/block', [BlockController::class, 'block']);
-            Route::delete('/api/block/{ip}', [BlockController::class, 'unblock'])->where('ip', '.*');
-            Route::get('/api/status/{ip}', [BlockController::class, 'status'])->where('ip', '.*');
-            Route::get('/api/blocks', [BlockController::class, 'index']);
+            Route::post('/api/block', [BlockController::class, 'block'])->name('block');
+            Route::delete('/api/block/{ip}', [BlockController::class, 'unblock'])->where('ip', '.*')->name('unblock');
+            Route::get('/api/status/{ip}', [BlockController::class, 'status'])->where('ip', '.*')->name('status');
+            Route::get('/api/blocks', [BlockController::class, 'index'])->name('blocks');
         });
     }
 }

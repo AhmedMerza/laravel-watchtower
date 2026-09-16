@@ -1,10 +1,24 @@
 {{--
     Watchtower — IP Actions partial
     Included via @includeIf('watchtower::partials.ip-actions') in detail-panel.blade.php.
-    Renders nothing if Watchtower is not enabled.
+    Renders nothing if Watchtower is disabled or its API routes aren't registered.
 --}}
-@if(config('watchtower.enabled', false))
-<div x-data="guardIpActions()"
+@php
+    // Built from the registered route names, not by rewriting LogScope's API
+    // base: the mount prefix is config-driven and changed once already, which
+    // left the button posting to a path that no longer existed. Relative URLs,
+    // so a stale APP_URL can't aim the fetch at another host. `__IP__` is a
+    // placeholder the client substitutes per selected log.
+    $watchtowerUrls = \Illuminate\Support\Facades\Route::has('watchtower.api.block')
+        ? [
+            'block'   => route('watchtower.api.block', absolute: false),
+            'unblock' => route('watchtower.api.unblock', ['ip' => '__IP__'], absolute: false),
+            'status'  => route('watchtower.api.status', ['ip' => '__IP__'], absolute: false),
+        ]
+        : null;
+@endphp
+@if(config('watchtower.enabled', false) && $watchtowerUrls)
+<div x-data="watchtowerIpActions(@js($watchtowerUrls))"
      x-init="init()"
      @logscope:log-selected.window="onLogSelected($event.detail.log)">
 
@@ -65,8 +79,9 @@
 </div>
 
 <script>
-function guardIpActions() {
+function watchtowerIpActions(urls) {
     return {
+        urls,
         currentIp: null,
         blockStatus: null,  // null=loading, 'blocked', 'unblocked'
         blockedSince: null,
@@ -86,14 +101,14 @@ function guardIpActions() {
             }
         },
 
-        guardApiBase() {
-            const base = window.logScopeConfig?.routes?.apiBase ?? '/logscope/api';
-            return base.replace(/\/api$/, '/guard/api');
+        // The server hands us the routes; only the IP is filled in here.
+        urlFor(name, ip) {
+            return this.urls[name].replace('__IP__', encodeURIComponent(ip));
         },
 
         async checkStatus() {
             try {
-                const res = await fetch(`${this.guardApiBase()}/status/${encodeURIComponent(this.currentIp)}`, {
+                const res = await fetch(this.urlFor('status', this.currentIp), {
                     headers: { Accept: 'application/json' }
                 });
                 if (!res.ok) { this.blockStatus = 'unblocked'; return; }
@@ -111,7 +126,7 @@ function guardIpActions() {
             if (!this.currentIp || this.loading) return;
             this.loading = true;
             try {
-                const res = await fetch(`${this.guardApiBase()}/block`, {
+                const res = await fetch(this.urls.block, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
@@ -134,7 +149,7 @@ function guardIpActions() {
             if (!this.currentIp || this.loading) return;
             this.loading = true;
             try {
-                const res = await fetch(`${this.guardApiBase()}/block/${encodeURIComponent(this.currentIp)}`, {
+                const res = await fetch(this.urlFor('unblock', this.currentIp), {
                     method: 'DELETE',
                     headers: {
                         Accept: 'application/json',

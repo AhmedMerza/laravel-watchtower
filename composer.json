@@ -27,7 +27,7 @@
         "illuminate/http": ">=11.0"
     },
     "require-dev": {
-        "ahmedmerza/logscope": ">=1.5.2",
+        "ahmedmerza/logscope": ">=1.6.1",
         "laravel/pint": "^1.14",
         "nunomaduro/collision": "^8.0",
         "larastan/larastan": "^2.0|^3.0",
@@ -38,7 +38,7 @@
         "phpstan/phpstan-deprecation-rules": "^1.0|^2.0"
     },
     "suggest": {
-        "ahmedmerza/logscope": "If installed, Watchtower adds a Block-IP button to the LogScope log detail panel and mounts its management routes under LogScope's prefix with LogScope's authorization. Requires >=1.5.2. Watchtower is fully functional without it."
+        "ahmedmerza/logscope": "If installed, Watchtower adds a Block-IP button to the LogScope log detail panel and mounts its management routes under LogScope's prefix with LogScope's authorization. Requires >=1.6.1 — earlier versions include the pre-rename `logscope-guard::` partial, which this package no longer registers, so the button never renders. Watchtower is fully functional without it."
     },
     "autoload": {
         "psr-4": {

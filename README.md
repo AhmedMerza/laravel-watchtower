@@ -76,7 +76,7 @@ Every incoming request is checked against Laravel's cache (Redis, Memcached, fil
 - PHP 8.2+
 - Laravel 11+
 - A configured Laravel cache store (any driver — redis, memcached, file, database, array). Redis is recommended for production.
-- [ahmedmerza/logscope](https://github.com/AhmedMerza/laravel-logscope) >= 1.5.2 *(optional — only needed if you want the in-detail-panel Block-IP button)*
+- [ahmedmerza/logscope](https://github.com/AhmedMerza/laravel-logscope) >= 1.6.1 *(optional — only needed if you want the in-detail-panel Block-IP button)*. LogScope only started including this package's `watchtower::` partial in 1.6.1; 1.5.2–1.6.0 include the pre-rename `logscope-guard::` one, so the button never renders on those.
 
 ---
 
