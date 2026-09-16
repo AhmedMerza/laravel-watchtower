@@ -32,13 +32,6 @@ use Watchtower\Support\FailureWindow;
  */
 class BlacklistCache
 {
-    /**
-     * Set to true after the deprecation warning for `cache.connection` has
-     * been emitted, so we surface it once per process rather than every
-     * time the service is resolved (and especially not once per request).
-     */
-    private static bool $deprecationWarningEmitted = false;
-
     private string $keyPrefix;
 
     private string $indexKey;
@@ -54,54 +47,6 @@ class BlacklistCache
         $this->indexKey = $this->keyPrefix.':_index';
         $this->ttlSeconds = (int) ($config['ttl_hours'] ?? 24) * 3600;
         $this->store = $config['store'] ?? null;
-
-        $this->warnIfDeprecatedConnectionConfigSet($config);
-    }
-
-    /**
-     * Emit a one-shot deprecation warning if the user still has a value in
-     * `watchtower.cache.connection` (or the env var that feeds it). The
-     * pre-rename code passed that value directly to `Redis::connection(...)`;
-     * the post-rename code defers to Laravel's cache config and ignores it.
-     * Without this warning, users who relied on a separate Redis connection
-     * via `WATCHTOWER_REDIS_CONNECTION` would silently lose isolation and
-     * only find out via traffic anomalies.
-     */
-    private function warnIfDeprecatedConnectionConfigSet(array $config): void
-    {
-        if (self::$deprecationWarningEmitted) {
-            return;
-        }
-
-        $connection = $config['connection'] ?? null;
-
-        if ($connection === null || $connection === '') {
-            return;
-        }
-
-        self::$deprecationWarningEmitted = true;
-
-        try {
-            Log::channel(config('watchtower.log_channel', 'stack'))
-                ->warning('Watchtower: `watchtower.cache.connection` (env: WATCHTOWER_REDIS_CONNECTION / GUARD_REDIS_CONNECTION) is deprecated and now ignored. The package defers to Laravel\'s cache config. To isolate Watchtower on a specific Redis connection, define a custom cache store in config/cache.php and set WATCHTOWER_CACHE_STORE to its name.', [
-                    'configured_connection' => $connection,
-                ]);
-        } catch (\Throwable) {
-            // Log channel resolution failure must not break service construction.
-            // The warning is best-effort; users can still discover the change
-            // via the CHANGELOG and config docblock.
-        }
-    }
-
-    /**
-     * Reset the static deprecation-warning flag. Test-only — lets each test
-     * exercise the warning path independently.
-     *
-     * @internal
-     */
-    public static function resetDeprecationWarningFlag(): void
-    {
-        self::$deprecationWarningEmitted = false;
     }
 
     /**
