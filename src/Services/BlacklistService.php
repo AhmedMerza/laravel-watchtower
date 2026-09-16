@@ -15,8 +15,12 @@ class BlacklistService
 
     /**
      * Block an IP. Normalizes the IP, enforces the never-block whitelist,
-     * writes to DB, rebuilds Redis, fires the IpBlocked event, and
+     * writes to DB, rebuilds the cache, fires the IpBlocked event, and
      * dispatches a push job to the master environment (if configured).
+     *
+     * If the rebuild can't read the DB, this IP's entry is written directly,
+     * since the middleware only reads the cache and would otherwise let the
+     * IP through while every caller is told it was blocked.
      *
      * @throws \RuntimeException when the IP is in the never-block whitelist
      */
@@ -40,7 +44,9 @@ class BlacklistService
             ]
         );
 
-        $this->cache->rebuild();
+        if (! $this->cache->rebuild()) {
+            $this->cache->put($record);
+        }
 
         event(new IpBlocked($record));
 
@@ -53,12 +59,17 @@ class BlacklistService
     }
 
     /**
-     * Unblock an IP. Removes the DB record and rebuilds Redis.
+     * Unblock an IP. Removes the DB record and rebuilds the cache.
+     *
+     * The IP's own entry is forgotten even when the rebuild succeeds: an
+     * entry block() wrote after a failed rebuild isn't in the index, so no
+     * rebuild will ever forget it.
      */
     public function unblock(string $ip): bool
     {
         $ip = $this->normalizeIp($ip);
         $deleted = BlacklistedIp::where('ip', $ip)->delete();
+        $this->cache->forget($ip);
         $this->cache->rebuild();
 
         return $deleted > 0;
