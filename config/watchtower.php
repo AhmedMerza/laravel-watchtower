@@ -196,11 +196,22 @@ return [
     | Run on a schedule on satellite environments (e.g. every 5 minutes):
     |   $schedule->command('watchtower:sync')->everyFiveMinutes();
     |
+    | 'secret' does double duty. Satellites sign with it; on the master it is
+    | also what registers the sync routes and authenticates callers. Set the
+    | same long random value on every environment, and treat it like a
+    | password: anyone holding it can block any IP everywhere.
+    |
+    | 'timestamp_tolerance' - how far a request's signed timestamp may sit
+    |                from the master's clock, in seconds. Bounds the window in
+    |                which a captured request can be replayed, so keep it
+    |                short; raise it only if your environments' clocks drift.
+    |
     */
 
     'sync' => [
-        'master_url' => env('WATCHTOWER_MASTER_URL', env('GUARD_MASTER_URL')),
-        'secret'     => env('WATCHTOWER_SYNC_SECRET', env('GUARD_SYNC_SECRET')),
+        'master_url'          => env('WATCHTOWER_MASTER_URL', env('GUARD_MASTER_URL')),
+        'secret'              => env('WATCHTOWER_SYNC_SECRET', env('GUARD_SYNC_SECRET')),
+        'timestamp_tolerance' => (int) env('WATCHTOWER_SYNC_TOLERANCE', 300),
     ],
 
     /*

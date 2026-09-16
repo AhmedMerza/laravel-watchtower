@@ -16,7 +16,7 @@ beforeEach(function () {
 
 it('syncs IPs from master and upserts them locally', function () {
     Http::fake([
-        'master.example.com/watchtower/api/blacklist' => Http::response([
+        'master.example.com/watchtower/sync/blocks' => Http::response([
             'data' => [
                 ['ip' => '1.2.3.4', 'reason' => 'synced', 'source_env' => 'production', 'expires_at' => null, 'blocked_by' => null, 'log_entry_id' => null],
                 ['ip' => '5.6.7.8', 'reason' => null, 'source_env' => 'production', 'expires_at' => null, 'blocked_by' => null, 'log_entry_id' => null],
@@ -34,7 +34,7 @@ it('syncs IPs from master and upserts them locally', function () {
 
 it('fails gracefully when master returns an error', function () {
     Http::fake([
-        'master.example.com/watchtower/api/blacklist' => Http::response([], 500),
+        'master.example.com/watchtower/sync/blocks' => Http::response([], 500),
     ]);
 
     $this->artisan('watchtower:sync')
@@ -52,7 +52,7 @@ it('fails gracefully when master URL is not configured', function () {
 
 it('does not duplicate records on repeated syncs', function () {
     Http::fake([
-        'master.example.com/watchtower/api/blacklist' => Http::response([
+        'master.example.com/watchtower/sync/blocks' => Http::response([
             'data' => [
                 ['ip' => '1.2.3.4', 'reason' => 'initial', 'source_env' => 'production', 'expires_at' => null, 'blocked_by' => null, 'log_entry_id' => null],
             ],

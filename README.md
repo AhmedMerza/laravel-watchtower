@@ -164,22 +164,20 @@ WATCHTOWER_MASTER_URL=https://your-production-app.com
 WATCHTOWER_SYNC_SECRET=same-secret-on-all-environments
 ```
 
-**On the master app**, expose two routes that satellites call. Path and HMAC header names must match what the satellites send (see `SyncCommand` and `PushBlockToMaster` for the exact wire format):
+That's the whole master setup. Watchtower registers the two routes satellites
+call — `GET /watchtower/sync/blocks` and `POST /watchtower/sync/block` — as soon
+as `WATCHTOWER_SYNC_SECRET` is set, and authenticates them with the shared
+secret. Nothing to hand-write, and nothing is exposed on an environment that
+has no secret.
 
-```php
-// routes/web.php (or api.php) — protect with HMAC middleware
-Route::get('/watchtower/api/blacklist', fn () => response()->json([
-    'data' => \Watchtower\Models\BlacklistedIp::active()->get(),
-]));
+The paths are fixed, not affected by `WATCHTOWER_ROUTE_PREFIX`: the satellite
+signs the path it calls, so both ends have to agree on it. They're also outside
+the `web` middleware group — no session, no CSRF — because they're
+machine-to-machine.
 
-Route::post('/watchtower/api/block', function (Request $request) {
-    app(\Watchtower\Services\BlacklistService::class)->block(
-        $request->input('ip'),
-        $request->only(['reason', 'source_env', 'expires_at', 'blocked_by'])
-    );
-    return response()->json(['ok' => true]);
-});
-```
+> ⚠️ **The secret is a credential.** Anyone holding it can block any IP on every
+> environment at once. Use a long random value, keep it out of version control,
+> and rotate it on all environments together.
 
 **On satellites**, schedule the sync command:
 
@@ -281,7 +279,7 @@ php artisan watchtower:cleanup
 
 **Cache outages fail open:** if the cache store throws during the lookup, the request is let through unchecked rather than returning a 500. The failure is logged on `watchtower.log_channel` roughly once a minute, and the boot-time cache warm-up stands down for the same window, so an outage can't fill the disk with one log line per request. The throttle window is kept in marker files under `storage/framework/`; on a read-only filesystem it degrades to per-process throttling. The check isn't atomic, so requests already in flight when an outage starts can each log once before the window closes — expect a small burst at onset, then one line per minute.
 
-**HMAC signatures:** All sync requests are signed with `WATCHTOWER_SYNC_SECRET` using `hash_hmac('sha256', ...)`. Use a long, random secret and keep it identical across environments.
+**HMAC signatures:** Sync requests are signed by the satellite and verified by the master. The signature is `hash_hmac('sha256', timestamp + METHOD + path + rawBody, WATCHTOWER_SYNC_SECRET)`, sent as `X-Watchtower-Signature` alongside `X-Watchtower-Timestamp`; `Watchtower\Support\SyncSignature` is the one implementation both ends use. The master compares with `hash_equals` and rejects anything unsigned, wrongly signed, or carrying a timestamp more than `sync.timestamp_tolerance` seconds (default 300) from its own clock, which bounds how long a captured request stays replayable. Method and path are inside the signed string, so a captured read can't be replayed as a write. Use a long, random secret and keep it identical across environments.
 
 **Cache TTL:** Each per-IP cache entry carries a 24-hour TTL (configurable via `cache.ttl_hours`) as a safety net. The cache is explicitly rebuilt on every block/unblock and on `watchtower:sync`; if the store is flushed, it warms from the DB automatically on the next request boot.
 

@@ -10,6 +10,7 @@ use Illuminate\Support\Facades\Log;
 use Watchtower\Enums\BlockSource;
 use Watchtower\Models\BlacklistedIp;
 use Watchtower\Services\BlacklistCache;
+use Watchtower\Support\SyncSignature;
 
 class SyncCommand extends Command
 {
@@ -25,7 +26,7 @@ class SyncCommand extends Command
     public function handle(): int
     {
         $masterUrl = config('watchtower.sync.master_url');
-        $secret = config('watchtower.sync.secret');
+        $secret = (string) config('watchtower.sync.secret', '');
 
         if (! $masterUrl) {
             $this->error('WATCHTOWER_MASTER_URL is not configured. Set it in your .env file.');
@@ -33,15 +34,17 @@ class SyncCommand extends Command
             return self::FAILURE;
         }
 
-        $timestamp = now()->timestamp;
-        $signature = hash_hmac('sha256', $timestamp.'GET/watchtower/api/blacklist', $secret);
+        if ($secret === '') {
+            $this->error('WATCHTOWER_SYNC_SECRET is not configured. The master rejects unsigned requests — set the same secret on every environment.');
+
+            return self::FAILURE;
+        }
 
         try {
-            $response = Http::withHeaders([
-                'X-Watchtower-Timestamp' => $timestamp,
-                'X-Watchtower-Signature' => $signature,
-                'Accept'                 => 'application/json',
-            ])->get($masterUrl.'/watchtower/api/blacklist');
+            $response = Http::withHeaders(
+                SyncSignature::headers('GET', SyncSignature::PULL_PATH, '', $secret)
+                + ['Accept' => 'application/json']
+            )->get(rtrim((string) $masterUrl, '/').SyncSignature::PULL_PATH);
 
             if (! $response->successful()) {
                 $this->error("Sync failed — master returned HTTP {$response->status()}.");
