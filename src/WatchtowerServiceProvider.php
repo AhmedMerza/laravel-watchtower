@@ -98,9 +98,12 @@ class WatchtowerServiceProvider extends PackageServiceProvider
             return;
         }
 
-        // is_a() also matches an app's own subclass, e.g. App\Http\Middleware\TrustProxies
+        // is_a() also matches an app's own subclass, e.g. App\Http\Middleware\TrustProxies,
+        // and returns false for anything that isn't a class name, so it needs no is_string()
+        // guard in front — which is just as well, since Laravel 13 narrowed this array's
+        // PHPDoc to strings and PHPStan then reads such a guard as always-true on 13 only.
         $trustProxies = collect($middleware)->search(
-            fn ($class) => is_string($class) && is_a($class, TrustProxies::class, true)
+            fn ($class) => is_a($class, TrustProxies::class, true)
         );
 
         if ($trustProxies === false) {

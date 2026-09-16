@@ -15,21 +15,33 @@ concurrency:
 
 jobs:
   tests:
-    name: Tests (PHP ${{ matrix.php }}, ${{ matrix.dependency-version }})
+    name: Tests (PHP ${{ matrix.php }}, Laravel ${{ matrix.laravel }}, ${{ matrix.dependency-version }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
+        # A sparse cover of PHP 8.2-8.4 x Laravel 11-13, rather than the full
+        # grid: every PHP and every Laravel major appears twice, and both ends
+        # of the supported range get a prefer-lowest run against their own
+        # floor. Laravel 13 requires PHP >=8.3, so it never pairs with 8.2.
         include:
-          # Validate the declared dependency floor (illuminate >=11.0) on the
-          # lowest supported PHP, then the latest stable deps across all PHPs.
           - php: '8.2'
+            laravel: '11'
             dependency-version: prefer-lowest
           - php: '8.2'
+            laravel: '12'
             dependency-version: prefer-stable
           - php: '8.3'
+            laravel: '11'
+            dependency-version: prefer-stable
+          - php: '8.3'
+            laravel: '13'
+            dependency-version: prefer-lowest
+          - php: '8.4'
+            laravel: '12'
             dependency-version: prefer-stable
           - php: '8.4'
+            laravel: '13'
             dependency-version: prefer-stable
 
     steps:
@@ -42,6 +54,13 @@ jobs:
           php-version: ${{ matrix.php }}
           extensions: dom, curl, libxml, mbstring, zip, pdo, sqlite, pdo_sqlite
           coverage: none
+
+      # Pins the major under test; testbench is left to composer.json, so the
+      # version it picks is one this package actually declares support for.
+      - name: Pin the Laravel major
+        run: composer require "laravel/framework:${{ matrix.laravel }}.*" --no-interaction --no-update
+        env:
+          COMPOSER_AUTH: '{"github-oauth": {"github.com": "${{ secrets.GITHUB_TOKEN }}"}}'
 
       - name: Install dependencies
         run: composer update --${{ matrix.dependency-version }} --prefer-dist --no-interaction --no-progress
