@@ -18,6 +18,10 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 - **`watchtower.sync.timestamp_tolerance`** (`WATCHTOWER_SYNC_TOLERANCE`, default 300 seconds) — how far a signed request's timestamp may sit from the master's clock. Bounds the window in which a captured request can be replayed.
 
+### Documentation
+
+- The sync section now says that the routes come up on **any** environment with a secret, satellites included, since registration is gated on the secret alone and satellites need it to sign ([#36](https://github.com/AhmedMerza/laravel-watchtower/issues/36) tracks separating the two capabilities). It also warns to keep satellite egress IPs in `WATCHTOWER_NEVER_BLOCK_IPS` on the master: the blocking middleware is global, so a blocked satellite stops syncing in both directions and `watchtower:sync` reports only `HTTP 403`.
+
 ### Fixed
 
 - **The one-click Block IP button in LogScope's detail panel now works.** It built its API base by rewriting LogScope's — `/logscope/api` → `/logscope/guard/api` — a path left over from the `logscope-guard` → `watchtower` rename. The routes are mounted at `/logscope/watchtower/api`, so the status check, block and unblock calls all 404'd; the button looked functional until you clicked it. The API routes are now named (`watchtower.api.block`, `.unblock`, `.status`, `.blocks`) and the partial renders its URLs from those names, so a prefix change can't make them drift apart again. The partial also renders nothing, instead of throwing, when `WATCHTOWER_ROUTES_ENABLED=false`. ([#11](https://github.com/AhmedMerza/laravel-watchtower/issues/11))
