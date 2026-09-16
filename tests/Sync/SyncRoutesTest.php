@@ -37,7 +37,7 @@ function signedHeaders(string $method, string $path, string $body = '', array $o
  */
 function postSigned(object $test, string $body, array $override = []): object
 {
-    $headers = signedHeaders('POST', SyncSignature::PUSH_PATH, $body, $override);
+    $headers = signedHeaders($override['method'] ?? 'POST', SyncSignature::PUSH_PATH, $body, $override);
 
     return $test->call('POST', SyncSignature::PUSH_PATH, [], [], [], [
         'CONTENT_TYPE'                => 'application/json',
@@ -122,14 +122,28 @@ it('rejects a non-numeric timestamp', function () {
         ->assertJsonPath('error', 'Malformed sync timestamp.');
 });
 
-it('rejects a pull signature replayed against the push route', function () {
-    // Method and path are inside the signed string precisely so that a
-    // captured read cannot be turned into a write.
-    $headers = signedHeaders('GET', SyncSignature::PULL_PATH);
+// The next two vary exactly ONE field of the signed string and hold the rest
+// constant. An earlier version of this test changed the method, the path AND
+// the body at once, so the body mismatch alone failed hash_equals() and it
+// would have passed with the method/path binding deleted outright.
 
-    $this->withHeaders($headers)
-        ->postJson(SyncSignature::PUSH_PATH, ['ip' => '1.2.3.4'])
-        ->assertStatus(401);
+it('binds the path into the signature', function () {
+    // Same method, same empty body — only the path the signature was made for
+    // differs.
+    $this->withHeaders(signedHeaders('GET', SyncSignature::PUSH_PATH))
+        ->get(SyncSignature::PULL_PATH)
+        ->assertStatus(401)
+        ->assertJsonPath('error', 'Invalid sync signature.');
+});
+
+it('binds the method into the signature, so a captured read is not a write', function () {
+    // Same path, same body — only the method the signature was made for
+    // differs.
+    postSigned($this, json_encode(['ip' => '1.2.3.4']), ['method' => 'GET'])
+        ->assertStatus(401)
+        ->assertJsonPath('error', 'Invalid sync signature.');
+
+    $this->assertDatabaseCount('blacklisted_ips', 0);
 });
 
 it('serves the active blocklist to a correctly signed pull', function () {
@@ -151,6 +165,37 @@ it('records a correctly signed push', function () {
         'source'     => 'sync',
         'source_env' => 'staging',
     ]);
+});
+
+it('updates an existing sync-sourced block on a repeat push', function () {
+    // The steady state: a second satellite reporting the same IP, or the same
+    // one pushing a new reason or expiry for an IP the master already has.
+    BlacklistedIp::create([
+        'ip'         => '5.6.7.8',
+        'reason'     => 'first report',
+        'source'     => BlockSource::Sync,
+        'source_env' => 'staging',
+    ]);
+
+    postSigned($this, json_encode(['ip' => '5.6.7.8', 'reason' => 'still at it', 'source_env' => 'alpha']))
+        ->assertOk()
+        ->assertJsonPath('applied', true);
+
+    $this->assertDatabaseCount('blacklisted_ips', 1);
+    $this->assertDatabaseHas('blacklisted_ips', [
+        'ip'         => '5.6.7.8',
+        'reason'     => 'still at it',
+        'source'     => 'sync',
+        'source_env' => 'alpha',
+    ]);
+});
+
+it('rejects an invalid payload with a 422', function () {
+    postSigned($this, json_encode(['ip' => 'not-an-ip', 'source_env' => 'staging']))
+        ->assertStatus(422)
+        ->assertJsonStructure(['errors' => ['ip']]);
+
+    $this->assertDatabaseCount('blacklisted_ips', 0);
 });
 
 it('does not let an incoming push downgrade a local manual block', function () {
@@ -228,6 +273,37 @@ it('round-trips a pushed block through the real route and middleware', function 
         'source'     => 'sync',
         'source_env' => 'testing',
     ]);
+});
+
+it('surfaces a rejected push instead of reporting success', function () {
+    // Laravel renders a ValidationException as a 302 unless the request asks
+    // for JSON, and the HTTP client follows redirects by default — so without
+    // the Accept header the client would land on the master's home page, read
+    // 2xx as success, and drop the block on the floor. reason is a text column
+    // but the receiver caps it at 500, so an auto-block with a long reason is
+    // a real way to reach this.
+    $status = null;
+
+    Http::fake(function ($request) use (&$status) {
+        $replayed = replaySyncRequest($this, $request);
+        $status = $replayed->getStatusCode();
+
+        return Http::response($replayed->getContent(), $status);
+    });
+
+    $record = new BlacklistedIp([
+        'ip'         => '9.9.9.9',
+        'reason'     => str_repeat('a', 501),
+        'source'     => BlockSource::Manual,
+        'source_env' => 'staging',
+    ]);
+
+    expect(fn () => (new PushBlockToMaster($record))->handle())
+        ->toThrow(RuntimeException::class);
+
+    expect($status)->toBe(422);
+
+    $this->assertDatabaseCount('blacklisted_ips', 0);
 });
 
 it('round-trips watchtower:sync through the real route and middleware', function () {

@@ -63,9 +63,16 @@ class PushBlockToMaster implements ShouldQueue
         // signature on arrival.
         $body = json_encode($payload, JSON_THROW_ON_ERROR);
 
+        // Accept matters more than it looks. Without it Laravel renders a
+        // validation failure on the master as a 302 to its own home page
+        // rather than a 422 — and a followed redirect returning 2xx would
+        // mark this job successful with the block never recorded.
+        // withoutRedirecting() is the belt to that braces.
         $response = Http::withHeaders(
             SyncSignature::headers('POST', SyncSignature::PUSH_PATH, $body, $secret)
+            + ['Accept' => 'application/json']
         )
+            ->withoutRedirecting()
             ->withBody($body, 'application/json')
             ->post(rtrim((string) $masterUrl, '/').SyncSignature::PUSH_PATH);
 
