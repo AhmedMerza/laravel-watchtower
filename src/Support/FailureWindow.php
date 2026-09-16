@@ -32,9 +32,14 @@ class FailureWindow
 
         clearstatcache(true, $path);
         $openedAt = @filemtime($path);
+        $fallbackAt = self::$fallback[$name] ?? false;
 
-        if ($openedAt === false) {
-            $openedAt = self::$fallback[$name] ?? false;
+        // Take whichever is newer. The marker can exist but be un-touchable —
+        // typically created by `php artisan` as the deploy user, then updated
+        // by the web user — in which case open() could only record the window
+        // in memory and the stale mtime on disk must not shadow it.
+        if ($fallbackAt !== false && ($openedAt === false || $fallbackAt > $openedAt)) {
+            $openedAt = $fallbackAt;
         }
 
         return $openedAt !== false && time() - $openedAt < self::SECONDS;

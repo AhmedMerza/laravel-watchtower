@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
 use Watchtower\Enums\BlockSource;
@@ -135,15 +136,40 @@ it('forgets stale per-IP entries on rebuild (IP unblocked since last rebuild)', 
     expect(Cache::store('array')->has('watchtower:blacklist:ip:5.5.5.5'))->toBeTrue();
 });
 
-it('clears the index when no IPs are blocked on rebuild', function () {
+it('empties the index when no IPs are blocked on rebuild', function () {
     Cache::store('array')->put('watchtower:blacklist:_index', ['old.ip'], 3600);
     Cache::store('array')->put('watchtower:blacklist:ip:old.ip', '', 3600);
 
-    // No DB rows — rebuild() should clear both the stale entry and the index
+    // No DB rows — rebuild() should clear the stale per-IP entry, but leave
+    // an EMPTY index behind rather than no index. warmOnBoot() reads a
+    // missing index as "needs warming", so forgetting it here would make
+    // every request re-run the rebuild for as long as the blocklist is empty.
     $this->cache->rebuild();
 
-    expect(Cache::store('array')->has('watchtower:blacklist:_index'))->toBeFalse();
+    expect(Cache::store('array')->has('watchtower:blacklist:_index'))->toBeTrue();
+    expect(Cache::store('array')->get('watchtower:blacklist:_index'))->toBe([]);
     expect(Cache::store('array')->has('watchtower:blacklist:ip:old.ip'))->toBeFalse();
+});
+
+it('stops re-querying the DB once an empty blocklist has been warmed', function () {
+    // The steady state of a fresh install: no blocks at all. The first
+    // warm writes the empty index; every later one must be a no-op, not
+    // another `BlacklistedIp::active()->get()` on the request path.
+    expect(BlacklistedIp::count())->toBe(0);
+
+    $this->cache->warmOnBoot();
+
+    expect(Cache::store('array')->has('watchtower:blacklist:_index'))->toBeTrue();
+
+    DB::enableQueryLog();
+    DB::flushQueryLog();
+
+    $this->cache->warmOnBoot();
+    $this->cache->warmOnBoot();
+
+    expect(DB::getQueryLog())->toBeEmpty();
+
+    DB::disableQueryLog();
 });
 
 it('keeps existing cache state when DB read fails on rebuild', function () {

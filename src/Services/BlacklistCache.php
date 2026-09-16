@@ -198,7 +198,12 @@ class BlacklistCache
         }
 
         if ($blocks->isEmpty()) {
-            $cache->forget($this->indexKey);
+            // Write the empty index rather than forgetting it. warmOnBoot()
+            // treats a missing index as "needs warming", so forgetting it
+            // here made every request re-run this DB query for the whole
+            // time a site's blocklist was empty — which is the default
+            // state of a fresh install.
+            $cache->put($this->indexKey, [], $this->ttlSeconds);
 
             return true;
         }

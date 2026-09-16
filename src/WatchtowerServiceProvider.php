@@ -7,6 +7,7 @@ namespace Watchtower;
 use Illuminate\Contracts\Http\Kernel;
 use Illuminate\Http\Middleware\TrustProxies;
 use Illuminate\Support\Facades\Event;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Route;
 use Illuminate\Support\Facades\Schedule;
 use Spatie\LaravelPackageTools\Package;
@@ -21,6 +22,7 @@ use Watchtower\Listeners\NotifyOnBlock;
 use Watchtower\Services\AutoBlockService;
 use Watchtower\Services\BlacklistCache;
 use Watchtower\Services\BlacklistService;
+use Watchtower\Support\FailureWindow;
 
 class WatchtowerServiceProvider extends PackageServiceProvider
 {
@@ -85,14 +87,47 @@ class WatchtowerServiceProvider extends PackageServiceProvider
         $kernel = $this->app->make(Kernel::class);
         $middleware = $kernel->getGlobalMiddleware();
 
+        // prependMiddleware() skipped a middleware already in the stack;
+        // array_splice() doesn't, so keep the guard ourselves rather than
+        // risk running the whole blocklist check twice per request.
+        if (in_array(BlockedIpMiddleware::class, $middleware, true)) {
+            return;
+        }
+
         // is_a() also matches an app's own subclass, e.g. App\Http\Middleware\TrustProxies
         $trustProxies = collect($middleware)->search(
             fn ($class) => is_string($class) && is_a($class, TrustProxies::class, true)
         );
 
+        if ($trustProxies === false) {
+            $this->warnTrustProxiesMissing();
+        }
+
         array_splice($middleware, $trustProxies === false ? 0 : $trustProxies + 1, 0, [BlockedIpMiddleware::class]);
 
         $kernel->setGlobalMiddleware($middleware);
+    }
+
+    /**
+     * Running first without TrustProxies means `$request->ip()` is the direct
+     * peer — behind a load balancer, the balancer. That silently reproduces
+     * the bug this ordering exists to fix, so say so. Throttled, and only
+     * reached in that branch: a stock stack never pays for this check.
+     */
+    private function warnTrustProxiesMissing(): void
+    {
+        if (FailureWindow::isOpen('proxies')) {
+            return;
+        }
+
+        FailureWindow::open('proxies');
+
+        try {
+            Log::channel(config('watchtower.log_channel', 'stack'))
+                ->warning('Watchtower: TrustProxies is not in the global middleware stack, so blocking runs first and sees the direct peer address. Behind a proxy or load balancer that is the proxy\'s IP, and blocks will never match.');
+        } catch (\Throwable) {
+            // A diagnostic must never break boot.
+        }
     }
 
     protected function registerRoutes(): void

@@ -21,6 +21,7 @@ class TestCase extends Orchestra
         // app and would otherwise suppress logging in a later test.
         FailureWindow::forget('cache');
         FailureWindow::forget('warm');
+        FailureWindow::forget('proxies');
 
         Factory::guessFactoryNamesUsing(
             fn (string $modelName) => 'Watchtower\\Database\\Factories\\'.class_basename($modelName).'Factory'
