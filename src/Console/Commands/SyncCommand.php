@@ -26,7 +26,7 @@ class SyncCommand extends Command
     public function handle(): int
     {
         $masterUrl = config('watchtower.sync.master_url');
-        $secret = (string) config('watchtower.sync.secret', '');
+        $secret = SyncSignature::secret();
 
         if (! $masterUrl) {
             $this->error('WATCHTOWER_MASTER_URL is not configured. Set it in your .env file.');

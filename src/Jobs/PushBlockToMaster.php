@@ -11,6 +11,7 @@ use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
 use Watchtower\Enums\BlockSource;
 use Watchtower\Models\BlacklistedIp;
 use Watchtower\Support\SyncSignature;
@@ -18,6 +19,9 @@ use Watchtower\Support\SyncSignature;
 class PushBlockToMaster implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
+
+    /** Matches the max on SyncController's reason rule. */
+    private const REASON_LIMIT = 500;
 
     public int $tries = 3;
 
@@ -28,7 +32,7 @@ class PushBlockToMaster implements ShouldQueue
     public function handle(): void
     {
         $masterUrl = config('watchtower.sync.master_url');
-        $secret = (string) config('watchtower.sync.secret', '');
+        $secret = SyncSignature::secret();
 
         if (! $masterUrl) {
             return;
@@ -50,9 +54,17 @@ class PushBlockToMaster implements ShouldQueue
             return;
         }
 
+        // reason is a text column here but the master validates it at 500, so
+        // send what the master will accept. An auto-block rule with a verbose
+        // template would otherwise fail validation on arrival, and a block
+        // that never propagates is worse than one with a clipped reason.
         $payload = [
             'ip'         => $this->record->ip,
-            'reason'     => $this->record->reason,
+            'reason'     => $this->record->reason === null
+                ? null
+                // -3 because Str::limit appends its ellipsis AFTER truncating,
+                // so limit(…, 500) returns 503 and fails the master's rule.
+                : Str::limit($this->record->reason, self::REASON_LIMIT - 3),
             'source_env' => app()->environment(),
             'expires_at' => $this->record->expires_at?->toIso8601String(),
             'blocked_by' => $this->record->blocked_by,

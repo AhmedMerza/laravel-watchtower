@@ -199,7 +199,7 @@ class WatchtowerServiceProvider extends PackageServiceProvider
      */
     protected function registerSyncRoutes(): void
     {
-        if (! config('watchtower.sync.secret')) {
+        if (SyncSignature::secret() === '') {
             return;
         }
 

@@ -292,8 +292,7 @@ it('surfaces a rejected push instead of reporting success', function () {
     });
 
     $record = new BlacklistedIp([
-        'ip'         => '9.9.9.9',
-        'reason'     => str_repeat('a', 501),
+        'ip'         => 'not-an-ip',
         'source'     => BlockSource::Manual,
         'source_env' => 'staging',
     ]);
@@ -304,6 +303,28 @@ it('surfaces a rejected push instead of reporting success', function () {
     expect($status)->toBe(422);
 
     $this->assertDatabaseCount('blacklisted_ips', 0);
+});
+
+it('clips an over-long reason to what the master accepts', function () {
+    // reason is a text column locally but the master validates it at 500. A
+    // block that never propagates is worse than one with a clipped reason.
+    Http::fake(function ($request) {
+        $replayed = replaySyncRequest($this, $request);
+
+        return Http::response($replayed->getContent(), $replayed->getStatusCode());
+    });
+
+    (new PushBlockToMaster(new BlacklistedIp([
+        'ip'         => '9.9.9.9',
+        'reason'     => str_repeat('a', 900),
+        'source'     => BlockSource::Manual,
+        'source_env' => 'staging',
+    ])))->handle();
+
+    $stored = BlacklistedIp::where('ip', '9.9.9.9')->firstOrFail();
+
+    expect(mb_strlen((string) $stored->reason))->toBe(500)
+        ->and($stored->reason)->toEndWith('...');
 });
 
 it('round-trips watchtower:sync through the real route and middleware', function () {

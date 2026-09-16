@@ -29,6 +29,21 @@ final class SyncSignature
     public const PUSH_PATH = '/watchtower/sync/block';
 
     /**
+     * The shared secret, read the same way everywhere.
+     *
+     * Trimmed, because a trailing space picked up from .env quoting would
+     * otherwise become part of the HMAC key on one side of the fleet and not
+     * the other, failing every sync with a 401 indistinguishable from a wrong
+     * secret. Compared against '' rather than tested for truthiness, because
+     * PHP considers the string "0" falsy and callers disagreed about whether
+     * that meant "no secret configured".
+     */
+    public static function secret(): string
+    {
+        return trim((string) config('watchtower.sync.secret', ''));
+    }
+
+    /**
      * The canonical string is timestamp + METHOD + path + raw body.
      *
      * Method and path are in there as a domain separator: without them a

@@ -21,7 +21,7 @@ class VerifySyncSignature
 {
     public function handle(Request $request, Closure $next): Response
     {
-        $secret = (string) config('watchtower.sync.secret', '');
+        $secret = SyncSignature::secret();
 
         // Belt and braces: the routes aren't registered without a secret.
         if ($secret === '') {
