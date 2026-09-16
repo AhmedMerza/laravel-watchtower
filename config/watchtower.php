@@ -82,21 +82,12 @@ return [
     |                rare case where the rebuild silently failed (e.g.
     |                DB unavailable mid-flush).
     |
-    | DEPRECATED:
-    | 'connection' - No longer honored. Pre-rename versions used this to
-    |                pick a Redis connection directly. Now we defer to
-    |                Laravel's cache config — to use a non-default Redis
-    |                connection, define a custom cache store as shown
-    |                above. The key remains in config for backward
-    |                compatibility but reading it has no effect.
-    |
     */
 
     'cache' => [
-        'store'      => env('WATCHTOWER_CACHE_STORE'),
-        'key'        => 'watchtower:blacklist',
-        'ttl_hours'  => 24,
-        'connection' => env('WATCHTOWER_REDIS_CONNECTION', env('GUARD_REDIS_CONNECTION')),
+        'store'     => env('WATCHTOWER_CACHE_STORE'),
+        'key'       => 'watchtower:blacklist',
+        'ttl_hours' => 24,
     ],
 
     /*

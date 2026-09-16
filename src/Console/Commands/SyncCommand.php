@@ -82,7 +82,14 @@ class SyncCommand extends Command
                 $synced++;
             }
 
-            $this->cache->rebuild();
+            // rebuild() logs and swallows its own DB failure, so ask it. Saying
+            // "cache rebuilt" and exiting 0 here hands cron a green run while
+            // the cached blocklist is stale — missing IPs master says to block.
+            if (! $this->cache->rebuild()) {
+                $this->error("Synced {$synced} IPs from master ({$skipped} skipped), but the cache rebuild failed — the blocklist in cache is stale.");
+
+                return self::FAILURE;
+            }
 
             $this->info("Synced {$synced} IPs from master ({$skipped} skipped — local manual/auto blocks preserved). Redis cache rebuilt.");
 

@@ -22,10 +22,6 @@ beforeEach(function () {
 
     Cache::flush();
 
-    // The deprecation warning is one-shot per process; reset the flag so
-    // each test can exercise the warning path independently.
-    BlacklistCache::resetDeprecationWarningFlag();
-
     $this->cache = new BlacklistCache;
 });
 
@@ -186,43 +182,17 @@ it('keeps existing cache state when DB read fails on rebuild', function () {
     expect(Cache::store('array')->get('watchtower:blacklist:ip:preserved.ip'))->toBe('');
 });
 
-it('emits a deprecation warning when watchtower.cache.connection is set', function () {
-    BlacklistCache::resetDeprecationWarningFlag();
-
+it('ignores a leftover watchtower.cache.connection value without logging', function () {
+    // The key was removed in #32 along with its deprecation warning, which a
+    // static guard had been re-emitting on every request under PHP-FPM. An
+    // upgrader's stale env var must now be inert, not a log line per request.
     config()->set('watchtower.cache.connection', 'legacy-redis-conn');
 
-    Log::shouldReceive('channel')->andReturnSelf();
-    Log::shouldReceive('warning')
-        ->once()
-        ->withArgs(function (string $message, array $context): bool {
-            return str_contains($message, 'watchtower.cache.connection')
-                && str_contains($message, 'deprecated')
-                && $context['configured_connection'] === 'legacy-redis-conn';
-        });
-
-    new BlacklistCache;
-});
-
-it('does not emit the deprecation warning when watchtower.cache.connection is unset', function () {
-    BlacklistCache::resetDeprecationWarningFlag();
-
-    // Default config has no `connection` key set in beforeEach
     Log::shouldReceive('channel')->andReturnSelf();
     Log::shouldNotReceive('warning');
 
     new BlacklistCache;
-});
-
-it('only emits the deprecation warning once per process', function () {
-    BlacklistCache::resetDeprecationWarningFlag();
-
-    config()->set('watchtower.cache.connection', 'some-conn');
-
-    Log::shouldReceive('channel')->andReturnSelf();
-    Log::shouldReceive('warning')->once(); // exactly one call across both instantiations
-
     new BlacklistCache;
-    new BlacklistCache; // second instance must NOT re-emit
 });
 
 it('warmOnBoot does not throw when the cache backend is unavailable', function () {

@@ -5,6 +5,7 @@ declare(strict_types=1);
 use Illuminate\Support\Facades\Cache;
 use Watchtower\Enums\BlockSource;
 use Watchtower\Models\BlacklistedIp;
+use Watchtower\Services\BlacklistCache;
 
 beforeEach(function () {
     config()->set('cache.default', 'array');
@@ -79,6 +80,28 @@ it('reports nothing to clean up when the table is empty', function () {
     $this->artisan('watchtower:cleanup')
         ->assertSuccessful()
         ->expectsOutputToContain('Nothing to clean up');
+});
+
+it('fails instead of reporting success when the cache rebuild fails', function () {
+    BlacklistedIp::create([
+        'ip'         => '6.6.6.6',
+        'source'     => BlockSource::Auto,
+        'source_env' => 'testing',
+        'expires_at' => now()->subHour(),
+    ]);
+
+    // The row is deleted either way — a failed rebuild leaves the cache saying
+    // 6.6.6.6 is still blocked until the entry hits its TTL, so someone whose
+    // block just expired stays locked out. A green cron run would hide that.
+    $cache = Mockery::mock(BlacklistCache::class)->shouldIgnoreMissing();
+    $cache->shouldReceive('rebuild')->once()->andReturnFalse();
+    $this->app->instance(BlacklistCache::class, $cache);
+
+    $this->artisan('watchtower:cleanup')
+        ->assertFailed()
+        ->expectsOutputToContain('cache rebuild failed');
+
+    $this->assertDatabaseMissing('blacklisted_ips', ['ip' => '6.6.6.6']);
 });
 
 it('can still be run manually even when WATCHTOWER_CLEANUP_ENABLED is false', function () {
