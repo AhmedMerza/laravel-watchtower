@@ -42,7 +42,7 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 ### Changed
 
 - **BREAKING (subclassers only): `BlacklistCache::rebuild()` returns `bool` instead of `void`.** It reports whether the DB read succeeded, so `warmOnBoot()` can stand down when it didn't. PHP does not permit a `void` override of a `bool` method, so any subclass overriding `rebuild(): void` must update its signature. Callers that ignore the return value are unaffected.
-- **Minimum Laravel version raised to 11.0** (`illuminate/* >=11.0`). The service provider uses the `Illuminate\Support\Facades\Schedule` facade, which only exists from Laravel 11 — the previous `>=10.0` constraint never actually worked on Laravel 10. Laravel 10 is also past its security-support window. Surfaced by a new `prefer-lowest` CI job.
+- **Minimum Laravel version raised past 10.0**, first to 11.0 and then, later in this same unreleased version, to 12.0 — the entry above is the one that describes what ships. The service provider uses the `Illuminate\Support\Facades\Schedule` facade, which only exists from Laravel 11, so the previous `>=10.0` constraint never actually worked on Laravel 10; Laravel 10 is also past its security-support window. Surfaced by a new `prefer-lowest` CI job.
 
 ### Added
 
