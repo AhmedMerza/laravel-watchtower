@@ -17,12 +17,15 @@ use Watchtower\Console\Commands\InstallCommand;
 use Watchtower\Console\Commands\SyncCommand;
 use Watchtower\Events\IpBlocked;
 use Watchtower\Http\Controllers\BlockController;
+use Watchtower\Http\Controllers\SyncController;
 use Watchtower\Http\Middleware\BlockedIpMiddleware;
+use Watchtower\Http\Middleware\VerifySyncSignature;
 use Watchtower\Listeners\NotifyOnBlock;
 use Watchtower\Services\AutoBlockService;
 use Watchtower\Services\BlacklistCache;
 use Watchtower\Services\BlacklistService;
 use Watchtower\Support\FailureWindow;
+use Watchtower\Support\SyncSignature;
 
 class WatchtowerServiceProvider extends PackageServiceProvider
 {
@@ -58,6 +61,7 @@ class WatchtowerServiceProvider extends PackageServiceProvider
         });
 
         $this->registerRoutes();
+        $this->registerSyncRoutes();
 
         Event::listen(IpBlocked::class, NotifyOnBlock::class);
 
@@ -176,6 +180,35 @@ class WatchtowerServiceProvider extends PackageServiceProvider
             Route::delete('/api/block/{ip}', [BlockController::class, 'unblock'])->where('ip', '.*')->name('unblock');
             Route::get('/api/status/{ip}', [BlockController::class, 'status'])->where('ip', '.*')->name('status');
             Route::get('/api/blocks', [BlockController::class, 'index'])->name('blocks');
+        });
+    }
+
+    /**
+     * The master side of cross-environment sync.
+     *
+     * Registered only when a shared secret exists — an environment with no
+     * WATCHTOWER_SYNC_SECRET is not a master and should expose nothing.
+     * Deliberately independent of watchtower.routes.enabled, which governs
+     * the human-facing management API: a master can turn that off and still
+     * serve its satellites.
+     *
+     * No 'web' group. These are machine-to-machine calls with no session and
+     * no CSRF token; VerifySyncSignature is the whole of the authentication.
+     * The paths are fixed rather than config-driven because the satellite
+     * signs the path it calls.
+     */
+    protected function registerSyncRoutes(): void
+    {
+        if (SyncSignature::secret() === '') {
+            return;
+        }
+
+        Route::group([
+            'middleware' => [VerifySyncSignature::class],
+            'as'         => 'watchtower.sync.',
+        ], function () {
+            Route::get(SyncSignature::PULL_PATH, [SyncController::class, 'blocks'])->name('blocks');
+            Route::post(SyncSignature::PUSH_PATH, [SyncController::class, 'receive'])->name('receive');
         });
     }
 }

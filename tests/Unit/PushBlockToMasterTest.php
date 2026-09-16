@@ -7,6 +7,7 @@ use Illuminate\Support\Facades\Log;
 use Watchtower\Enums\BlockSource;
 use Watchtower\Jobs\PushBlockToMaster;
 use Watchtower\Models\BlacklistedIp;
+use Watchtower\Support\SyncSignature;
 
 beforeEach(function () {
     config()->set('watchtower.sync.master_url', 'https://master.example.com');
@@ -23,13 +24,13 @@ beforeEach(function () {
 
 it('posts to master with an HMAC signature', function () {
     Http::fake([
-        'master.example.com/watchtower/api/block' => Http::response(['ok' => true], 200),
+        'master.example.com/watchtower/sync/block' => Http::response(['ok' => true], 200),
     ]);
 
     (new PushBlockToMaster($this->record))->handle();
 
     Http::assertSent(function ($request) {
-        return $request->url() === 'https://master.example.com/watchtower/api/block'
+        return $request->url() === 'https://master.example.com/watchtower/sync/block'
             && $request->hasHeader('X-Watchtower-Signature')
             && $request->hasHeader('X-Watchtower-Timestamp')
             && $request['ip'] === '1.2.3.4';
@@ -38,7 +39,7 @@ it('posts to master with an HMAC signature', function () {
 
 it('throws a RuntimeException on non-2xx response so the queue retries', function () {
     Http::fake([
-        'master.example.com/watchtower/api/block' => Http::response([], 500),
+        'master.example.com/watchtower/sync/block' => Http::response([], 500),
     ]);
 
     expect(fn () => (new PushBlockToMaster($this->record))->handle())
@@ -53,6 +54,54 @@ it('does nothing when master URL is not configured', function () {
     (new PushBlockToMaster($this->record))->handle();
 
     Http::assertNothingSent();
+});
+
+it('does not push a block that arrived by sync', function () {
+    // A master whose own master_url points at itself would otherwise push
+    // every incoming block straight back to itself, forever.
+    $this->record->update(['source' => BlockSource::Sync]);
+
+    Http::fake();
+
+    (new PushBlockToMaster($this->record))->handle();
+
+    Http::assertNothingSent();
+});
+
+it('does not push unsigned when the secret is missing', function () {
+    config()->set('watchtower.sync.secret', null);
+
+    Log::shouldReceive('channel')->with('stack')->andReturnSelf();
+    Log::shouldReceive('warning')->once()->with(
+        Mockery::pattern('/WATCHTOWER_SYNC_SECRET/'),
+        Mockery::on(fn ($ctx) => $ctx['ip'] === '1.2.3.4')
+    );
+
+    Http::fake();
+
+    (new PushBlockToMaster($this->record))->handle();
+
+    Http::assertNothingSent();
+});
+
+it('signs the exact bytes it sends', function () {
+    Http::fake([
+        'master.example.com/watchtower/sync/block' => Http::response(['ok' => true], 200),
+    ]);
+
+    (new PushBlockToMaster($this->record))->handle();
+
+    Http::assertSent(function ($request) {
+        $expected = SyncSignature::compute(
+            $request->header('X-Watchtower-Timestamp')[0],
+            'POST',
+            SyncSignature::PUSH_PATH,
+            $request->body(),
+            'test-secret'
+        );
+
+        return hash_equals($expected, $request->header('X-Watchtower-Signature')[0]);
+    });
 });
 
 it('logs a warning on final failure via failed()', function () {

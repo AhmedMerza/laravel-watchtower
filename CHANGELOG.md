@@ -4,6 +4,26 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 ## [Unreleased]
 
+### Security
+
+- **Sync requests were signed but nothing verified the signature.** Satellites computed an HMAC and sent it; the package shipped no verification code and no master-side routes. The README instead asked adopters to hand-write two unauthenticated closures at `/watchtower/api/blacklist` and `/watchtower/api/block`, so anyone who could reach the master could block any IP — and have it propagate to every satellite on the next sync — or read the full blocklist. The `POST /watchtower/api/block` in that snippet also collided with the package's own management route, making a push 419 on CSRF depending on registration order. Watchtower now ships the master side: `GET /watchtower/sync/blocks` and `POST /watchtower/sync/block`, registered automatically when `WATCHTOWER_SYNC_SECRET` is set, outside the `web` group, behind a new `VerifySyncSignature` middleware that recomputes the signature with `hash_equals` and rejects timestamps outside a configurable window. ([#12](https://github.com/AhmedMerza/laravel-watchtower/issues/12))
+
+### Changed
+
+- **BREAKING (sync wire protocol): the sync paths moved to `/watchtower/sync/blocks` and `/watchtower/sync/block`,** off the management API and away from `WATCHTOWER_ROUTE_PREFIX` — the satellite signs the path it calls, so it can't depend on the master's prefix config. Master and satellites must be upgraded together. The signed string is unchanged in shape (`timestamp + METHOD + path + rawBody`) and now has a single implementation, `Watchtower\Support\SyncSignature`, used by both the clients and the middleware.
+- **`PushBlockToMaster` no longer re-pushes a block that arrived by sync,** and the master ignores an incoming push for an IP already blocked locally by hand or by auto-block. Without both, a master whose own `WATCHTOWER_MASTER_URL` points at itself — the documented setup — would push every incoming block straight back to itself in a loop.
+- **`watchtower:sync` now fails with a clear message when `WATCHTOWER_SYNC_SECRET` is unset,** and `PushBlockToMaster` logs a warning instead of sending a request the master will reject.
+- **A push the master rejects now fails loudly.** The job asks for JSON and no longer follows redirects, so a validation failure comes back as a 422 and retries instead of being answered with a 302 to the master's home page whose 2xx read as success — which lost the block silently. An over-long `reason` is clipped to the 500 characters the master accepts before sending, rather than failing validation on arrival.
+- **The sync secret is read identically everywhere** via `SyncSignature::secret()` — trimmed, and compared against `''` rather than tested for truthiness. Previously route registration used PHP truthiness (so the secret `0` registered no routes while every other reader accepted it) and nothing trimmed, so a trailing space from `.env` quoting became part of the HMAC key on one side of the fleet only.
+
+### Added
+
+- **`watchtower.sync.timestamp_tolerance`** (`WATCHTOWER_SYNC_TOLERANCE`, default 300 seconds) — how far a signed request's timestamp may sit from the master's clock. Bounds the window in which a captured request can be replayed.
+
+### Documentation
+
+- The sync section now says that the routes come up on **any** environment with a secret, satellites included, since registration is gated on the secret alone and satellites need it to sign ([#36](https://github.com/AhmedMerza/laravel-watchtower/issues/36) tracks separating the two capabilities). It also warns to keep satellite egress IPs in `WATCHTOWER_NEVER_BLOCK_IPS` on the master: the blocking middleware is global, so a blocked satellite stops syncing in both directions and `watchtower:sync` reports only `HTTP 403`.
+
 ### Fixed
 
 - **The one-click Block IP button in LogScope's detail panel now works.** It built its API base by rewriting LogScope's — `/logscope/api` → `/logscope/guard/api` — a path left over from the `logscope-guard` → `watchtower` rename. The routes are mounted at `/logscope/watchtower/api`, so the status check, block and unblock calls all 404'd; the button looked functional until you clicked it. The API routes are now named (`watchtower.api.block`, `.unblock`, `.status`, `.blocks`) and the partial renders its URLs from those names, so a prefix change can't make them drift apart again. The partial also renders nothing, instead of throwing, when `WATCHTOWER_ROUTES_ENABLED=false`. ([#11](https://github.com/AhmedMerza/laravel-watchtower/issues/11))
