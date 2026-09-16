@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Log;
 use Watchtower\Http\Middleware\BlockedIpMiddleware;
 use Watchtower\Services\BlacklistCache;
 
@@ -10,6 +11,13 @@ beforeEach(function () {
     $this->cache = Mockery::mock(BlacklistCache::class);
     $this->middleware = new BlockedIpMiddleware($this->cache);
     $this->next = fn ($req) => response('ok', 200);
+
+    $this->failureMarker = storage_path('framework/watchtower-cache-failure');
+    @unlink($this->failureMarker);
+});
+
+afterEach(function () {
+    @unlink($this->failureMarker);
 });
 
 it('returns 403 for a blocked IP', function () {
@@ -80,4 +88,55 @@ it('redirects instead of 403 when block_response redirect is configured', functi
     $response = $this->middleware->handle($request, $this->next);
 
     expect($response->getStatusCode())->toBe(302);
+});
+
+it('passes through when the cache lookup throws', function () {
+    Log::shouldReceive('channel')->andReturnSelf();
+    Log::shouldReceive('error')->once();
+    $this->cache->shouldReceive('isBlocked')->andThrow(new RuntimeException('Connection refused'));
+
+    $request = Request::create('/test', 'GET');
+    $request->server->set('REMOTE_ADDR', '1.2.3.4');
+
+    $response = $this->middleware->handle($request, $this->next);
+
+    expect($response->getStatusCode())->toBe(200);
+});
+
+it('logs a cache failure once per window, not once per request', function () {
+    Log::shouldReceive('channel')->andReturnSelf();
+    Log::shouldReceive('error')->once();
+    $this->cache->shouldReceive('isBlocked')->andThrow(new RuntimeException('Connection refused'));
+
+    $request = Request::create('/test', 'GET');
+    $request->server->set('REMOTE_ADDR', '1.2.3.4');
+
+    foreach (range(1, 3) as $_) {
+        expect($this->middleware->handle($request, $this->next)->getStatusCode())->toBe(200);
+    }
+});
+
+it('logs a cache failure again once the window has passed', function () {
+    touch($this->failureMarker, time() - 61);
+
+    Log::shouldReceive('channel')->andReturnSelf();
+    Log::shouldReceive('error')->once();
+    $this->cache->shouldReceive('isBlocked')->andThrow(new RuntimeException('Connection refused'));
+
+    $request = Request::create('/test', 'GET');
+    $request->server->set('REMOTE_ADDR', '1.2.3.4');
+
+    $this->middleware->handle($request, $this->next);
+});
+
+it('still passes through when logging the cache failure also throws', function () {
+    Log::shouldReceive('channel')->andThrow(new InvalidArgumentException('Log [stack] is not defined.'));
+    $this->cache->shouldReceive('isBlocked')->andThrow(new RuntimeException('Connection refused'));
+
+    $request = Request::create('/test', 'GET');
+    $request->server->set('REMOTE_ADDR', '1.2.3.4');
+
+    $response = $this->middleware->handle($request, $this->next);
+
+    expect($response->getStatusCode())->toBe(200);
 });

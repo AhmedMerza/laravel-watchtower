@@ -4,8 +4,18 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Blocks were ignored behind a load balancer or reverse proxy.** The blocking middleware was prepended to the global stack, ahead of `TrustProxies`, so `$request->ip()` returned the proxy's address and never matched a blocked client IP. It is now inserted directly after `TrustProxies` (or an app subclass of it), still ahead of sessions, auth and routing. If `TrustProxies` isn't in the global stack, it still goes first. ([#14](https://github.com/AhmedMerza/laravel-watchtower/issues/14))
+- **A cache outage no longer makes every request return 500.** If the blocklist lookup throws (Redis down, a mistyped `WATCHTOWER_CACHE_STORE`), the request is let through unchecked and the failure is logged at `error` on `watchtower.log_channel`, at most once a minute across all workers. ([#13](https://github.com/AhmedMerza/laravel-watchtower/issues/13))
+- **A cache or DB outage no longer floods the log from the boot-time cache warm-up.** `warmOnBoot()` runs on every request, and each failure wrote its own `warning` — so an outage produced a log line per request regardless of the throttle above. A failed warm-up now stands down for a minute, which also drops the repeated doomed round-trip to the dead backend. The throttle is not atomic: requests already in flight at the onset of an outage can each log once before the window closes. ([#13](https://github.com/AhmedMerza/laravel-watchtower/issues/13))
+- **An empty blocklist no longer costs a DB query on every request.** `rebuild()` forgot the index key when no IPs were blocked, but `warmOnBoot()` reads a missing index as "needs warming" — so a site with an empty blocklist (the default state of a fresh install, or any site whose blocks have all expired) re-ran `BlacklistedIp::active()->get()` on every single request, forever. `rebuild()` now writes an empty index instead.
+- **Watchtower now warns when `TrustProxies` isn't in the global middleware stack.** In that case blocking runs first and sees the direct peer address, which behind a proxy is the proxy's IP — the same silent failure as [#14](https://github.com/AhmedMerza/laravel-watchtower/issues/14). It was detected and discarded; it's now logged (throttled) on `watchtower.log_channel`.
+- **Registering the middleware is idempotent again.** The move from `prependMiddleware()` to `array_splice()` dropped the "skip if already present" guard Laravel's helper has, so a repeated registration would have run the whole blocklist check twice per request.
+
 ### Changed
 
+- **BREAKING (subclassers only): `BlacklistCache::rebuild()` returns `bool` instead of `void`.** It reports whether the DB read succeeded, so `warmOnBoot()` can stand down when it didn't. PHP does not permit a `void` override of a `bool` method, so any subclass overriding `rebuild(): void` must update its signature. Callers that ignore the return value are unaffected.
 - **Minimum Laravel version raised to 11.0** (`illuminate/* >=11.0`). The service provider uses the `Illuminate\Support\Facades\Schedule` facade, which only exists from Laravel 11 — the previous `>=10.0` constraint never actually worked on Laravel 10. Laravel 10 is also past its security-support window. Surfaced by a new `prefer-lowest` CI job.
 
 ### Added

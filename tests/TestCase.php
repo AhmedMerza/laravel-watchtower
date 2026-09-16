@@ -8,6 +8,7 @@ use Illuminate\Database\Eloquent\Factories\Factory;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\File;
 use Orchestra\Testbench\TestCase as Orchestra;
+use Watchtower\Support\FailureWindow;
 use Watchtower\WatchtowerServiceProvider;
 
 class TestCase extends Orchestra
@@ -15,6 +16,12 @@ class TestCase extends Orchestra
     protected function setUp(): void
     {
         parent::setUp();
+
+        // Failure windows are marker files on disk, so they outlive the
+        // app and would otherwise suppress logging in a later test.
+        FailureWindow::forget('cache');
+        FailureWindow::forget('warm');
+        FailureWindow::forget('proxies');
 
         Factory::guessFactoryNamesUsing(
             fn (string $modelName) => 'Watchtower\\Database\\Factories\\'.class_basename($modelName).'Factory'

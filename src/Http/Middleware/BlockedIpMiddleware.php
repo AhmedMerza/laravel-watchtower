@@ -6,8 +6,10 @@ namespace Watchtower\Http\Middleware;
 
 use Closure;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Log;
 use Symfony\Component\HttpFoundation\Response;
 use Watchtower\Services\BlacklistCache;
+use Watchtower\Support\FailureWindow;
 
 class BlockedIpMiddleware
 {
@@ -32,7 +34,16 @@ class BlockedIpMiddleware
             return $next($request);
         }
 
-        if ($this->cache->isBlocked($normalized)) {
+        try {
+            $blocked = $this->cache->isBlocked($normalized);
+        } catch (\Throwable $e) {
+            // Fail open: a cache outage must not turn every request into a 500.
+            $this->reportCacheFailure($e);
+
+            return $next($request);
+        }
+
+        if ($blocked) {
             $blockConfig = config('watchtower.block_response');
 
             if ($blockConfig['redirect']) {
@@ -43,6 +54,28 @@ class BlockedIpMiddleware
         }
 
         return $next($request);
+    }
+
+    /**
+     * Log the failure at most once per window — every request hits this
+     * during an outage, and a log line per request fills the disk.
+     */
+    private function reportCacheFailure(\Throwable $e): void
+    {
+        if (FailureWindow::isOpen('cache')) {
+            return;
+        }
+
+        FailureWindow::open('cache');
+
+        try {
+            Log::channel(config('watchtower.log_channel', 'stack'))
+                ->error('Watchtower: blocklist cache lookup failed, letting requests through unchecked', [
+                    'error' => $e->getMessage(),
+                ]);
+        } catch (\Throwable) {
+            // A broken log channel must not undo the fail-open.
+        }
     }
 
     private function normalizeIp(string $ip): string
