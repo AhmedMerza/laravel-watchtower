@@ -21,9 +21,14 @@ jobs:
       fail-fast: false
       matrix:
         # A sparse cover of PHP 8.2-8.4 x Laravel 11-13, rather than the full
-        # grid: every PHP and every Laravel major appears twice, and both ends
-        # of the supported range get a prefer-lowest run against their own
-        # floor. Laravel 13 requires PHP >=8.3, so it never pairs with 8.2.
+        # grid: every PHP and every Laravel major appears twice, and each end of
+        # the range gets a prefer-lowest run. Laravel 13 requires PHP >=8.3, so
+        # it never pairs with 8.2.
+        #
+        # prefer-lowest lands above the declared floor, and can't do better:
+        # pest-plugin-laravel 3.0.0 requires laravel/framework ^11.22.0 and
+        # testbench 11.0 requires ^13.12, so those two rows install 11.22 and
+        # 13.12, not 11.0 and 13.0.
         include:
           - php: '8.2'
             laravel: '11'
@@ -62,8 +67,14 @@ jobs:
         env:
           COMPOSER_AUTH: '{"github-oauth": {"github.com": "${{ secrets.GITHUB_TOKEN }}"}}'
 
+      # --prefer-stable is unconditional, and on the prefer-lowest rows it is the
+      # load-bearing half: composer.json sets minimum-stability to dev, so without
+      # it "lowest" resolves branch builds — this job was installing
+      # laravel/framework 11.x-dev, guzzle 7.8.x-dev and psr7 1.9.x-dev, i.e.
+      # testing moving targets instead of the floor. It repeats harmlessly on the
+      # prefer-stable rows.
       - name: Install dependencies
-        run: composer update --${{ matrix.dependency-version }} --prefer-dist --no-interaction --no-progress
+        run: composer update --${{ matrix.dependency-version }} --prefer-stable --prefer-dist --no-interaction --no-progress
         env:
           COMPOSER_AUTH: '{"github-oauth": {"github.com": "${{ secrets.GITHUB_TOKEN }}"}}'
 
@@ -71,8 +82,18 @@ jobs:
         run: vendor/bin/pest
 
   static-analysis:
-    name: Static analysis
+    name: Static analysis (Laravel ${{ matrix.laravel }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # PHPStan's verdict is major-sensitive — Laravel 13 narrowed
+        # getGlobalMiddleware()'s PHPDoc, which is why the TrustProxies lookup
+        # in the service provider carries no is_string() guard. With no
+        # committed lockfile an unpinned `composer install` analyses whichever
+        # major resolves as newest, so a break specific to an older one would
+        # never surface. Bracket the range instead.
+        laravel: ['11', '13']
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -83,8 +104,11 @@ jobs:
           php-version: '8.3'
           coverage: none
 
+      - name: Pin the Laravel major
+        run: composer require "laravel/framework:${{ matrix.laravel }}.*" --no-interaction --no-update
+
       - name: Install dependencies
-        run: composer install --prefer-dist --no-interaction --no-progress
+        run: composer update --prefer-stable --prefer-dist --no-interaction --no-progress
         env:
           COMPOSER_AUTH: '{"github-oauth": {"github.com": "${{ secrets.GITHUB_TOKEN }}"}}'
 
