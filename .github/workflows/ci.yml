@@ -64,8 +64,6 @@ jobs:
       # version it picks is one this package actually declares support for.
       - name: Pin the Laravel major
         run: composer require "laravel/framework:${{ matrix.laravel }}.*" --no-interaction --no-update
-        env:
-          COMPOSER_AUTH: '{"github-oauth": {"github.com": "${{ secrets.GITHUB_TOKEN }}"}}'
 
       # --prefer-stable is unconditional, and on the prefer-lowest rows it is the
       # load-bearing half: composer.json sets minimum-stability to dev, so without

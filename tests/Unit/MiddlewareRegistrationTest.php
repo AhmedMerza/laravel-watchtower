@@ -41,6 +41,22 @@ it('splices the middleware directly after an app subclass of TrustProxies', func
     ]);
 });
 
+// Laravel types the global stack as class-strings, so this shouldn't happen —
+// but if it ever did, an is_string() guard in front of the is_a() lookup would
+// read the instance as "no TrustProxies here" and splice the block check in
+// front of it, where it sees the proxy's IP instead of the client's.
+it('finds an instantiated TrustProxies, rather than splicing in front of it', function () {
+    $proxies = new AppTrustProxies;
+
+    app(Kernel::class)->setGlobalMiddleware([HandleCors::class, $proxies]);
+
+    expect(reRegister())->toBe([
+        HandleCors::class,
+        $proxies,
+        BlockedIpMiddleware::class,
+    ]);
+});
+
 it('puts the middleware first when TrustProxies is absent from the global stack', function () {
     app(Kernel::class)->setGlobalMiddleware([HandleCors::class]);
 
