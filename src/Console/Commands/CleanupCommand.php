@@ -26,7 +26,15 @@ class CleanupCommand extends Command
             ->delete();
 
         if ($deleted > 0) {
-            $this->cache->rebuild();
+            // A failed rebuild here leaves IPs cached as blocked that the DB no
+            // longer blocks, so a legitimate user stays locked out until the
+            // cache entry hits its TTL. Cron has to see that.
+            if (! $this->cache->rebuild()) {
+                $this->error("Removed {$deleted} expired block(s), but the cache rebuild failed — they stay blocked in cache until their TTL expires.");
+
+                return self::FAILURE;
+            }
+
             $this->info("Removed {$deleted} expired block(s). Redis cache rebuilt.");
         } else {
             $this->info('Nothing to clean up — no expired blocks found.');
