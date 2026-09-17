@@ -5,29 +5,22 @@
 
 > **Active blocking and cross-server coordination at the edge of your Laravel app** — block a bad actor in one environment and every other environment sees the block within minutes. No Cloudflare, no AWS WAF, no infrastructure changes. Block over a JSON API standalone, or one-click from any log entry when LogScope is installed.
 
-> **Status — heading to v1.0.** Core IP blocking, cross-environment push/pull sync, the cache abstraction (works on **any** Laravel cache driver — Redis is no longer required), and the opt-in auto-block engine (with `block` / `warn` / `disabled` modes) are all in place and tested. LogScope is fully optional — a dev/suggest dependency you install only if you want one-click blocking from the log detail panel.
+> **Status — heading to v1.0.** Core IP blocking, cross-environment push/pull sync, the cache abstraction (works on **any** Laravel cache driver — Redis is no longer required), and the opt-in auto-block engine (with `block` / `warn` / `disabled` modes) are all in place and tested. LogScope is optional: you need it for one-click blocking from its log detail panel, and for the auto-block engine, which reads LogScope's log table.
 >
 > Still landing before `v1.0.0`: a **standalone management UI** (today the standalone interface is the JSON API below; LogScope users get the in-panel Block-IP button).
 
 ## Quick Start
 
-**With LogScope:**
-
 ```bash
 composer require ahmedmerza/watchtower
 php artisan watchtower:install
 ```
 
-A **Block IP** button now appears in your LogScope detail panel whenever a log entry has an IP address.
+Add your own IP to `WATCHTOWER_NEVER_BLOCK_IPS` before you block anything — see [Installation](#-installation).
 
-<a id="standalone-no-logscope"></a>**Standalone (no LogScope):**
+**With LogScope:** a **Block IP** button now appears in your LogScope detail panel whenever a log entry has an IP address.
 
-```bash
-composer require ahmedmerza/watchtower
-php artisan watchtower:install
-```
-
-A JSON management API mounts at `/watchtower/api/...` (configurable via `WATCHTOWER_ROUTE_PREFIX`) — `POST /api/block`, `DELETE /api/block/{ip}`, `GET /api/status/{ip}`, `GET /api/blocks`. There is no standalone HTML UI yet (that's coming before v1.0 — see the status note above); standalone, you drive blocks through this API.
+<a id="standalone-no-logscope"></a>**Standalone (no LogScope):** a JSON management API mounts at `/watchtower/api/...` (configurable via `WATCHTOWER_ROUTE_PREFIX`) — `POST /api/block`, `DELETE /api/block/{ip}`, `GET /api/status/{ip}`, `GET /api/blocks`. There is no standalone HTML UI yet (that's coming before v1.0 — see the status note above); standalone, you drive blocks through this API.
 
 **The API is closed outside `local` until you open it.** Access goes through a `viewWatchtower` Gate, which by default allows everyone in the `local` environment and no one anywhere else — the same model as Horizon and Pulse. Define it in your `AppServiceProvider` to decide who gets in:
 
@@ -49,7 +42,7 @@ A Gate whose callback needs a `$user` refuses guests, so the routes need a sessi
 ## How It Works
 
 ```
-Admin blocks IP in LogScope UI (staging)
+Admin blocks an IP from LogScope's UI or the API (staging)
     │
     ├─► DB row created + cache rebuilt → staging protected immediately
     │
@@ -59,7 +52,7 @@ Admin blocks IP in LogScope UI (staging)
                     └─► Cache rebuilt → all environments protected
 ```
 
-Every incoming request is checked against Laravel's cache (Redis, Memcached, file, database — your choice via `WATCHTOWER_CACHE_STORE`) before any middleware, session, auth, or route runs. No DB hit per request.
+Every incoming request is checked against Laravel's cache (Redis, Memcached, file, database — your choice via `WATCHTOWER_CACHE_STORE`) right after `TrustProxies`, before sessions, auth or routing run. The blocklist table itself is never queried per request.
 
 ---
 
@@ -72,6 +65,7 @@ Every incoming request is checked against Laravel's cache (Redis, Memcached, fil
 - [Auto-Block Rules](#-auto-block-rules)
 - [Artisan Commands](#-artisan-commands)
 - [Security Notes](#-security-notes)
+- [Contributing](#-contributing)
 - [License](#-license)
 
 ---
@@ -81,7 +75,7 @@ Every incoming request is checked against Laravel's cache (Redis, Memcached, fil
 - PHP 8.2, 8.3 or 8.4
 - Laravel 12 or 13 — both are exercised by CI, and `composer.json` won't install on a major that isn't. Laravel 13 itself requires PHP 8.3+. Laravel 11 is not supported: it is past security support, so every 11.x release carries an open advisory and a current Composer refuses to install one.
 - A configured Laravel cache store (any driver — redis, memcached, file, database, array). Redis is recommended for production.
-- [ahmedmerza/logscope](https://github.com/AhmedMerza/laravel-logscope) >= 1.6.1 *(optional — only needed if you want the in-detail-panel Block-IP button)*. LogScope only started including this package's `watchtower::` partial in 1.6.1; 1.5.2–1.6.0 include the pre-rename `logscope-guard::` one, so the button never renders on those.
+- [ahmedmerza/logscope](https://github.com/AhmedMerza/laravel-logscope) >= 1.6.1 *(optional — needed for the Block-IP button in its detail panel, and for [auto-block rules](#-auto-block-rules))*. LogScope only started including this package's `watchtower::` partial in 1.6.1; 1.5.2–1.6.0 include the pre-rename `logscope-guard::` one, so the button never renders on those.
 
 ---
 
@@ -100,6 +94,8 @@ WATCHTOWER_NEVER_BLOCK_IPS=127.0.0.1,::1,your.own.ip
 ```
 
 > **Important:** Add your own IP to `WATCHTOWER_NEVER_BLOCK_IPS` before enabling. You cannot be blocked by an IP on this list — it is checked before any block operation, before the cache, and before the DB.
+
+Without LogScope, the management API refuses every request outside `local` until you define the `viewWatchtower` Gate — see [Standalone](#standalone-no-logscope).
 
 ---
 
@@ -144,7 +140,7 @@ WATCHTOWER_CLEANUP_ENABLED=true
 
 ### Block Response
 
-By default, blocked IPs receive a plain `403 Access denied.` response. To redirect instead:
+By default, blocked IPs receive a plain-text `403 Access denied.` response. It's returned directly, so the app's exception handler never sees it: no custom `errors/403` page, and no JSON body for API clients. To redirect instead:
 
 ```php
 // config/watchtower.php
@@ -154,6 +150,24 @@ By default, blocked IPs receive a plain `403 Access denied.` response. To redire
     'redirect' => null, // Set a URL to redirect instead
 ],
 ```
+
+### Webhook Notification
+
+With `WATCHTOWER_WEBHOOK_URL` set, every block made on this environment — manual, auto-block, or a block a satellite pushes to this master — is posted to that URL as JSON from a queued listener. Blocks a satellite pulls with `watchtower:sync` don't trigger it, so each block is announced once, by the environment that received it.
+
+```json
+{
+  "ip": "203.0.113.50",
+  "reason": "credential stuffing",
+  "source": "manual",
+  "source_env": "production",
+  "blocked_by": "admin@example.com",
+  "expires_at": null,
+  "blocked_at": "2026-09-17T08:00:00+00:00"
+}
+```
+
+`source` is `manual`, `auto` or `sync`, and `expires_at` is `null` for a permanent block. The request is unsigned and isn't retried: a connection failure is logged on `WATCHTOWER_LOG_CHANNEL`, and an error response is ignored.
 
 ---
 
@@ -222,7 +236,7 @@ Block on staging → staging protected instantly → master updated asynchronous
 
 ## 🤖 Auto-Block Rules
 
-Automatically block IPs based on log patterns. Disabled by default, and ships with an **empty `rules` array** — you opt in by defining rules yourself.
+Automatically block IPs based on patterns in LogScope's log table (`logscope.table`, default `log_entries`), so auto-block needs LogScope installed ([#23](https://github.com/AhmedMerza/laravel-watchtower/issues/23) tracks rules that work without it). Disabled by default, and ships with an **empty `rules` array** — you opt in by defining rules yourself.
 
 > ⚠️ **Tune carefully or lock real users out.** An overly broad rule can block legitimate traffic across every environment. Start each new rule in `warn` mode (below), validate it against real traffic, then flip it to `block`.
 
