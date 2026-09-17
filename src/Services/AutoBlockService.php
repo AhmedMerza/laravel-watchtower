@@ -7,6 +7,7 @@ namespace Watchtower\Services;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Watchtower\Enums\BlockSource;
+use Watchtower\Exceptions\NeverBlockException;
 
 class AutoBlockService
 {
@@ -112,8 +113,7 @@ class AutoBlockService
                     'source'     => BlockSource::Auto,
                     'expires_at' => $expiresAt,
                 ]);
-            } catch (\RuntimeException $e) {
-                // IP is in the never-block whitelist — skip silently
+            } catch (NeverBlockException) {
                 Log::channel(config('watchtower.log_channel', 'stack'))
                     ->debug('Watchtower: auto-block skipped for whitelisted IP', ['ip' => $ip]);
             }

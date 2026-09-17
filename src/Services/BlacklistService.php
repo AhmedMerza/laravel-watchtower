@@ -6,6 +6,7 @@ namespace Watchtower\Services;
 
 use Watchtower\Enums\BlockSource;
 use Watchtower\Events\IpBlocked;
+use Watchtower\Exceptions\NeverBlockException;
 use Watchtower\Jobs\PushBlockToMaster;
 use Watchtower\Models\BlacklistedIp;
 
@@ -22,14 +23,14 @@ class BlacklistService
      * since the middleware only reads the cache and would otherwise let the
      * IP through while every caller is told it was blocked.
      *
-     * @throws \RuntimeException when the IP is in the never-block whitelist
+     * @throws NeverBlockException when the IP is in the never-block whitelist
      */
     public function block(string $ip, array $options = []): BlacklistedIp
     {
         $ip = $this->normalizeIp($ip);
 
         if ($this->isNeverBlock($ip)) {
-            throw new \RuntimeException("IP {$ip} is in the never-block whitelist and cannot be blocked.");
+            throw new NeverBlockException("IP {$ip} is in the never-block whitelist and cannot be blocked.");
         }
 
         $record = BlacklistedIp::updateOrCreate(

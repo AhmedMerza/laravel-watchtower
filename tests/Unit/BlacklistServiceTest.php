@@ -8,6 +8,7 @@ use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Queue;
 use Watchtower\Enums\BlockSource;
 use Watchtower\Events\IpBlocked;
+use Watchtower\Exceptions\NeverBlockException;
 use Watchtower\Jobs\PushBlockToMaster;
 use Watchtower\Models\BlacklistedIp;
 use Watchtower\Services\BlacklistCache;
@@ -69,7 +70,7 @@ it('throws when blocking a never-block whitelisted IP', function () {
     config()->set('watchtower.never_block', ['1.2.3.4']);
 
     expect(fn () => $this->service->block('1.2.3.4'))
-        ->toThrow(RuntimeException::class, 'never-block whitelist');
+        ->toThrow(NeverBlockException::class, 'never-block whitelist');
 });
 
 it('unblocks an IP and removes the DB record', function () {

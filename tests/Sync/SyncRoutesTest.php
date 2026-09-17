@@ -226,6 +226,15 @@ it('refuses a pushed IP that is in the master never-block list', function () {
     $this->assertDatabaseCount('blacklisted_ips', 0);
 });
 
+it('answers 500, not the never-block 422, when the master cannot write the block', function () {
+    // A satellite retries either one, but only a 500 tells it the master is
+    // failing rather than refusing the IP.
+    failBlacklistInserts();
+
+    postSigned($this, json_encode(['ip' => '10.0.0.1', 'source_env' => 'staging']))
+        ->assertStatus(500);
+});
+
 it('shares no method and URI with a management route', function () {
     $syncRoutes = [];
     $otherRoutes = [];

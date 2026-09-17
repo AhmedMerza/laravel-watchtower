@@ -8,6 +8,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
 use Watchtower\Enums\BlockSource;
+use Watchtower\Exceptions\NeverBlockException;
 use Watchtower\Models\BlacklistedIp;
 use Watchtower\Services\BlacklistService;
 
@@ -59,7 +60,7 @@ class SyncController extends Controller
                 'expires_at' => isset($validated['expires_at']) ? now()->parse($validated['expires_at']) : null,
                 'blocked_by' => $validated['blocked_by'] ?? null,
             ]);
-        } catch (\RuntimeException $e) {
+        } catch (NeverBlockException $e) {
             // never_block on the master wins over a satellite's opinion.
             return response()->json(['error' => $e->getMessage()], 422);
         }

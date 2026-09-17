@@ -7,6 +7,7 @@ namespace Watchtower\Http\Controllers;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
+use Watchtower\Exceptions\NeverBlockException;
 use Watchtower\Models\BlacklistedIp;
 use Watchtower\Services\BlacklistService;
 
@@ -35,7 +36,7 @@ class BlockController extends Controller
                 'log_entry_id' => $validated['log_entry_id'] ?? null,
                 'blocked_by'   => $blockedBy,
             ]);
-        } catch (\RuntimeException $e) {
+        } catch (NeverBlockException $e) {
             return response()->json(['error' => $e->getMessage()], 422);
         }
 

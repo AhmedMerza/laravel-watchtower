@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
@@ -180,6 +181,29 @@ it('skips IPs in the never-block whitelist', function () {
     $this->service->run();
 
     $this->assertDatabaseMissing('blacklisted_ips', ['ip' => '9.9.9.9']);
+});
+
+it('lets a failed block write surface instead of skipping it as whitelisted', function () {
+    config()->set('watchtower.auto_block.rules', [[
+        'level'            => 'error',
+        'message_contains' => null,
+        'count'            => 1,
+        'window_minutes'   => 5,
+    ]]);
+
+    DB::table('log_entries')->insert([
+        'id'          => Str::ulid(),
+        'level'       => 'error',
+        'message'     => 'Error',
+        'ip_address'  => '9.9.9.9',
+        'occurred_at' => now(),
+        'created_at'  => now(),
+        'updated_at'  => now(),
+    ]);
+
+    failBlacklistInserts();
+
+    expect(fn () => $this->service->run())->toThrow(QueryException::class);
 });
 
 it('skips IPs that are already blocked', function () {
