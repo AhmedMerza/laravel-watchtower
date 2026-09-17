@@ -54,7 +54,7 @@ class SyncCommand extends Command
             }
 
             $blocks = $response->json('data', []);
-            $synced = 0;
+            $written = [];
             $skipped = 0;
 
             foreach ($blocks as $block) {
@@ -68,7 +68,7 @@ class SyncCommand extends Command
                     continue;
                 }
 
-                BlacklistedIp::updateOrCreate(
+                $written[] = BlacklistedIp::updateOrCreate(
                     ['ip' => $block['ip']],
                     [
                         'reason'       => $block['reason'] ?? null,
@@ -79,14 +79,20 @@ class SyncCommand extends Command
                         'log_entry_id' => $block['log_entry_id'] ?? null,
                     ]
                 );
-                $synced++;
             }
 
-            // rebuild() logs and swallows its own DB failure, so ask it. Saying
-            // "cache rebuilt" and exiting 0 here hands cron a green run while
-            // the cached blocklist is stale — missing IPs master says to block.
+            $synced = count($written);
+
+            // rebuild() logs and swallows its own DB failure, so ask it. The
+            // middleware reads only the cache, so write what was just synced
+            // directly, as BlacklistService::block() does. Still fail the run:
+            // the DB read is failing, and cron is how anyone finds out.
             if (! $this->cache->rebuild()) {
-                $this->error("Synced {$synced} IPs from master ({$skipped} skipped), but the cache rebuild failed — the blocklist in cache is stale.");
+                foreach ($written as $record) {
+                    $this->cache->put($record);
+                }
+
+                $this->error("Synced {$synced} IPs from master ({$skipped} skipped) and wrote them to the cache directly, but the cache rebuild failed — its DB read error is on the watchtower log channel.");
 
                 return self::FAILURE;
             }

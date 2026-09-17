@@ -51,7 +51,7 @@ it('fails gracefully when master URL is not configured', function () {
         ->expectsOutputToContain('WATCHTOWER_MASTER_URL');
 });
 
-it('fails instead of reporting success when the cache rebuild fails', function () {
+it('enforces the synced IPs but still fails when the cache rebuild fails', function () {
     Http::fake([
         'master.example.com/watchtower/sync/blocks' => Http::response([
             'data' => [
@@ -61,17 +61,22 @@ it('fails instead of reporting success when the cache rebuild fails', function (
     ]);
 
     // rebuild() logs its own DB failure and returns false, keeping the stale
-    // cache. The rows still land, so the exit code is the only thing that can
-    // tell cron the blocklist in cache is missing IPs master says to block.
-    $cache = Mockery::mock(BlacklistCache::class)->shouldIgnoreMissing();
-    $cache->shouldReceive('rebuild')->once()->andReturnFalse();
-    $this->app->instance(BlacklistCache::class, $cache);
+    // cache. The middleware reads only the cache, so the synced IP must be
+    // written there anyway, and the exit code must still tell cron.
+    $this->app->instance(BlacklistCache::class, new class extends BlacklistCache
+    {
+        public function rebuild(): bool
+        {
+            return false;
+        }
+    });
 
     $this->artisan('watchtower:sync')
         ->assertFailed()
         ->expectsOutputToContain('cache rebuild failed');
 
     $this->assertDatabaseHas('blacklisted_ips', ['ip' => '1.2.3.4']);
+    expect((new BlacklistCache)->isBlocked('1.2.3.4'))->toBeTrue();
 });
 
 it('does not duplicate records on repeated syncs', function () {
