@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 use Illuminate\Auth\GenericUser;
 use Illuminate\Foundation\Auth\User;
-use Illuminate\Foundation\Http\Middleware\ValidateCsrfToken;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Facades\Queue;
@@ -65,8 +64,10 @@ it('refuses a browser request with a 403 rather than a redirect', function () {
 it('lets an anonymous request through in local', function (string $method, string $uri) {
     $this->app['env'] = 'local';
 
-    // Laravel skips the CSRF check only in `testing`, and this is a gate test.
-    $this->withoutMiddleware(ValidateCsrfToken::class)
+    // Laravel skips its CSRF check only in `testing`, so send a valid token.
+    // Laravel 12 and 13 put different CSRF middleware in the `web` group.
+    $this->withSession(['_token' => 'test-token'])
+        ->withHeader('X-CSRF-TOKEN', 'test-token')
         ->json($method, $uri, ['ip' => '10.0.0.2'])
         ->assertOk();
 })->with('management endpoints');
