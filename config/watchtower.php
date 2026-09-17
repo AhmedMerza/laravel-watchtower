@@ -25,7 +25,7 @@ return [
     | running standalone, routes mount at the prefix below and use the
     | middleware list here.
     |
-    | ⚠️ STANDALONE AUTH WARNING: until v1.1 ships proper standalone auth,
+    | ⚠️ STANDALONE AUTH WARNING: until v1.0 ships proper standalone auth,
     | the management routes have NO built-in authorization when LogScope
     | isn't installed. Either restrict access via the `middleware` array
     | (e.g. ['web', 'auth'] + a Gate check), or set `enabled` => false on
