@@ -4,6 +4,8 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-17
+
 ### Security
 
 - **BREAKING (standalone installs): the management API now refuses everyone outside `local` until the app says otherwise.** Without LogScope, the routes had only the `web` middleware: anyone could list the blocklist, and since any visitor who loads a page gets a CSRF token, anyone could block or unblock any IP. Access now goes through a `viewWatchtower` Gate that allows only the `local` environment by default, as Horizon and Pulse do; define it in your app to grant access. The check is always appended after `watchtower.routes.middleware`, so that list can add middleware but can't remove the check, and a refused request gets a 403 rather than a redirect. **If you protected the routes with `routes.middleware` (e.g. `['web', 'auth']`), you now also need to define the Gate**, or every request outside `local` gets a 403. Installs with LogScope are unchanged: LogScope's authorization still applies, and the Gate isn't used. **If you cache routes, run `php artisan route:cache` (or `optimize`) after upgrading:** a route cache built by an earlier version keeps serving the routes without the check. ([#17](https://github.com/AhmedMerza/laravel-watchtower/issues/17))
@@ -72,5 +74,6 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 - **There is no transitional `ahmedmerza/logscope-guard` package.** It has been removed from Packagist. To upgrade, `composer remove ahmedmerza/logscope-guard`, `composer require ahmedmerza/watchtower`, then work through the BREAKING entries under Changed.
 
-[Unreleased]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.1.0...v0.2.0
