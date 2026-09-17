@@ -10,6 +10,7 @@ use Illuminate\Routing\Controller;
 use Watchtower\Enums\BlockSource;
 use Watchtower\Exceptions\NeverBlockException;
 use Watchtower\Models\BlacklistedIp;
+use Watchtower\Rules\BlockTarget;
 use Watchtower\Services\BlacklistService;
 
 /**
@@ -34,14 +35,16 @@ class SyncController extends Controller
     public function receive(Request $request): JsonResponse
     {
         $validated = $request->validate([
-            'ip'         => ['required', 'string', 'ip', 'max:50'],
+            // A satellite already applied its own breadth check, with or
+            // without force, so refusing here would only split the two.
+            'ip'         => ['required', 'string', 'max:50', new BlockTarget(allowBroad: true)],
             'reason'     => ['nullable', 'string', 'max:500'],
             'source_env' => ['nullable', 'string', 'max:50'],
             'expires_at' => ['nullable', 'date'],
             'blocked_by' => ['nullable', 'string', 'max:255'],
         ]);
 
-        $ip = $this->service->normalizeIp($validated['ip']);
+        $ip = $this->service->normalizeTarget($validated['ip']);
         $existing = BlacklistedIp::where('ip', $ip)->first();
 
         // Same rule watchtower:sync applies in the other direction: an
@@ -53,7 +56,7 @@ class SyncController extends Controller
         }
 
         try {
-            $record = $this->service->block($ip, [
+            $record = $this->service->block($validated['ip'], [
                 'reason'     => $validated['reason'] ?? null,
                 'source_env' => $validated['source_env'] ?? 'unknown',
                 'source'     => BlockSource::Sync,

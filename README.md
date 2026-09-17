@@ -52,7 +52,7 @@ Admin blocks an IP from LogScope's UI or the API (staging)
                     └─► Cache rebuilt → all environments protected
 ```
 
-Every incoming request is checked against Laravel's cache (Redis, Memcached, file, database — your choice via `WATCHTOWER_CACHE_STORE`) right after `TrustProxies`, before sessions, auth or routing run. The blocklist table itself is never queried per request.
+Every incoming request is checked against Laravel's cache (Redis, Memcached, file, database — your choice via `WATCHTOWER_CACHE_STORE`) right after `TrustProxies`, before sessions, auth or routing run. The blocklist table itself is never queried per request. A block can be a single IP or a CIDR range; see [IP Ranges and IPv6](#ip-ranges-and-ipv6).
 
 ---
 
@@ -93,7 +93,7 @@ WATCHTOWER_ENABLED=true
 WATCHTOWER_NEVER_BLOCK_IPS=127.0.0.1,::1,your.own.ip
 ```
 
-> **Important:** Add your own IP to `WATCHTOWER_NEVER_BLOCK_IPS` before enabling. You cannot be blocked by an IP on this list — it is checked before any block operation, before the cache, and before the DB.
+> **Important:** Add your own IP to `WATCHTOWER_NEVER_BLOCK_IPS` before enabling. You cannot be blocked by an IP or range on this list — it is checked before any block operation, before the cache, and before the DB. On IPv6, list your network (`2001:db8:1:2::/64`) rather than one address: blocking any address blocks its whole /64, and a never-block address protects only itself.
 
 Without LogScope, the management API refuses every request outside `local` until you define the `viewWatchtower` Gate — see [Standalone](#standalone-no-logscope).
 
@@ -105,8 +105,11 @@ Without LogScope, the management API refuses every request outside `local` until
 # Master switch
 WATCHTOWER_ENABLED=true
 
-# IPs that can never be blocked (comma-separated) — prevents self-lockout
-WATCHTOWER_NEVER_BLOCK_IPS=127.0.0.1,::1
+# IPs and CIDR ranges that can never be blocked (comma-separated) — prevents self-lockout
+WATCHTOWER_NEVER_BLOCK_IPS=127.0.0.1,::1,10.0.0.0/8
+
+# Blocking one IPv6 address blocks the network around it, this many bits long (32–128; 128 = exact address only)
+WATCHTOWER_IPV6_BLOCK_PREFIX=64
 
 # Cache store for the blocklist. Blank = your app's default cache store.
 # Any Laravel driver works: redis, memcached, file, database, array, dynamodb.
@@ -150,6 +153,23 @@ By default, blocked IPs receive a plain-text `403 Access denied.` response. It's
     'redirect' => null, // Set a URL to redirect instead
 ],
 ```
+
+### IP Ranges and IPv6
+
+A block can be a single IP or a CIDR range, from the API, the LogScope button, auto-block or sync:
+
+```json
+POST /watchtower/api/block
+{ "ip": "203.0.113.0/24", "reason": "hosting range" }
+```
+
+- **Ranges are stored as their network address**, so `203.0.113.77/24` is stored as `203.0.113.0/24`.
+- **One IPv6 address blocks its /64.** An IPv6 client usually controls a whole /64 and can move to another address inside it at will, so blocking `2001:db8:1:2::9` stores and blocks `2001:db8:1:2::/64`. Change the width with `WATCHTOWER_IPV6_BLOCK_PREFIX`. To block exactly one IPv6 address, send it as `/128`.
+- **Very broad ranges need `force`.** IPv4 ranges shorter than /16 and IPv6 ranges shorter than /32 get a 422 unless the request also sends `force=true`. A master accepts whatever its satellites push, since they already made that call.
+- **`WATCHTOWER_NEVER_BLOCK_IPS` accepts ranges** and always wins: an address it covers gets through even when a blocked range covers it too. A block is refused only when the never-block list covers all of it.
+- **Unblocking an IP lifts its own block**, including the /64 that blocking it created, but never a wider range that covers it. `DELETE /api/block/{ip}` and `GET /api/status/{ip}` take a range too (`/api/block/203.0.113.0/24`), and the status of an IP names the range blocking it.
+
+Single IPs, and IPv6 networks at the configured prefix (which is everything auto-block creates), are one cache key each. Every other range sits in one list that each request reads, so a request makes two cache reads however many blocks there are.
 
 ### Webhook Notification
 
@@ -312,11 +332,11 @@ php artisan watchtower:cleanup
 
 **Trusted proxies:** Watchtower checks `$request->ip()` in a global middleware registered directly after Laravel's `TrustProxies`, so the forwarded client IP has already been resolved. It still runs before sessions, auth and routing. If your app is behind a load balancer or proxy, configure trusted proxies (`$middleware->trustProxies(at: ...)` in `bootstrap/app.php`), otherwise every request looks like it comes from the proxy. If you've removed `TrustProxies` from the global stack, Watchtower runs first and sees the direct peer address.
 
-**Cache outages fail open:** if the cache store throws during the lookup, the request is let through unchecked rather than returning a 500. The failure is logged on `watchtower.log_channel` roughly once a minute, and the boot-time cache warm-up stands down for the same window, so an outage can't fill the disk with one log line per request. The throttle window is kept in marker files under `storage/framework/`; on a read-only filesystem it degrades to per-process throttling. The check isn't atomic, so requests already in flight when an outage starts can each log once before the window closes — expect a small burst at onset, then one line per minute.
+**Cache outages fail open:** if the cache store throws during the lookup, the request is let through unchecked rather than returning a 500. The failure is logged on `watchtower.log_channel` roughly once a minute, and the cache warm-up stands down for the same window, so an outage can't fill the disk with one log line per request. The throttle window is kept in marker files under `storage/framework/`; on a read-only filesystem it degrades to per-process throttling. The check isn't atomic, so requests already in flight when an outage starts can each log once before the window closes — expect a small burst at onset, then one line per minute.
 
 **HMAC signatures:** Sync requests are signed by the satellite and verified by the master. The signature is `hash_hmac('sha256', timestamp + METHOD + path + rawBody, WATCHTOWER_SYNC_SECRET)`, sent as `X-Watchtower-Signature` alongside `X-Watchtower-Timestamp`; `Watchtower\Support\SyncSignature` is the one implementation both ends use. The master compares with `hash_equals` and rejects anything unsigned, wrongly signed, or carrying a timestamp more than `sync.timestamp_tolerance` seconds (default 300) from its own clock, which bounds how long a captured request stays replayable. Method and path are inside the signed string, so a captured read can't be replayed as a write. Use a long, random secret and keep it identical across environments.
 
-**Cache TTL:** Each per-IP cache entry carries a 24-hour TTL (configurable via `cache.ttl_hours`) as a safety net. The cache is explicitly rebuilt on every block/unblock and on `watchtower:sync`; if the store is flushed, it warms from the DB automatically on the next request boot.
+**Cache TTL:** Each per-IP cache entry carries a 24-hour TTL (configurable via `cache.ttl_hours`) as a safety net. The cache is explicitly rebuilt on every block/unblock and on `watchtower:sync`; if the store is flushed or its entries expire, the next lookup warms it from the DB.
 
 ---
 

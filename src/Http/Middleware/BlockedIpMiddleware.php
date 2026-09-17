@@ -10,6 +10,7 @@ use Illuminate\Support\Facades\Log;
 use Symfony\Component\HttpFoundation\Response;
 use Watchtower\Services\BlacklistCache;
 use Watchtower\Support\FailureWindow;
+use Watchtower\Support\IpRange;
 
 class BlockedIpMiddleware
 {
@@ -27,10 +28,11 @@ class BlockedIpMiddleware
             return $next($request);
         }
 
-        $normalized = $this->normalizeIp($ip);
+        $normalized = IpRange::canonical($ip) ?? $ip;
 
-        // Never block whitelisted IPs — check before Redis to guarantee safety
-        if (in_array($normalized, config('watchtower.never_block', []), true)) {
+        // Never block whitelisted IPs or ranges — check before the cache to
+        // guarantee safety, so they win over any block that covers them.
+        if (IpRange::covers((array) config('watchtower.never_block', []), $normalized)) {
             return $next($request);
         }
 
@@ -76,25 +78,5 @@ class BlockedIpMiddleware
         } catch (\Throwable) {
             // A broken log channel must not undo the fail-open.
         }
-    }
-
-    private function normalizeIp(string $ip): string
-    {
-        $packed = @inet_pton($ip);
-
-        if ($packed === false) {
-            return $ip;
-        }
-
-        $normalized = inet_ntop($packed);
-
-        if (str_starts_with($normalized, '::ffff:')) {
-            $candidate = substr($normalized, 7);
-            if (filter_var($candidate, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
-                return $candidate;
-            }
-        }
-
-        return $normalized;
     }
 }

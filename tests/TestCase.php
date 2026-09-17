@@ -4,7 +4,9 @@ declare(strict_types=1);
 
 namespace Watchtower\Tests;
 
+use Closure;
 use Illuminate\Database\Eloquent\Factories\Factory;
+use Illuminate\Foundation\Application;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\File;
 use Orchestra\Testbench\TestCase as Orchestra;
@@ -13,6 +15,15 @@ use Watchtower\WatchtowerServiceProvider;
 
 class TestCase extends Orchestra
 {
+    /**
+     * Runs against each new app before its providers boot, for a test file
+     * that needs to observe booting. Set it in beforeAll(), clear it in
+     * afterAll().
+     *
+     * @var (Closure(Application): void)|null
+     */
+    public static ?Closure $beforeBoot = null;
+
     protected function setUp(): void
     {
         parent::setUp();
@@ -62,5 +73,9 @@ class TestCase extends Orchestra
                 updated_at DATETIME
             )
         ');
+
+        if (static::$beforeBoot) {
+            (static::$beforeBoot)($app);
+        }
     }
 }
