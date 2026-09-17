@@ -119,3 +119,13 @@ it('still needs the Gate when routes.middleware requires a login', function () {
         ->getJson('/watchtower/api/blocks')
         ->assertForbidden();
 });
+
+it('records who blocked the IP when the app\'s users are not Eloquent models', function () {
+    // Laravel's `database` auth provider returns a GenericUser.
+    Gate::define('viewWatchtower', fn ($user) => true);
+
+    $this->actingAs(new GenericUser(['id' => 3, 'email' => 'ops@example.com']))
+        ->postJson('/watchtower/api/block', ['ip' => '10.0.0.2'])
+        ->assertOk()
+        ->assertJsonPath('data.blocked_by', 'ops@example.com');
+});

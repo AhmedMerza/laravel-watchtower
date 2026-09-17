@@ -8,6 +8,10 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 - **BREAKING (standalone installs): the management API now refuses everyone outside `local` until the app says otherwise.** Without LogScope, the routes had only the `web` middleware: anyone could list the blocklist, and since any visitor who loads a page gets a CSRF token, anyone could block or unblock any IP. Access now goes through a `viewWatchtower` Gate that allows only the `local` environment by default, as Horizon and Pulse do; define it in your app to grant access. The check is always appended after `watchtower.routes.middleware`, so that list can add middleware but can't remove the check, and a refused request gets a 403 rather than a redirect. **If you protected the routes with `routes.middleware` (e.g. `['web', 'auth']`), you now also need to define the Gate**, or every request outside `local` gets a 403. Installs with LogScope are unchanged: LogScope's authorization still applies, and the Gate isn't used. ([#17](https://github.com/AhmedMerza/laravel-watchtower/issues/17))
 
+### Fixed
+
+- **Blocking through the API no longer fails with a 500 for apps whose users aren't Eloquent models.** The controller read the user's email with `getAttribute()`, which Laravel's `database` auth provider's `GenericUser` doesn't have. Any logged-in user of such an app got a 500 from `POST /api/block`, and so did LogScope's Block IP button.
+
 ## [0.2.0] - 2026-09-17
 
 ### Security
