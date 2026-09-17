@@ -74,10 +74,12 @@ return [
     |                        ],
     |                    ],
     |
-    | 'key'        - Cache key prefix. Per-IP entries land at
-    |                `{key}:ip:{ip}` and the index sidecar at
-    |                `{key}:_index`. Change the prefix only if it
-    |                conflicts with another package's cache keys.
+    | 'key'        - Cache key prefix. Single IPs and IPv6 networks at
+    |                `ipv6_block_prefix` land at `{key}:ip:{target}`,
+    |                every other range in `{key}:_ranges`, and the
+    |                index sidecar at `{key}:_index`. Change the prefix
+    |                only if it conflicts with another package's cache
+    |                keys.
     |
     | 'ttl_hours'  - Safety-net TTL on every cache entry. The cache is
     |                explicitly rebuilt on every block/unblock and on
