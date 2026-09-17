@@ -2,6 +2,8 @@
 
 declare(strict_types=1);
 
+use Carbon\Carbon;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Queue;
 use Watchtower\Enums\BlockSource;
@@ -14,6 +16,7 @@ use Watchtower\Services\BlacklistService;
 beforeEach(function () {
     $this->cache = Mockery::mock(BlacklistCache::class);
     $this->cache->shouldReceive('rebuild')->andReturn(true)->byDefault();
+    $this->cache->shouldReceive('forget')->byDefault();
     $this->cache->shouldReceive('warmOnBoot')->andReturn(null)->byDefault();
 
     $this->service = new BlacklistService($this->cache);
@@ -109,4 +112,80 @@ it('upserts rather than duplicating when blocking an already-blocked IP', functi
 
     $this->assertDatabaseCount('blacklisted_ips', 1);
     expect(BlacklistedIp::where('ip', '5.5.5.5')->first()->reason)->toBe('second');
+});
+
+describe('when the cache rebuild fails', function () {
+    beforeEach(function () {
+        config()->set('watchtower.cache', ['store' => 'array', 'key' => 'watchtower:blacklist', 'ttl_hours' => 24]);
+        Cache::store('array')->flush();
+
+        // rebuild() reports a failed DB read by returning false and leaving
+        // the cache alone. Both services share the array store.
+        $this->failing = new BlacklistService(new class extends BlacklistCache
+        {
+            public function rebuild(): bool
+            {
+                return false;
+            }
+        });
+        $this->working = new BlacklistService(new BlacklistCache);
+    });
+
+    it('still enforces the block', function (?Carbon $expiresAt) {
+        Event::fake();
+        Queue::fake();
+
+        $this->failing->block('1.2.3.4', ['expires_at' => $expiresAt]);
+
+        expect($this->working->isBlocked('1.2.3.4'))->toBeTrue();
+    })->with([
+        'permanent' => null,
+        'temporary' => fn () => now()->addHour(),
+    ]);
+
+    it('writes a temporary block that lapses on its own expiry', function () {
+        Event::fake();
+        Queue::fake();
+
+        $this->failing->block('1.2.3.4', ['expires_at' => now()->addHour()]);
+        $this->travel(61)->minutes();
+
+        expect($this->working->isBlocked('1.2.3.4'))->toBeFalse();
+    });
+
+    it('leaves the index to expire with the entries it was written alongside', function () {
+        Event::fake();
+        Queue::fake();
+        Cache::store('array')->put('watchtower:blacklist:_index', ['5.6.7.8'], 3600);
+
+        $this->failing->block('1.2.3.4');
+
+        // Rewriting the index here would restart its TTL, and warmOnBoot()
+        // would go on reading "warm" after the entries it lists had expired.
+        expect(Cache::store('array')->get('watchtower:blacklist:_index'))->toBe(['5.6.7.8']);
+        $this->travel(61)->minutes();
+        expect(Cache::store('array')->has('watchtower:blacklist:_index'))->toBeFalse();
+    });
+
+    it('still lifts the block', function () {
+        Event::fake();
+        Queue::fake();
+        $this->working->block('1.2.3.4');
+
+        $this->failing->unblock('1.2.3.4');
+
+        expect($this->working->isBlocked('1.2.3.4'))->toBeFalse();
+    });
+
+    it('lifts a block written by the fallback once rebuilds work again', function () {
+        Event::fake();
+        Queue::fake();
+        $this->failing->block('1.2.3.4');
+
+        // The fallback entry isn't in the index, so this rebuild alone
+        // wouldn't forget it.
+        $this->working->unblock('1.2.3.4');
+
+        expect($this->working->isBlocked('1.2.3.4'))->toBeFalse();
+    });
 });

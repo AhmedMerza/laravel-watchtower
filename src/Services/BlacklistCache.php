@@ -155,17 +155,42 @@ class BlacklistCache
 
         $newIndex = [];
         foreach ($blocks as $block) {
-            $value = $block->expires_at
-                ? $block->expires_at->toIso8601String()
-                : '';
-
-            $cache->put($this->ipKey($block->ip), $value, $this->ttlSeconds);
+            $this->put($block);
             $newIndex[] = $block->ip;
         }
 
         $cache->put($this->indexKey, $newIndex, $this->ttlSeconds);
 
         return true;
+    }
+
+    /**
+     * Write one IP's entry without reading the DB — the fallback for a
+     * block whose rebuild() failed, so it takes effect anyway.
+     *
+     * The entry is deliberately left out of the index: rewriting the index
+     * restarts its TTL, so it would outlive the other entries and
+     * warmOnBoot() would keep calling the cache warm after they expired.
+     * The cost is that no later rebuild forgets it, which is why
+     * BlacklistService::unblock() always calls forget(). The only other
+     * delete path, watchtower:cleanup, removes expired blocks, and the
+     * entry carries its own expiry.
+     */
+    public function put(BlacklistedIp $block): void
+    {
+        $value = $block->expires_at
+            ? $block->expires_at->toIso8601String()
+            : '';
+
+        $this->cache()->put($this->ipKey($block->ip), $value, $this->ttlSeconds);
+    }
+
+    /**
+     * Forget one IP's entry without reading the DB. See put().
+     */
+    public function forget(string $ip): void
+    {
+        $this->cache()->forget($this->ipKey($ip));
     }
 
     /**
