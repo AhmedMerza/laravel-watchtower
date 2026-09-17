@@ -11,16 +11,6 @@
 
 ## Quick Start
 
-> **Not on Packagist yet.** Until the first tagged release is published, install from the GitHub repo. Add it as a VCS repository in your app's `composer.json`:
->
-> ```json
-> "repositories": [
->     { "type": "vcs", "url": "https://github.com/AhmedMerza/laravel-watchtower" }
-> ]
-> ```
->
-> then run `composer require ahmedmerza/watchtower:dev-main`. The commands below assume the package is installed.
-
 **With LogScope:**
 
 ```bash
@@ -37,7 +27,7 @@ composer require ahmedmerza/watchtower
 php artisan watchtower:install
 ```
 
-A JSON management API mounts at `/watchtower/api/...` (configurable via `WATCHTOWER_ROUTE_PREFIX`) — `POST /api/block`, `DELETE /api/block/{ip}`, `GET /api/status/{ip}`, `GET /api/blocks`. There is no standalone HTML UI yet (that's coming before v1.0 — see the status note above); standalone, you drive blocks through this API. Until v1.1 ships proper standalone auth, wrap the routes in your own auth middleware via `config/watchtower.php` → `routes.middleware` (e.g. `['web', 'auth']` plus a Gate check), or set `WATCHTOWER_ROUTES_ENABLED=false` to disable them entirely.
+A JSON management API mounts at `/watchtower/api/...` (configurable via `WATCHTOWER_ROUTE_PREFIX`) — `POST /api/block`, `DELETE /api/block/{ip}`, `GET /api/status/{ip}`, `GET /api/blocks`. There is no standalone HTML UI yet (that's coming before v1.0 — see the status note above); standalone, you drive blocks through this API. Until v1.0 ships proper standalone auth, wrap the routes in your own auth middleware via `config/watchtower.php` → `routes.middleware` (e.g. `['web', 'auth']` plus a Gate check), or set `WATCHTOWER_ROUTES_ENABLED=false` to disable them entirely.
 
 ---
 
