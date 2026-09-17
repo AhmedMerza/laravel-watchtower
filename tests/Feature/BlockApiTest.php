@@ -53,6 +53,17 @@ it('returns 422 when trying to block a whitelisted IP', function () {
         ->assertJsonStructure(['error']);
 });
 
+it('returns 500, not the never-block 422, when the block cannot be written', function () {
+    config()->set('app.debug', false);
+    failBlacklistInserts();
+
+    $response = $this->postJson('/logscope/watchtower/api/block', ['ip' => '10.0.0.1']);
+
+    $response->assertStatus(500);
+    // A QueryException's message carries the SQL and its bindings.
+    expect($response->getContent())->not->toContain('blacklisted_ips');
+});
+
 it('unblocks an IP via the API', function () {
     BlacklistedIp::create([
         'ip'         => '10.0.0.2',
