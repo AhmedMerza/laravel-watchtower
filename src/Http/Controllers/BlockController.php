@@ -24,10 +24,11 @@ class BlockController extends Controller
             'log_entry_id' => ['nullable', 'string', 'max:26'],
         ]);
 
+        // data_get() reads an Eloquent user's attributes and a GenericUser's
+        // properties alike. The `database` auth provider returns the latter,
+        // which has no getAttribute().
         $user = $request->user();
-        $blockedBy = $user
-            ? ($user->getAttribute('email') ?? $user->getAttribute('name'))
-            : null;
+        $blockedBy = data_get($user, 'email') ?? data_get($user, 'name');
 
         try {
             $record = $this->service->block($validated['ip'], [

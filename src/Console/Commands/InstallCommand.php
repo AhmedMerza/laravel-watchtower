@@ -53,9 +53,10 @@ class InstallCommand extends Command
         } else {
             $prefix = (string) config('watchtower.routes.prefix', 'watchtower');
             $this->line("Standalone mode — Watchtower routes mounted at <info>/{$prefix}</info>");
-            $this->line('<comment>⚠️  Until v1.0, the management routes have NO built-in authorization.</comment>');
-            $this->line('   Wrap them in your own auth middleware via <info>config/watchtower.php</info> → <info>routes.middleware</info>,');
-            $this->line('   or set <info>WATCHTOWER_ROUTES_ENABLED=false</info> if you don\'t need the UI yet.');
+            $this->line('<comment>⚠️  Outside the local environment, the management routes refuse everyone until you</comment>');
+            $this->line('<comment>   define the viewWatchtower Gate</comment>, e.g. in <info>AppServiceProvider::boot()</info>:');
+            $this->line('   <info>Gate::define(\'viewWatchtower\', fn ($user) => $user->isAdmin());</info>');
+            $this->line('   Set <info>WATCHTOWER_ROUTES_ENABLED=false</info> if you don\'t need the API.');
         }
 
         return self::SUCCESS;

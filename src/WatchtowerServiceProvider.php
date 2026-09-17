@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Watchtower;
 
+use Illuminate\Contracts\Auth\Access\Gate;
 use Illuminate\Contracts\Http\Kernel;
 use Illuminate\Http\Middleware\TrustProxies;
 use Illuminate\Support\Facades\Event;
@@ -18,6 +19,7 @@ use Watchtower\Console\Commands\SyncCommand;
 use Watchtower\Events\IpBlocked;
 use Watchtower\Http\Controllers\BlockController;
 use Watchtower\Http\Controllers\SyncController;
+use Watchtower\Http\Middleware\Authorize;
 use Watchtower\Http\Middleware\BlockedIpMiddleware;
 use Watchtower\Http\Middleware\VerifySyncSignature;
 use Watchtower\Listeners\NotifyOnBlock;
@@ -60,6 +62,7 @@ class WatchtowerServiceProvider extends PackageServiceProvider
             $this->app->make(BlacklistCache::class)->warmOnBoot();
         });
 
+        $this->defineGate();
         $this->registerRoutes();
         $this->registerSyncRoutes();
 
@@ -143,30 +146,29 @@ class WatchtowerServiceProvider extends PackageServiceProvider
             return;
         }
 
-        // LogScope-integrated mode: mount under LogScope's prefix and
-        // automatically inherit LogScope's Authorize middleware so the
-        // existing UI-as-LogScope-extension experience keeps working.
+        // LogScope-integrated mode: mount under LogScope's prefix and use
+        // LogScope's authorization, so there's nothing extra to configure.
         //
-        // Standalone mode: mount under Watchtower's own configured prefix
-        // and use ONLY the middleware list from watchtower.routes.middleware.
-        // Until proper standalone auth lands (PR 2), the host app is
-        // responsible for restricting access via that middleware array
-        // (e.g. ['web', 'auth'] + Gate check) or by disabling the routes
-        // entirely via WATCHTOWER_ROUTES_ENABLED=false.
-        $authorizeClass = 'LogScope\\Http\\Middleware\\Authorize';
-        $logscopeInstalled = class_exists($authorizeClass);
+        // Standalone mode: mount under Watchtower's own prefix, behind the
+        // `viewWatchtower` Gate. The check is appended after
+        // watchtower.routes.middleware, so that list can add to it but never
+        // remove it.
+        $logScopeAuthorize = $this->logScopeAuthorizeMiddleware();
 
-        if ($logscopeInstalled) {
+        if ($logScopeAuthorize !== null) {
             $prefix = config('logscope.routes.prefix', 'logscope').'/watchtower';
             $domain = config('logscope.routes.domain');
             $middleware = array_merge(
                 (array) config('logscope.routes.middleware', ['web']),
-                [$authorizeClass]
+                [$logScopeAuthorize]
             );
         } else {
             $prefix = (string) config('watchtower.routes.prefix', 'watchtower');
             $domain = config('watchtower.routes.domain');
-            $middleware = (array) config('watchtower.routes.middleware', ['web']);
+            $middleware = array_merge(
+                (array) config('watchtower.routes.middleware', ['web']),
+                [Authorize::class]
+            );
         }
 
         // Named so the UI can build its URLs with route() instead of guessing
@@ -183,6 +185,32 @@ class WatchtowerServiceProvider extends PackageServiceProvider
             Route::delete('/api/block/{ip}', [BlockController::class, 'unblock'])->where('ip', '.*')->name('unblock');
             Route::get('/api/status/{ip}', [BlockController::class, 'status'])->where('ip', '.*')->name('status');
             Route::get('/api/blocks', [BlockController::class, 'index'])->name('blocks');
+        });
+    }
+
+    /**
+     * LogScope's Authorize middleware when LogScope is installed, else null.
+     */
+    protected function logScopeAuthorizeMiddleware(): ?string
+    {
+        $class = 'LogScope\\Http\\Middleware\\Authorize';
+
+        return class_exists($class) ? $class : null;
+    }
+
+    /**
+     * The default `viewWatchtower` Gate: `local` only, guests included, as
+     * Horizon does. An app grants access by defining the Gate itself, and
+     * its definition wins whichever order the two run in: define() replaces
+     * this one if the app runs later, and has() leaves the app's alone if it
+     * ran first.
+     */
+    protected function defineGate(): void
+    {
+        $this->callAfterResolving(Gate::class, function (Gate $gate): void {
+            if (! $gate->has('viewWatchtower')) {
+                $gate->define('viewWatchtower', fn ($user = null): bool => $this->app->environment('local'));
+            }
         });
     }
 

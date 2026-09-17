@@ -7,7 +7,7 @@
 
 > **Status — heading to v1.0.** Core IP blocking, cross-environment push/pull sync, the cache abstraction (works on **any** Laravel cache driver — Redis is no longer required), and the opt-in auto-block engine (with `block` / `warn` / `disabled` modes) are all in place and tested. LogScope is fully optional — a dev/suggest dependency you install only if you want one-click blocking from the log detail panel.
 >
-> Still landing before `v1.0.0`: a **built-in authorization path for standalone installs** (today you wrap the routes in your own auth — see [Standalone](#standalone-no-logscope)) and a **standalone management UI** (today the standalone interface is the JSON API below; LogScope users get the in-panel Block-IP button).
+> Still landing before `v1.0.0`: a **standalone management UI** (today the standalone interface is the JSON API below; LogScope users get the in-panel Block-IP button).
 
 ## Quick Start
 
@@ -27,7 +27,22 @@ composer require ahmedmerza/watchtower
 php artisan watchtower:install
 ```
 
-A JSON management API mounts at `/watchtower/api/...` (configurable via `WATCHTOWER_ROUTE_PREFIX`) — `POST /api/block`, `DELETE /api/block/{ip}`, `GET /api/status/{ip}`, `GET /api/blocks`. There is no standalone HTML UI yet (that's coming before v1.0 — see the status note above); standalone, you drive blocks through this API. Until v1.0 ships proper standalone auth, wrap the routes in your own auth middleware via `config/watchtower.php` → `routes.middleware` (e.g. `['web', 'auth']` plus a Gate check), or set `WATCHTOWER_ROUTES_ENABLED=false` to disable them entirely.
+A JSON management API mounts at `/watchtower/api/...` (configurable via `WATCHTOWER_ROUTE_PREFIX`) — `POST /api/block`, `DELETE /api/block/{ip}`, `GET /api/status/{ip}`, `GET /api/blocks`. There is no standalone HTML UI yet (that's coming before v1.0 — see the status note above); standalone, you drive blocks through this API.
+
+**The API is closed outside `local` until you open it.** Access goes through a `viewWatchtower` Gate, which by default allows everyone in the `local` environment and no one anywhere else — the same model as Horizon and Pulse. Define it in your `AppServiceProvider` to decide who gets in:
+
+```php
+use Illuminate\Support\Facades\Gate;
+
+public function boot(): void
+{
+    Gate::define('viewWatchtower', fn ($user) => in_array($user->email, [
+        'admin@example.com',
+    ]));
+}
+```
+
+A Gate whose callback needs a `$user` refuses guests, so the routes need a session: keep `web` in `routes.middleware` (the default). That list can add middleware, such as `auth` or a throttle, but the Gate check is always applied after it. A refused request gets a 403, never a redirect. To turn the API off entirely, set `WATCHTOWER_ROUTES_ENABLED=false`. With LogScope installed, LogScope's own authorization applies instead and `viewWatchtower` isn't used.
 
 ---
 
