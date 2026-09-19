@@ -56,12 +56,11 @@ class BlockController extends Controller
     public function status(string $ip): JsonResponse
     {
         $ip = urldecode($ip);
-        $record = $this->service->find($ip);
-        $blocked = $this->service->isBlocked($ip);
+        $status = $this->service->status($ip);
 
         return response()->json([
-            'blocked' => $blocked,
-            'data'    => $record,
+            'blocked' => $status['blocked'],
+            'data'    => $status['record'],
         ]);
     }
 

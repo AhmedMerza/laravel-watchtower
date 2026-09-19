@@ -99,7 +99,11 @@ class BlacklistService
     public function find(string $ip): ?BlacklistedIp
     {
         $own = BlacklistedIp::whereIn('ip', $this->targetsFor($ip))->get();
-        $record = $own->first(fn (BlacklistedIp $row) => ! $row->isExpired());
+        $live = $own->filter(fn (BlacklistedIp $row) => ! $row->isExpired());
+
+        // An explicit /128 and the /64 around it can both be live, and the
+        // query has no order, so prefer the row for this exact address.
+        $record = $live->firstWhere('ip', $this->normalizeIp($ip)) ?? $live->first();
 
         if ($record !== null) {
             return $record;
@@ -121,9 +125,37 @@ class BlacklistService
      * middleware decides it: never_block first, then the cache.
      *
      * A range has no single address to ask the cache about, so the row
-     * blocking it answers instead.
+     * blocking it answers instead. Use status() when the caller also wants
+     * that row, so it isn't looked up twice.
      */
     public function isBlocked(string $ip): bool
+    {
+        return $this->decide($ip, fn () => $this->find($ip));
+    }
+
+    /**
+     * What the status endpoint needs — the record blocking $ip and whether
+     * it counts — from one lookup rather than find() twice.
+     *
+     * @return array{blocked: bool, record: BlacklistedIp|null}
+     */
+    public function status(string $ip): array
+    {
+        $record = $this->find($ip);
+
+        return [
+            'blocked' => $this->decide($ip, fn () => $record),
+            'record'  => $record,
+        ];
+    }
+
+    /**
+     * Whether $ip is blocked, asking $record only for a range — a single
+     * address is answered by the cache, so the row is never fetched for it.
+     *
+     * @param  callable(): ?BlacklistedIp  $record
+     */
+    private function decide(string $ip, callable $record): bool
     {
         // The middleware lets these through whatever covers them, so
         // reporting them as blocked would contradict what happens.
@@ -132,9 +164,9 @@ class BlacklistService
         }
 
         if (str_contains($ip, '/')) {
-            $record = $this->find($ip);
+            $found = $record();
 
-            return $record !== null && ! $record->isExpired();
+            return $found !== null && ! $found->isExpired();
         }
 
         return $this->cache->isBlocked($this->normalizeIp($ip));

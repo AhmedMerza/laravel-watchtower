@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use Carbon\Carbon;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Queue;
 use Watchtower\Enums\BlockSource;
@@ -312,6 +313,39 @@ describe('ranges and IPv6 prefixes', function () {
 
         expect($this->service->find('203.0.113.9')?->ip)->toBe('203.0.113.0/24')
             ->and($this->service->find('198.51.100.9'))->toBeNull();
+    });
+
+    it('answers a query that is not an IP at all', function () {
+        $this->service->block('203.0.113.0/24');
+
+        // Without the null guard, the covering-range search hands null to a
+        // string parameter under strict_types — a 500 on /api/status/{junk}.
+        expect($this->service->find('not-an-ip'))->toBeNull()
+            ->and($this->service->isBlocked('not-an-ip'))->toBeFalse();
+    });
+
+    it('prefers the row for the exact address when its /64 is blocked too', function () {
+        $this->service->block('2001:db8::1/128', ['reason' => 'this address']);
+        $this->service->block('2001:db8::2', ['reason' => 'the whole /64']);
+
+        // Both rows are live and the query has no order of its own.
+        expect(BlacklistedIp::count())->toBe(2)
+            ->and($this->service->find('2001:db8::1')?->reason)->toBe('this address');
+    });
+
+    it('looks the record up once when reporting status for a range', function () {
+        $this->service->block('203.0.113.0/24');
+
+        DB::enableQueryLog();
+        $status = $this->service->status('203.0.113.0/25');
+        $queries = DB::getQueryLog();
+        DB::disableQueryLog();
+
+        expect($status['blocked'])->toBeTrue()
+            ->and($status['record']?->ip)->toBe('203.0.113.0/24')
+            // find() runs the own-row lookup plus the covering-range scan.
+            // Asking isBlocked() separately would double both.
+            ->and($queries)->toHaveCount(2);
     });
 
     it('finds the range blocking an IP that has no row of its own', function () {
