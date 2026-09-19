@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Watchtower;
 
+use Illuminate\Auth\Events\Failed;
+use Illuminate\Auth\Events\Lockout;
 use Illuminate\Contracts\Auth\Access\Gate;
 use Illuminate\Contracts\Http\Kernel;
 use Illuminate\Http\Middleware\TrustProxies;
@@ -21,12 +23,15 @@ use Watchtower\Http\Controllers\BlockController;
 use Watchtower\Http\Controllers\SyncController;
 use Watchtower\Http\Middleware\Authorize;
 use Watchtower\Http\Middleware\BlockedIpMiddleware;
+use Watchtower\Http\Middleware\SignalDetectorMiddleware;
 use Watchtower\Http\Middleware\VerifySyncSignature;
+use Watchtower\Listeners\DetectAuthFailures;
 use Watchtower\Listeners\NotifyOnBlock;
 use Watchtower\Services\AutoBlockService;
 use Watchtower\Services\BlacklistCache;
 use Watchtower\Services\BlacklistService;
 use Watchtower\Support\FailureWindow;
+use Watchtower\Support\HitWindow;
 use Watchtower\Support\SyncSignature;
 
 class WatchtowerServiceProvider extends PackageServiceProvider
@@ -47,6 +52,7 @@ class WatchtowerServiceProvider extends PackageServiceProvider
         $this->app->singleton(BlacklistCache::class);
         $this->app->singleton(BlacklistService::class);
         $this->app->singleton(AutoBlockService::class);
+        $this->app->singleton(HitWindow::class);
     }
 
     public function bootingPackage(): void
@@ -63,6 +69,8 @@ class WatchtowerServiceProvider extends PackageServiceProvider
 
         Event::listen(IpBlocked::class, NotifyOnBlock::class);
 
+        $this->registerDetectorListeners();
+
         if (config('watchtower.auto_block.enabled', false)) {
             Schedule::call(fn () => $this->app->make(AutoBlockService::class)->run())
                 ->everyMinute()
@@ -75,6 +83,29 @@ class WatchtowerServiceProvider extends PackageServiceProvider
                 ->daily()
                 ->name('watchtower:cleanup')
                 ->withoutOverlapping();
+        }
+    }
+
+    /**
+     * Listen for the auth events the detectors read, when they're enabled.
+     *
+     * Both are Laravel's own — every guard fires Failed on a bad credential,
+     * and the login throttles Breeze, Fortify and ThrottlesLogins ship with
+     * fire Lockout — so neither needs the app to log anything, or LogScope
+     * to be installed.
+     */
+    protected function registerDetectorListeners(): void
+    {
+        if (! config('watchtower.auto_block.enabled', false)) {
+            return;
+        }
+
+        if (config('watchtower.auto_block.detectors.failed_logins.enabled', false)) {
+            Event::listen(Failed::class, [DetectAuthFailures::class, 'handleFailed']);
+        }
+
+        if (config('watchtower.auto_block.detectors.login_lockouts.enabled', false)) {
+            Event::listen(Lockout::class, [DetectAuthFailures::class, 'handleLockout']);
         }
     }
 
@@ -96,6 +127,16 @@ class WatchtowerServiceProvider extends PackageServiceProvider
             return;
         }
 
+        $ours = [BlockedIpMiddleware::class];
+
+        // Straight after the blocking middleware, so an address that is
+        // already blocked is turned away before it can add to a counter —
+        // and only when a detector that reads the request is actually on,
+        // so a stock install carries no extra stack frame at all.
+        if ($this->requestDetectorsEnabled()) {
+            $ours[] = SignalDetectorMiddleware::class;
+        }
+
         // is_a() also matches an app's own subclass, e.g. App\Http\Middleware\TrustProxies,
         // and returns false for anything that isn't a class name, so it needs no is_string()
         // guard in front — which is just as well, since Laravel 13 narrowed this array's
@@ -108,9 +149,27 @@ class WatchtowerServiceProvider extends PackageServiceProvider
             $this->warnTrustProxiesMissing();
         }
 
-        array_splice($middleware, $trustProxies === false ? 0 : $trustProxies + 1, 0, [BlockedIpMiddleware::class]);
+        array_splice($middleware, $trustProxies === false ? 0 : $trustProxies + 1, 0, $ours);
 
         $kernel->setGlobalMiddleware($middleware);
+    }
+
+    /**
+     * Whether either detector that reads the request is switched on.
+     *
+     * Checked at boot rather than per request so that the middleware is
+     * simply absent when it has nothing to do: "a request that matches
+     * nothing costs nothing extra" is cheapest to honour by not being in
+     * the stack in the first place.
+     */
+    protected function requestDetectorsEnabled(): bool
+    {
+        if (! config('watchtower.auto_block.enabled', false)) {
+            return false;
+        }
+
+        return (bool) config('watchtower.auto_block.detectors.scanner_paths.enabled', false)
+            || (bool) config('watchtower.auto_block.detectors.response_bursts.enabled', false);
     }
 
     /**

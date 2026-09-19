@@ -4,8 +4,11 @@ declare(strict_types=1);
 
 use Carbon\Carbon;
 use Illuminate\Cache\ArrayStore;
+use Illuminate\Cache\Events\KeyForgotten;
+use Illuminate\Cache\Events\KeyWritten;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
 use Watchtower\Enums\BlockSource;
@@ -436,5 +439,62 @@ describe('ranges', function () {
         $this->cache->forget('203.0.113.0/24');
 
         expect($this->cache->isBlocked('203.0.113.9'))->toBeFalse();
+    });
+});
+
+/*
+ * write() — the path BlacklistService::block() takes. A single address must
+ * cost one cache key, because auto-block only ever produces single
+ * addresses and a scanner storm would otherwise rebuild the whole blocklist
+ * once per block, re-reading every active row each time.
+ */
+describe('write', function () {
+    it('writes one key for a single address and does not rebuild', function () {
+        // A row that only a rebuild could have learned about: if write()
+        // rebuilt, this would land in the cache too.
+        blacklistRow('198.18.9.9');
+
+        $written = [];
+        Event::listen(
+            [KeyWritten::class, KeyForgotten::class],
+            function ($event) use (&$written): void {
+                $written[] = $event->key;
+            },
+        );
+
+        $this->cache->write(blacklistRow('203.0.113.42'));
+
+        expect($written)->toBe(['watchtower:blacklist:ip:203.0.113.42']);
+
+        // Proof it really didn't rebuild: the other active row is absent,
+        // and the range list — which every rebuild writes — was never
+        // touched.
+        expect(Cache::store('array')->get('watchtower:blacklist:ip:198.18.9.9'))->toBeNull()
+            ->and(Cache::store('array')->get('watchtower:blacklist:_ranges'))->toBeNull();
+    });
+
+    it('rebuilds for a range, so the shared range list stays authoritative', function () {
+        $this->cache->write(blacklistRow('198.18.0.0/16'));
+
+        // The range list is what a rebuild writes last, and it holds every
+        // active range — not just the one written.
+        $ranges = Cache::store('array')->get('watchtower:blacklist:_ranges');
+
+        expect($ranges)->toBeArray()
+            ->and(array_keys($ranges['ranges']))->toContain('198.18.0.0/16');
+    });
+
+    it('still writes the entry when a rebuild cannot read the DB', function () {
+        $block = blacklistRow('198.18.0.0/16');
+
+        Schema::drop('blacklisted_ips');
+        Log::shouldReceive('channel')->andReturn(Mockery::mock()->shouldIgnoreMissing());
+
+        $this->cache->write($block);
+
+        // The rebuild failed, so put() wrote the range straight into the
+        // list and marked it partial — the middleware reads the cache, and
+        // must not let a blocked range through.
+        expect($this->cache->isBlocked('198.18.4.4'))->toBeTrue();
     });
 });

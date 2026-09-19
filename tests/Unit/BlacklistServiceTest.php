@@ -17,6 +17,7 @@ use Watchtower\Services\BlacklistService;
 
 beforeEach(function () {
     $this->cache = Mockery::mock(BlacklistCache::class);
+    $this->cache->shouldReceive('write')->byDefault();
     $this->cache->shouldReceive('rebuild')->andReturn(true)->byDefault();
     $this->cache->shouldReceive('forget')->byDefault();
 

@@ -9,6 +9,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 use Symfony\Component\HttpFoundation\Response;
 use Watchtower\Services\BlacklistCache;
+use Watchtower\Support\BlockResponse;
 use Watchtower\Support\FailureWindow;
 use Watchtower\Support\IpRange;
 
@@ -46,13 +47,7 @@ class BlockedIpMiddleware
         }
 
         if ($blocked) {
-            $blockConfig = config('watchtower.block_response');
-
-            if ($blockConfig['redirect']) {
-                return redirect($blockConfig['redirect']);
-            }
-
-            return response($blockConfig['message'], $blockConfig['status']);
+            return BlockResponse::make();
         }
 
         return $next($request);

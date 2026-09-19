@@ -77,9 +77,12 @@ return [
     | 'key'        - Cache key prefix. Single IPs and IPv6 networks at
     |                `ipv6_block_prefix` land at `{key}:ip:{target}`,
     |                every other range in `{key}:_ranges`, and the
-    |                index sidecar at `{key}:_index`. Change the prefix
-    |                only if it conflicts with another package's cache
-    |                keys.
+    |                index sidecar at `{key}:_index`. Enabled detectors
+    |                also count per IP at `{key}:hits:{detector}:{ip}`
+    |                and remember signed-in users at
+    |                `{key}:users:{detector}:{ip}`, both decaying with
+    |                the detector's own window. Change the prefix only
+    |                if it conflicts with another package's cache keys.
     |
     | 'ttl_hours'  - Safety-net TTL on every cache entry. The cache is
     |                explicitly rebuilt on every block/unblock and on
@@ -215,6 +218,32 @@ return [
     |   window_minutes   - look-back window for counting logs.
     |   mode             - (optional) override the global mode for this rule only.
     |
+    | Detectors (below) are the other half of the engine. Rules read a log
+    | table on a schedule; detectors react to Laravel's own signals as they
+    | happen, so they need no log table and no LogScope, and they act within
+    | the request rather than up to a minute later. They share every guard
+    | with rules: mode, the shared-IP threshold, and never_auto_block.
+    |
+    | Each is OFF by default. Counting happens per IP in the cache, and an
+    | address only gets a counter once it has done something a detector
+    | counts — traffic that matches nothing writes nothing.
+    |
+    | Detector shape:
+    |   enabled        - off by default. Turn one on at a time.
+    |   count          - signals within the window before it fires.
+    |   window_minutes - how long the counter decays over.
+    |   mode           - (optional) override the global mode for this
+    |                    detector only.
+    |
+    | ⚠️ The shared-IP guard is blind to anonymous traffic, and the auth
+    | detectors are anonymous by nature — a failed login has no signed-in
+    | user, and the account the credentials were aimed at is not the person
+    | at the keyboard, so it is deliberately NOT counted (an attacker
+    | working through a username list would otherwise look like a busy
+    | office and stand the guard down). Put known office, campus and carrier
+    | ranges in never_auto_block before arming failed_logins or
+    | login_lockouts.
+    |
     */
 
     'auto_block' => [
@@ -243,6 +272,67 @@ return [
             //     'window_minutes'   => 5,
             //     'mode'             => 'block',
             // ],
+        ],
+
+        'detectors' => [
+
+            // Illuminate\Auth\Events\Failed — fired by every guard on a bad
+            // credential. 10 in 5 minutes is well clear of a person
+            // mistyping a password twice, and still catches a list being
+            // worked through at any pace worth blocking.
+            'failed_logins' => [
+                'enabled'        => env('WATCHTOWER_DETECT_FAILED_LOGINS', false),
+                'count'          => 10,
+                'window_minutes' => 5,
+            ],
+
+            // Illuminate\Auth\Events\Lockout — fired by the login throttle
+            // Breeze, Fortify and ThrottlesLogins already apply, so this
+            // builds on a limit the app has set for itself. One lockout is
+            // someone fumbling a password; three in a quarter of an hour is
+            // someone working through a list.
+            'login_lockouts' => [
+                'enabled'        => env('WATCHTOWER_DETECT_LOGIN_LOCKOUTS', false),
+                'count'          => 3,
+                'window_minutes' => 15,
+            ],
+
+            // Paths no legitimate client asks for, which is why the
+            // threshold is 1: a single request for /.env is not a mistake.
+            // Matching runs against the DECODED path, so /%2Eenv is caught
+            // too. Keep this list to paths that are unambiguous — a pattern
+            // that overlaps a real route of yours will block the people
+            // using it, and the matched request is answered rather than
+            // served.
+            'scanner_paths' => [
+                'enabled'        => env('WATCHTOWER_DETECT_SCANNER_PATHS', false),
+                'count'          => 1,
+                'window_minutes' => 5,
+                'patterns'       => [
+                    '/.env',
+                    '/.env.*',
+                    '/.git/*',
+                    '/wp-login.php',
+                    '/wp-admin/*',
+                    '/xmlrpc.php',
+                    '/phpmyadmin*',
+                ],
+            ],
+
+            // A burst of 404s or 429s is what path enumeration looks like
+            // when it isn't using a known filename. Read after the response
+            // is sent, so it costs the request nothing.
+            //
+            // The loosest detector here, and the one most likely to catch a
+            // real person: a broken deploy that 404s its own assets can trip
+            // it. Leave it in warn mode for a full traffic cycle before
+            // arming it, and raise the count if your own logs say so.
+            'response_bursts' => [
+                'enabled'        => env('WATCHTOWER_DETECT_RESPONSE_BURSTS', false),
+                'count'          => 40,
+                'window_minutes' => 1,
+                'statuses'       => [404, 429],
+            ],
         ],
     ],
 
