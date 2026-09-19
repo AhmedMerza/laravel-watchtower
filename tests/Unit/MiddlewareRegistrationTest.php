@@ -7,6 +7,8 @@ use Illuminate\Http\Middleware\HandleCors;
 use Illuminate\Http\Middleware\TrustProxies;
 use Illuminate\Support\Facades\Log;
 use Watchtower\Http\Middleware\BlockedIpMiddleware;
+use Watchtower\Http\Middleware\SignalDetectorMiddleware;
+use Watchtower\Http\Middleware\UserAgentMiddleware;
 use Watchtower\Support\FailureWindow;
 use Watchtower\WatchtowerServiceProvider;
 
@@ -38,6 +40,7 @@ it('splices the middleware directly after an app subclass of TrustProxies', func
         HandleCors::class,
         AppTrustProxies::class,
         BlockedIpMiddleware::class,
+        UserAgentMiddleware::class,
     ]);
 });
 
@@ -54,6 +57,7 @@ it('finds an instantiated TrustProxies, rather than splicing in front of it', fu
         HandleCors::class,
         $proxies,
         BlockedIpMiddleware::class,
+        UserAgentMiddleware::class,
     ]);
 });
 
@@ -62,6 +66,7 @@ it('puts the middleware first when TrustProxies is absent from the global stack'
 
     expect(reRegister())->toBe([
         BlockedIpMiddleware::class,
+        UserAgentMiddleware::class,
         HandleCors::class,
     ]);
 });
@@ -91,6 +96,25 @@ it('does not register the middleware twice when registration runs again', functi
     $middleware = reRegister();
 
     expect(array_keys($middleware, BlockedIpMiddleware::class, true))->toHaveCount(1);
+});
+
+it('puts the User-Agent check after the detectors, so a probe is counted first', function () {
+    config()->set('watchtower.auto_block.enabled', true);
+    config()->set('watchtower.auto_block.detectors.scanner_paths.enabled', true);
+
+    app(Kernel::class)->setGlobalMiddleware([TrustProxies::class]);
+
+    // Both middlewares' docblocks lean on this order: the User-Agent check
+    // only decides about one request, while the detectors decide about the
+    // address, which outlives it — so a scanner probing /.env must reach
+    // scanner_paths before its User-Agent gets the request rejected. No
+    // other test has both in the stack at once.
+    expect(reRegister())->toBe([
+        TrustProxies::class,
+        BlockedIpMiddleware::class,
+        SignalDetectorMiddleware::class,
+        UserAgentMiddleware::class,
+    ]);
 });
 
 afterEach(function () {
