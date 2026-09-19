@@ -68,6 +68,7 @@ class TestCase extends Orchestra
                 level VARCHAR(20) NOT NULL,
                 message TEXT NOT NULL,
                 ip_address VARCHAR(50),
+                user_id BIGINT,
                 occurred_at DATETIME NOT NULL,
                 created_at DATETIME,
                 updated_at DATETIME

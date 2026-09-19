@@ -4,6 +4,16 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Auto-block won't take out a shared address.** Mobile carriers put subscribers behind carrier-grade NAT, and offices, universities and VPN exits do the same, so errors counted per IP add up across many innocent people. Before blocking, watchtower now counts the distinct signed-in users the log saw from that address during the window; at or above `shared_ip_user_threshold` (`WATCHTOWER_SHARED_IP_USER_THRESHOLD`, default `3`) the block downgrades to a warning carrying `not_blocked_because: shared IP`. `0` switches the guard off. The count covers all of the address's logged traffic, not just the rows the rule matched — the question is how many people a block would hit, not how many of them tripped it. Anonymous traffic counts for nobody, so a signed-out scanner still gets blocked. ([#22](https://github.com/AhmedMerza/laravel-watchtower/issues/22))
+- **`never_auto_block`**, a list of addresses and ranges (`WATCHTOWER_NEVER_AUTO_BLOCK_IPS`) that automation leaves alone but **an admin can still block by hand**. That is the difference from `never_block`, which nothing overrides: use this one for a gateway where a rule would be right about the traffic and wrong about the people behind it. Enforced in `BlacklistService::block()` against `source`, so every automated path gets it, and refusals raise the new `NeverAutoBlockException` (a `NeverBlockException` subclass, so existing catches still work). ([#22](https://github.com/AhmedMerza/laravel-watchtower/issues/22))
+
+### Changed
+
+- **BREAKING: a rule with no `mode` now runs in `warn`, not `block`.** The global default (`WATCHTOWER_AUTO_BLOCK_MODE`) and the per-rule fallback both moved, and an invalid mode value now falls back to `warn` too — a typo shouldn't start blocking people. A rule is written from a guess about traffic nobody has looked at yet, and the cost of guessing wrong is locking out real users, so a new rule reports before it acts. **If you rely on auto-block actually blocking, set `WATCHTOWER_AUTO_BLOCK_MODE=block` (or add `'mode' => 'block'` per rule) when you upgrade** — otherwise matching IPs are logged and let through. Nothing changes for anyone who already set a mode explicitly. ([#22](https://github.com/AhmedMerza/laravel-watchtower/issues/22))
+- **The would-have-blocked log says why.** Its message is now `Watchtower: would-have-blocked (auto-block did not block)` and the context carries `not_blocked_because` (`warn mode`, `shared IP` or `never_auto_block`) plus `distinct_users`, so an unarmed rule reads differently from one that fired and was overruled. In warn mode it also carries a `hint` naming the env var that arms it. `would_have_blocked: true` is unchanged and remains the canonical filter. Anything matching on the old message string needs updating.
+
 ## [0.3.0] - 2026-09-19
 
 ### Added

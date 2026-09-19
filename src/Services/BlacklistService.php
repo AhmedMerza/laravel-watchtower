@@ -6,6 +6,7 @@ namespace Watchtower\Services;
 
 use Watchtower\Enums\BlockSource;
 use Watchtower\Events\IpBlocked;
+use Watchtower\Exceptions\NeverAutoBlockException;
 use Watchtower\Exceptions\NeverBlockException;
 use Watchtower\Jobs\PushBlockToMaster;
 use Watchtower\Models\BlacklistedIp;
@@ -31,6 +32,7 @@ class BlacklistService
      * blocked.
      *
      * @throws NeverBlockException when the never-block whitelist covers what was asked for
+     * @throws NeverAutoBlockException when automation aims at the never-auto-block list
      */
     public function block(string $ip, array $options = []): BlacklistedIp
     {
@@ -39,6 +41,14 @@ class BlacklistService
         // lets the whitelisted address through regardless.
         if ($this->isNeverBlock($ip)) {
             throw new NeverBlockException("{$this->normalizeIp($ip)} is in the never-block whitelist and cannot be blocked.");
+        }
+
+        // never_auto_block binds automation only, so it is checked against
+        // the source rather than the address alone: the same call an admin
+        // makes by hand goes through. Living here rather than in each
+        // detector means a new automated path can't forget it.
+        if (($options['source'] ?? BlockSource::Manual) === BlockSource::Auto && $this->isNeverAutoBlock($ip)) {
+            throw new NeverAutoBlockException("{$this->normalizeIp($ip)} is in the never-auto-block list; automation cannot block it, but an admin can.");
         }
 
         $record = BlacklistedIp::updateOrCreate(
@@ -208,5 +218,12 @@ class BlacklistService
         $target = IpRange::canonical($ip);
 
         return $target !== null && IpRange::covers((array) config('watchtower.never_block', []), $target);
+    }
+
+    private function isNeverAutoBlock(string $ip): bool
+    {
+        $target = IpRange::canonical($ip);
+
+        return $target !== null && IpRange::covers((array) config('watchtower.never_auto_block', []), $target);
     }
 }

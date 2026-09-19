@@ -27,6 +27,11 @@ beforeEach(function () {
     config()->set('watchtower.auto_block.enabled', true);
     config()->set('watchtower.auto_block.block_duration_minutes', 60);
 
+    // Armed by default here. The shipped default is 'warn' (covered by its
+    // own test below); these cases are about thresholds, windows and
+    // whitelists, so they need the mode that actually writes a block.
+    config()->set('watchtower.auto_block.mode', 'block');
+
     $this->cache = new BlacklistCache;
     $this->blacklist = new BlacklistService($this->cache);
     $this->service = new AutoBlockService($this->blacklist);
@@ -295,11 +300,13 @@ it('warn mode logs a would-have-blocked entry and does NOT block', function () {
     $logChannel->shouldReceive('warning')
         ->once()
         ->withArgs(function (string $message, array $context): bool {
-            return $message === 'Watchtower: would-have-blocked (auto-block in warn mode)'
+            return $message === 'Watchtower: would-have-blocked (auto-block did not block)'
                 && $context['would_have_blocked'] === true
                 && $context['ip'] === '11.11.11.11'
                 && $context['threshold'] === 2
                 && $context['window_minutes'] === 5
+                && $context['not_blocked_because'] === 'warn mode'
+                && str_contains($context['hint'], 'WATCHTOWER_AUTO_BLOCK_MODE=block')
                 && is_int($context['rule_index']);
         });
     Log::shouldReceive('channel')->andReturn($logChannel);
@@ -309,8 +316,8 @@ it('warn mode logs a would-have-blocked entry and does NOT block', function () {
     $this->assertDatabaseMissing('blacklisted_ips', ['ip' => '11.11.11.11']);
 });
 
-it('block mode (default) still blocks when no mode is configured anywhere', function () {
-    // No mode key set anywhere — should default to 'block'
+it('runs in warn mode when no mode is configured anywhere', function () {
+    // No mode key set anywhere — a rule is a dry run until someone arms it.
     config()->offsetUnset('watchtower.auto_block.mode');
     config()->set('watchtower.auto_block.rules', [[
         'level'            => 'error',
@@ -329,9 +336,15 @@ it('block mode (default) still blocks when no mode is configured anywhere', func
         'updated_at'  => now(),
     ]);
 
+    $logChannel = Mockery::mock();
+    $logChannel->shouldReceive('warning')
+        ->once()
+        ->withArgs(fn (string $message, array $context): bool => $context['not_blocked_because'] === 'warn mode');
+    Log::shouldReceive('channel')->andReturn($logChannel);
+
     $this->service->run();
 
-    $this->assertDatabaseHas('blacklisted_ips', ['ip' => '12.12.12.12', 'source' => 'auto']);
+    $this->assertDatabaseMissing('blacklisted_ips', ['ip' => '12.12.12.12']);
 });
 
 it('per-rule mode overrides global mode (rule=block wins over global=warn)', function () {
@@ -425,7 +438,7 @@ it('disabled mode skips the rule entirely (no block, no warn log)', function () 
     $this->assertDatabaseMissing('blacklisted_ips', ['ip' => '15.15.15.15']);
 });
 
-it('invalid global mode value falls back to block', function () {
+it('invalid global mode value falls back to warn', function () {
     config()->set('watchtower.auto_block.mode', 'this-is-not-a-mode');
     config()->set('watchtower.auto_block.rules', [[
         'level'            => 'error',
@@ -444,7 +457,191 @@ it('invalid global mode value falls back to block', function () {
         'updated_at'  => now(),
     ]);
 
+    $logChannel = Mockery::mock();
+    $logChannel->shouldReceive('warning')->once();
+    Log::shouldReceive('channel')->andReturn($logChannel);
+
     $this->service->run();
 
-    $this->assertDatabaseHas('blacklisted_ips', ['ip' => '16.16.16.16', 'source' => 'auto']);
+    $this->assertDatabaseMissing('blacklisted_ips', ['ip' => '16.16.16.16']);
+});
+
+/*
+ * Shared-IP guard (#22) — many real users sit behind one public address
+ * (carrier-grade NAT, office gateways, VPN exits), so a rule tuned for one
+ * bad actor must not take the whole gateway down with it.
+ */
+
+function logEntry(string $ip, array $attributes = []): void
+{
+    DB::table('log_entries')->insert(array_merge([
+        'id'          => Str::ulid(),
+        'level'       => 'error',
+        'message'     => 'Boom',
+        'ip_address'  => $ip,
+        'user_id'     => null,
+        'occurred_at' => now(),
+        'created_at'  => now(),
+        'updated_at'  => now(),
+    ], $attributes));
+}
+
+function expectWarning(string $notBlockedBecause): void
+{
+    $logChannel = Mockery::mock();
+    $logChannel->shouldReceive('warning')
+        ->once()
+        ->withArgs(fn (string $message, array $context): bool => $context['not_blocked_because'] === $notBlockedBecause);
+    $logChannel->shouldReceive('debug')->zeroOrMoreTimes();
+    Log::shouldReceive('channel')->andReturn($logChannel);
+}
+
+it('warns instead of blocking when enough signed-in users share the address', function () {
+    config()->set('watchtower.auto_block.shared_ip_user_threshold', 3);
+    config()->set('watchtower.auto_block.rules', [[
+        'level'            => 'error',
+        'message_contains' => null,
+        'count'            => 3,
+        'window_minutes'   => 5,
+    ]]);
+
+    foreach ([1, 2, 3] as $userId) {
+        logEntry('20.20.20.20', ['user_id' => $userId]);
+    }
+
+    expectWarning('shared IP');
+
+    $this->service->run();
+
+    $this->assertDatabaseMissing('blacklisted_ips', ['ip' => '20.20.20.20']);
+});
+
+it('still blocks when the same volume comes from a single signed-in user', function () {
+    config()->set('watchtower.auto_block.shared_ip_user_threshold', 3);
+    config()->set('watchtower.auto_block.rules', [[
+        'level'            => 'error',
+        'message_contains' => null,
+        'count'            => 3,
+        'window_minutes'   => 5,
+    ]]);
+
+    foreach (range(1, 3) as $i) {
+        logEntry('21.21.21.21', ['user_id' => 7]);
+    }
+
+    $this->service->run();
+
+    $this->assertDatabaseHas('blacklisted_ips', ['ip' => '21.21.21.21', 'source' => 'auto']);
+});
+
+it('still blocks anonymous traffic, which belongs to nobody the guard can count', function () {
+    config()->set('watchtower.auto_block.shared_ip_user_threshold', 3);
+    config()->set('watchtower.auto_block.rules', [[
+        'level'            => 'error',
+        'message_contains' => null,
+        'count'            => 3,
+        'window_minutes'   => 5,
+    ]]);
+
+    foreach (range(1, 3) as $i) {
+        logEntry('22.22.22.22');
+    }
+
+    $this->service->run();
+
+    $this->assertDatabaseHas('blacklisted_ips', ['ip' => '22.22.22.22', 'source' => 'auto']);
+});
+
+it('counts users across all the traffic from the address, not just the rows the rule matched', function () {
+    // The case the guard exists for: one buggy client throws every error
+    // while other people browse the same gateway fine. Counting only the
+    // matching rows would see one user and block all of them.
+    config()->set('watchtower.auto_block.shared_ip_user_threshold', 3);
+    config()->set('watchtower.auto_block.rules', [[
+        'level'            => 'error',
+        'message_contains' => null,
+        'count'            => 3,
+        'window_minutes'   => 5,
+    ]]);
+
+    foreach (range(1, 3) as $i) {
+        logEntry('23.23.23.23', ['user_id' => 1]);
+    }
+
+    foreach ([2, 3] as $userId) {
+        logEntry('23.23.23.23', ['level' => 'info', 'message' => 'Browsing', 'user_id' => $userId]);
+    }
+
+    expectWarning('shared IP');
+
+    $this->service->run();
+
+    $this->assertDatabaseMissing('blacklisted_ips', ['ip' => '23.23.23.23']);
+});
+
+it('switches the shared-IP guard off at a threshold of 0', function () {
+    config()->set('watchtower.auto_block.shared_ip_user_threshold', 0);
+    config()->set('watchtower.auto_block.rules', [[
+        'level'            => 'error',
+        'message_contains' => null,
+        'count'            => 3,
+        'window_minutes'   => 5,
+    ]]);
+
+    foreach ([1, 2, 3] as $userId) {
+        logEntry('24.24.24.24', ['user_id' => $userId]);
+    }
+
+    $this->service->run();
+
+    $this->assertDatabaseHas('blacklisted_ips', ['ip' => '24.24.24.24', 'source' => 'auto']);
+});
+
+/*
+ * never_auto_block (#22) — automation leaves these alone, an admin still can't
+ * be stopped by them. That is the whole difference from never_block.
+ */
+
+it('downgrades an automated block to a warning for an IP in never_auto_block', function () {
+    config()->set('watchtower.never_auto_block', ['25.25.25.25']);
+    config()->set('watchtower.auto_block.rules', [[
+        'level'            => 'error',
+        'message_contains' => null,
+        'count'            => 1,
+        'window_minutes'   => 5,
+    ]]);
+
+    logEntry('25.25.25.25');
+
+    expectWarning('never_auto_block');
+
+    $this->service->run();
+
+    $this->assertDatabaseMissing('blacklisted_ips', ['ip' => '25.25.25.25']);
+});
+
+it('matches a never_auto_block CIDR range', function () {
+    config()->set('watchtower.never_auto_block', ['203.0.113.0/24']);
+    config()->set('watchtower.auto_block.rules', [[
+        'level'            => 'error',
+        'message_contains' => null,
+        'count'            => 1,
+        'window_minutes'   => 5,
+    ]]);
+
+    logEntry('203.0.113.7');
+
+    expectWarning('never_auto_block');
+
+    $this->service->run();
+
+    $this->assertDatabaseMissing('blacklisted_ips', ['ip' => '203.0.113.7']);
+});
+
+it('lets an admin block an IP in never_auto_block by hand', function () {
+    config()->set('watchtower.never_auto_block', ['26.26.26.26']);
+
+    $this->blacklist->block('26.26.26.26', ['reason' => 'Blocked by hand']);
+
+    $this->assertDatabaseHas('blacklisted_ips', ['ip' => '26.26.26.26', 'source' => 'manual']);
 });
