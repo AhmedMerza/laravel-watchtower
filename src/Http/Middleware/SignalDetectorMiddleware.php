@@ -6,6 +6,7 @@ namespace Watchtower\Http\Middleware;
 
 use Closure;
 use Illuminate\Http\Request;
+use Illuminate\Support\Str;
 use Symfony\Component\HttpFoundation\Response;
 use Watchtower\Services\AutoBlockService;
 use Watchtower\Support\BlockResponse;
@@ -23,7 +24,14 @@ use Watchtower\Support\BlockResponse;
  * them is enabled — a stock install never has it in the stack at all.
  *
  * Registered directly after BlockedIpMiddleware, so an address that is
- * already blocked is turned away before it can add to a counter.
+ * already blocked is turned away before handle() runs and can't add to a
+ * counter. That ordering does NOT cover terminate(): Laravel terminates
+ * every global middleware that has the method, whether or not the pipeline
+ * short-circuited, so response_bursts still runs for a request that
+ * BlockedIpMiddleware turned away — visibly so if block_response.status is
+ * set to 404 to disguise a block. What protects it there is
+ * AutoBlockService::record()'s own already-blocked check, which is
+ * load-bearing rather than redundant with this ordering.
  */
 class SignalDetectorMiddleware
 {
@@ -33,9 +41,12 @@ class SignalDetectorMiddleware
     {
         $patterns = $this->scannerPatterns();
 
-        // ->is() matches against the decoded path, so `/%2Eenv` is caught
-        // the same as `/.env`.
-        if ($patterns !== [] && $request->is(...$patterns)) {
+        // decodedPath() so `/%2Eenv` is caught the same as `/.env`, and
+        // ignoreCase because Str::is() — and so $request->is() — is
+        // case-sensitive by default, while scanners vary case precisely to
+        // slip past naive matching. `/WP-ADMIN/setup-config.php` is the
+        // same probe as `/wp-admin/setup-config.php`.
+        if ($patterns !== [] && Str::is($patterns, $request->decodedPath(), true)) {
             // Answer the probe ourselves rather than letting it through and
             // blocking only the next one. The default patterns hit nothing
             // real, but the list is configurable, and a pattern that does

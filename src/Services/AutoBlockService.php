@@ -9,6 +9,7 @@ use Illuminate\Support\Facades\Log;
 use Watchtower\Enums\BlockSource;
 use Watchtower\Exceptions\NeverAutoBlockException;
 use Watchtower\Exceptions\NeverBlockException;
+use Watchtower\Support\FailureWindow;
 use Watchtower\Support\HitWindow;
 
 class AutoBlockService
@@ -51,6 +52,27 @@ class AutoBlockService
      *              detector answers the request itself when it is.
      */
     public function record(string $detector, string $ip, int|string|null $userId = null): bool
+    {
+        // Fail open, the way BlockedIpMiddleware does. This runs inside the
+        // request — in middleware, and in an event listener inside the auth
+        // flow — so a cache backend that is down or slow must not turn an
+        // ordinary 404 or a failed login into a 500. Detection is a
+        // best-effort layer on top of the app; it is never worth the app
+        // itself. Losing a few counts during an outage is the right trade.
+        try {
+            return $this->detect($detector, $ip, $userId);
+        } catch (\Throwable $e) {
+            $this->reportDetectorFailure($e);
+
+            return false;
+        }
+    }
+
+    /**
+     * Count one signal and decide. See record(), which is this behind a
+     * fail-open guard.
+     */
+    private function detect(string $detector, string $ip, int|string|null $userId): bool
     {
         if (! config('watchtower.auto_block.enabled', false)) {
             return false;
@@ -100,7 +122,42 @@ class AutoBlockService
             return false;
         }
 
-        return $this->blockDetected($detector, $ip, $counted, $mode, $hits, $threshold, $windowMinutes);
+        return $this->blockDetected(
+            $detector,
+            $ip,
+            $counted,
+            $mode,
+            $hits,
+            $threshold,
+            $windowMinutes,
+            // Resolved once here rather than inside the decision, for the
+            // reason holdBack() gives: parsing it warns on a bad value, and
+            // this runs per request rather than per tick.
+            $this->sharedIpUserThreshold(),
+        );
+    }
+
+    /**
+     * Log the detector failure at most once per window — every request hits
+     * this during a cache outage, and a line per request fills the disk
+     * while the backend is already struggling.
+     */
+    private function reportDetectorFailure(\Throwable $e): void
+    {
+        if (FailureWindow::isOpen('detector')) {
+            return;
+        }
+
+        FailureWindow::open('detector');
+
+        try {
+            Log::channel(config('watchtower.log_channel', 'stack'))
+                ->error('Watchtower: detector failed, letting the request through uncounted', [
+                    'error' => $e->getMessage(),
+                ]);
+        } catch (\Throwable) {
+            // A broken log channel must not undo the fail-open.
+        }
     }
 
     /**
@@ -115,8 +172,24 @@ class AutoBlockService
         int $hits,
         int $threshold,
         int $windowMinutes,
+        int $sharedIpThreshold,
     ): bool {
+        // Read before clearing below — forget() drops the user set too.
         $users = $this->hits->users($detector, $counted);
+
+        // Whatever is decided below, this crossing has been answered, so the
+        // count starts again. Clearing here rather than only on a successful
+        // block is what stops a held-back detector re-reporting per request:
+        // warn mode never blocks, so a counter left sitting at its threshold
+        // would re-decide — and re-log — on every matching request for the
+        // rest of the window. A scanner sending thousands would write
+        // thousands of near-identical lines, which is both a disk-filling
+        // handle for an unauthenticated attacker and the fastest way to
+        // drown the dry run warn mode exists for. It now reports once per
+        // `count` signals instead, the same cadence a rule reports at once
+        // per tick. Blocking clears it for its own reason too: a lapsed
+        // block shouldn't re-fire on the very next signal.
+        $this->hits->forget($detector, $counted);
 
         $reason = sprintf(
             'Auto-blocked: %s reached %d in %d min',
@@ -137,7 +210,7 @@ class AutoBlockService
             'user_ids'       => $users,
         ];
 
-        $notBlockedBecause = $this->holdBack($mode, count($users), $this->sharedIpUserThreshold());
+        $notBlockedBecause = $this->holdBack($mode, count($users), $sharedIpThreshold);
 
         if ($notBlockedBecause !== null) {
             $this->logWouldHaveBlocked($ip, $reason, $notBlockedBecause, count($users), $context);
@@ -161,10 +234,6 @@ class AutoBlockService
 
             return false;
         }
-
-        // The counter has done its job, and leaving it at the threshold
-        // would re-trigger on the first signal after the block lapses.
-        $this->hits->forget($detector, $counted);
 
         return true;
     }

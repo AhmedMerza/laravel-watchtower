@@ -215,3 +215,38 @@ it('keeps separate counters for addresses in different IPv6 networks', function 
 
     expect(BlacklistedIp::count())->toBe(0);
 });
+
+it('lets the window decay, so hits do not accumulate forever', function () {
+    config()->set('watchtower.auto_block.detectors.failed_logins.window_minutes', 5);
+
+    // Two hits, then past the window, then two more. Without decay that is
+    // four hits against a threshold of three and the address is blocked.
+    $this->service->record('failed_logins', '198.51.100.20');
+    $this->service->record('failed_logins', '198.51.100.20');
+
+    $this->travel(6)->minutes();
+
+    expect($this->service->record('failed_logins', '198.51.100.20'))->toBeFalse()
+        ->and($this->service->record('failed_logins', '198.51.100.20'))->toBeFalse();
+
+    $this->assertDatabaseMissing('blacklisted_ips', ['ip' => '198.51.100.20']);
+});
+
+it('does not carry a previous window\'s users into the next one', function () {
+    config()->set('watchtower.auto_block.shared_ip_user_threshold', 3);
+    config()->set('watchtower.auto_block.detectors.failed_logins.window_minutes', 5);
+
+    // Two users seen late in one window. Their set must expire with the
+    // window that opened it — if its TTL slid forward on each new user it
+    // would outlive the counter, and these two would be counted again
+    // alongside a third in the next window, standing down a block that
+    // only one person's traffic actually earned.
+    $this->hits->recordUser('failed_logins', '198.51.100.21', 1, 300);
+    $this->hits->recordUser('failed_logins', '198.51.100.21', 2, 300);
+
+    expect($this->hits->users('failed_logins', '198.51.100.21'))->toBe(['1', '2']);
+
+    $this->travel(6)->minutes();
+
+    expect($this->hits->users('failed_logins', '198.51.100.21'))->toBe([]);
+});

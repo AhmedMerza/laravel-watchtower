@@ -299,6 +299,16 @@ return [
 
             // Paths no legitimate client asks for, which is why the
             // threshold is 1: a single request for /.env is not a mistake.
+            //
+            // ⚠️ A threshold of 1 means ONE request is enough to block an
+            // address, with no accumulation to ride out a mistake. That puts
+            // the whole weight on `$request->ip()` being the real client: a
+            // proxy or load balancer that forwards a client-supplied
+            // X-Forwarded-For verbatim lets an attacker name an innocent
+            // address and have it blocked with a single crafted request.
+            // Watchtower warns when TrustProxies is missing from the stack
+            // entirely, but it cannot see an overly-permissive one. Get
+            // proxy trust right before arming this.
             // Matching runs against the DECODED path, so /%2Eenv is caught
             // too. Keep this list to paths that are unambiguous — a pattern
             // that overlaps a real route of yours will block the people

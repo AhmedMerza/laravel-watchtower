@@ -71,15 +71,31 @@ class HitWindow
     {
         $key = $this->key('users', $detector, $ip);
         $cache = $this->cache();
-        $seen = $this->normalise($cache->get($key));
+        $now = time();
 
-        if (count($seen) >= self::MAX_USERS || in_array((string) $userId, $seen, true)) {
+        [$expires, $seen] = $this->entry($cache->get($key), $now);
+
+        if ($expires <= $now) {
+            $expires = $now + $windowSeconds;
+        }
+
+        $id = (string) $userId;
+
+        if (count($seen) >= self::MAX_USERS || in_array($id, $seen, true)) {
             return;
         }
 
-        $seen[] = (string) $userId;
+        $seen[] = $id;
 
-        $cache->put($key, $seen, $windowSeconds);
+        // Keep the expiry the set was opened with rather than writing
+        // $windowSeconds again. The hit counter's window is fixed from its
+        // first hit — RateLimiter sets its timer with add(), which is a
+        // no-op afterwards — so re-stamping here would let the user set
+        // outlive the counter it belongs to. A user arriving late in one
+        // window would then still be counted in the next, inflating the
+        // distinct-user count with people who generated none of its
+        // traffic, and biasing the guard toward standing a real block down.
+        $cache->put($key, ['expires' => $expires, 'ids' => $seen], max(1, $expires - $now));
     }
 
     /**
@@ -89,7 +105,14 @@ class HitWindow
      */
     public function users(string $detector, string $ip): array
     {
-        return $this->normalise($this->cache()->get($this->key('users', $detector, $ip)));
+        $now = time();
+
+        [$expires, $seen] = $this->entry($this->cache()->get($this->key('users', $detector, $ip)), $now);
+
+        // The stored expiry is authoritative, not the cache TTL: a store
+        // that rounds TTLs up, or a set written just before the boundary,
+        // can still hand back an entry whose window has closed.
+        return $expires > $now ? $seen : [];
     }
 
     /**
@@ -103,10 +126,23 @@ class HitWindow
         $this->cache()->forget($this->key('users', $detector, $ip));
     }
 
-    /** @return list<string> */
-    private function normalise(mixed $value): array
+    /**
+     * Unpack a stored user set into [expiry, ids], tolerating anything that
+     * isn't one — an absent key, or a value left by an older version.
+     *
+     * @return array{0: int, 1: list<string>}
+     */
+    private function entry(mixed $value, int $now): array
     {
-        return is_array($value) ? array_values(array_map(strval(...), $value)) : [];
+        if (! is_array($value) || ! isset($value['expires'], $value['ids']) || ! is_array($value['ids'])) {
+            return [0, []];
+        }
+
+        $expires = (int) $value['expires'];
+
+        return $expires > $now
+            ? [$expires, array_values(array_map(strval(...), $value['ids']))]
+            : [0, []];
     }
 
     private function key(string $kind, string $detector, string $ip): string
