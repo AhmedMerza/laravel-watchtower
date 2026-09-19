@@ -198,6 +198,25 @@ it('rejects an invalid payload with a 422', function () {
     $this->assertDatabaseCount('blacklisted_ips', 0);
 });
 
+it('records a pushed range, however broad, without force', function () {
+    // The satellite already decided, with or without force. Refusing it here
+    // would leave the two environments disagreeing.
+    postSigned($this, json_encode(['ip' => '10.0.0.0/8', 'source_env' => 'staging']))
+        ->assertOk()
+        ->assertJsonPath('data.ip', '10.0.0.0/8');
+});
+
+it('stores a bare IPv6 address pushed by an older satellite as the master\'s prefix', function () {
+    BlacklistedIp::create(['ip' => '2001:db8::/64', 'source' => BlockSource::Manual, 'source_env' => 'master']);
+
+    // The /64 is already a local manual block, so the push must not replace it.
+    postSigned($this, json_encode(['ip' => '2001:db8::1', 'source_env' => 'staging']))
+        ->assertOk()
+        ->assertJsonPath('applied', false);
+
+    $this->assertDatabaseCount('blacklisted_ips', 1);
+});
+
 it('does not let an incoming push downgrade a local manual block', function () {
     BlacklistedIp::create([
         'ip'         => '5.6.7.8',

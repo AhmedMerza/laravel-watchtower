@@ -58,3 +58,40 @@ it('lets requests through when the cache store is unavailable', function () {
         ->assertOk()
         ->assertSee('ok');
 });
+
+describe('ranges', function () {
+    beforeEach(function () {
+        foreach (['198.18.0.0/16', '2001:db8:1:2::/64'] as $ip) {
+            BlacklistedIp::create(['ip' => $ip, 'source' => BlockSource::Manual, 'source_env' => 'testing']);
+        }
+
+        app(BlacklistCache::class)->rebuild();
+    });
+
+    it('rejects a client inside a blocked range and lets one outside through', function (string $inside, string $outside) {
+        $this->withServerVariables(['REMOTE_ADDR' => $inside])->get('/watchtower-test')->assertForbidden();
+        $this->withServerVariables(['REMOTE_ADDR' => $outside])->get('/watchtower-test')->assertOk();
+    })->with([
+        'IPv4' => ['198.18.200.1', '198.19.0.1'],
+        'IPv6' => ['2001:db8:1:2:dead:beef::1', '2001:db8:1:3::1'],
+    ]);
+
+    it('lets a client through when a never-block range covers it', function (string $neverBlock, string $client) {
+        config()->set('watchtower.never_block', [$neverBlock]);
+
+        $this->withServerVariables(['REMOTE_ADDR' => $client])->get('/watchtower-test')->assertOk();
+    })->with([
+        'IPv4 range'   => ['198.18.5.0/24', '198.18.5.9'],
+        'IPv6 range'   => ['2001:db8:1:2::/64', '2001:db8:1:2::9'],
+        'IPv6 address' => ['2001:DB8:1:2::9', '2001:db8:1:2::9'],
+    ]);
+
+    it('keeps blocking when a never-block entry is malformed', function () {
+        // IpUtils does arithmetic on the prefix, so this reached it as a PHP
+        // warning, which Laravel throws — on every request.
+        config()->set('watchtower.never_block', ['198.18.0.0/1a', 'not-an-ip', '']);
+
+        $this->withServerVariables(['REMOTE_ADDR' => '198.18.0.1'])->get('/watchtower-test')->assertForbidden();
+        $this->withServerVariables(['REMOTE_ADDR' => '198.19.0.1'])->get('/watchtower-test')->assertOk();
+    });
+});

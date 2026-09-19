@@ -74,10 +74,12 @@ return [
     |                        ],
     |                    ],
     |
-    | 'key'        - Cache key prefix. Per-IP entries land at
-    |                `{key}:ip:{ip}` and the index sidecar at
-    |                `{key}:_index`. Change the prefix only if it
-    |                conflicts with another package's cache keys.
+    | 'key'        - Cache key prefix. Single IPs and IPv6 networks at
+    |                `ipv6_block_prefix` land at `{key}:ip:{target}`,
+    |                every other range in `{key}:_ranges`, and the
+    |                index sidecar at `{key}:_index`. Change the prefix
+    |                only if it conflicts with another package's cache
+    |                keys.
     |
     | 'ttl_hours'  - Safety-net TTL on every cache entry. The cache is
     |                explicitly rebuilt on every block/unblock and on
@@ -114,16 +116,38 @@ return [
     | Never-Block Whitelist
     |--------------------------------------------------------------------------
     |
-    | IPs that can never be blocked by any means — UI, auto-block, or sync.
-    | Prevents self-lockout. Populate via env (comma-separated) or directly.
+    | IPs and CIDR ranges that can never be blocked by any means — UI,
+    | auto-block, or sync. They win over any block that covers them, so this
+    | prevents self-lockout. Populate via env (comma-separated) or directly.
     |
-    | Example .env: WATCHTOWER_NEVER_BLOCK_IPS=127.0.0.1,::1,10.0.0.1
+    | Entries match as written: an IPv6 address here protects only itself,
+    | even though blocking a neighbour blocks its whole /64 (see below). To
+    | keep an IPv6 network reachable, list its range.
+    |
+    | Example .env: WATCHTOWER_NEVER_BLOCK_IPS=127.0.0.1,::1,10.0.0.0/8,2001:db8:1::/64
     |
     */
 
     'never_block' => array_filter(
         array_map('trim', explode(',', env('WATCHTOWER_NEVER_BLOCK_IPS', env('GUARD_NEVER_BLOCK_IPS', '127.0.0.1,::1'))))
     ),
+
+    /*
+    |--------------------------------------------------------------------------
+    | IPv6 Block Prefix
+    |--------------------------------------------------------------------------
+    |
+    | An IPv6 client usually controls a whole /64 and can move to another
+    | address inside it whenever it likes, so blocking a single IPv6 address
+    | blocks the network around it, this many bits long. Between 32 and 128;
+    | anything else falls back to 64. 128 blocks exact addresses only.
+    |
+    | An explicit range is blocked as written, so 2001:db8::1/128 still
+    | blocks just that one address.
+    |
+    */
+
+    'ipv6_block_prefix' => (int) env('WATCHTOWER_IPV6_BLOCK_PREFIX', 64),
 
     /*
     |--------------------------------------------------------------------------

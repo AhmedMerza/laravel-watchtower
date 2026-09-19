@@ -4,6 +4,22 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Block CIDR ranges.** A block can now be a range as well as a single IP (`203.0.113.0/24`, `2001:db8::/48`), stored as its network address. `POST /api/block` accepts one, and `DELETE /api/block/{ip}` and `GET /api/status/{ip}` take one in the path. For a single IP, status now also reports the range that blocks it. Ranges broader than IPv4 /16 or IPv6 /32 get a 422 unless the request sends `force=true`. The sync endpoint accepts any range, since the satellite already made that call. ([#16](https://github.com/AhmedMerza/laravel-watchtower/issues/16))
+- **`never_block` accepts CIDR ranges**, and an address one covers gets through even when a blocked range covers it too. ([#16](https://github.com/AhmedMerza/laravel-watchtower/issues/16))
+
+### Changed
+
+- **BREAKING: blocking a single IPv6 address blocks its /64.** A client usually controls a whole /64 and can move to another address inside it at will, so blocking one address stopped nothing. The row is stored as the /64 (`2001:db8:1:2::/64`), which is also what webhooks and sync pushes now carry. Set the width with the new `ipv6_block_prefix` (`WATCHTOWER_IPV6_BLOCK_PREFIX`, 32–128); `128` restores exact-address blocking, and an explicit `/128` still blocks one address. IPv6 blocks made before this upgrade keep blocking just their address. **Upgrade the master and every satellite together:** a master on 0.2.x refuses ranges and /64s with a 422, so a new satellite's IPv6 and range blocks never reach it, and a 0.2.x satellite stores the ranges it pulls but never enforces them. ([#16](https://github.com/AhmedMerza/laravel-watchtower/issues/16))
+- **The cache warms on the first lookup instead of at boot.** A request now makes two cache reads, the same as before, even though ranges add a key, and artisan commands and queue workers no longer read the cache when they boot. `BlacklistCache::warmOnBoot()` is removed.
+- **LogScope's Unblock button checks the status again after unblocking** rather than assuming the IP is free, and shows the range when one is what blocks the IP.
+
+### Fixed
+
+- **A cache flush no longer switches blocking off under Octane.** The cache warmed only at boot, which Octane does once per worker, so after a flush every request went through unchecked until something rebuilt the cache (a block, an unblock, `watchtower:sync` or `watchtower:cleanup`) or the workers restarted.
+- **An IPv6 entry in `never_block` now matches however it's written.** Entries were compared as strings, so `2001:DB8::1` didn't protect `2001:db8::1`.
+
 ## [0.2.1] - 2026-09-17
 
 ### Security

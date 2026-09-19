@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use Carbon\Carbon;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Queue;
 use Watchtower\Enums\BlockSource;
@@ -18,7 +19,6 @@ beforeEach(function () {
     $this->cache = Mockery::mock(BlacklistCache::class);
     $this->cache->shouldReceive('rebuild')->andReturn(true)->byDefault();
     $this->cache->shouldReceive('forget')->byDefault();
-    $this->cache->shouldReceive('warmOnBoot')->andReturn(null)->byDefault();
 
     $this->service = new BlacklistService($this->cache);
 });
@@ -161,8 +161,8 @@ describe('when the cache rebuild fails', function () {
 
         $this->failing->block('1.2.3.4');
 
-        // Rewriting the index here would restart its TTL, and warmOnBoot()
-        // would go on reading "warm" after the entries it lists had expired.
+        // Rewriting the index here would restart its TTL, so it would
+        // outlive the entries it lists.
         expect(Cache::store('array')->get('watchtower:blacklist:_index'))->toBe(['5.6.7.8']);
         $this->travel(61)->minutes();
         expect(Cache::store('array')->has('watchtower:blacklist:_index'))->toBeFalse();
@@ -188,5 +188,179 @@ describe('when the cache rebuild fails', function () {
         $this->working->unblock('1.2.3.4');
 
         expect($this->working->isBlocked('1.2.3.4'))->toBeFalse();
+    });
+});
+
+describe('ranges and IPv6 prefixes', function () {
+    beforeEach(function () {
+        Event::fake();
+        Queue::fake();
+        config()->set('watchtower.cache', ['store' => 'array', 'key' => 'watchtower:blacklist', 'ttl_hours' => 24]);
+        config()->set('watchtower.never_block', []);
+        Cache::store('array')->flush();
+
+        $this->service = new BlacklistService(new BlacklistCache);
+    });
+
+    it('stores a single IPv6 address as its /64 and blocks the whole /64', function () {
+        $record = $this->service->block('2001:db8:1:2::1');
+
+        expect($record->ip)->toBe('2001:db8:1:2::/64')
+            ->and($this->service->isBlocked('2001:db8:1:2:aaaa::5'))->toBeTrue()
+            ->and($this->service->isBlocked('2001:db8:1:3::1'))->toBeFalse();
+    });
+
+    it('blocks exactly one IPv6 address given as /128', function () {
+        $record = $this->service->block('2001:db8::1/128');
+
+        expect($record->ip)->toBe('2001:db8::1')
+            ->and($this->service->isBlocked('2001:db8::1'))->toBeTrue()
+            ->and($this->service->isBlocked('2001:db8::2'))->toBeFalse();
+    });
+
+    it('stores a range as its network address', function () {
+        expect($this->service->block('203.0.113.77/24')->ip)->toBe('203.0.113.0/24')
+            ->and($this->service->isBlocked('203.0.113.1'))->toBeTrue();
+    });
+
+    it('refuses a target the never-block list covers', function (string $target) {
+        config()->set('watchtower.never_block', ['10.0.0.0/8']);
+
+        expect(fn () => $this->service->block($target))
+            ->toThrow(NeverBlockException::class, 'never-block whitelist');
+        $this->assertDatabaseCount('blacklisted_ips', 0);
+    })->with(['10.1.2.3', '10.1.0.0/16', '10.0.0.0/8']);
+
+    it('blocks a range that only overlaps a never-block entry', function () {
+        config()->set('watchtower.never_block', ['10.0.0.1']);
+
+        expect($this->service->block('10.0.0.0/24')->ip)->toBe('10.0.0.0/24');
+    });
+
+    it('refuses a never-block IPv6 address but still blocks its neighbours\' /64', function () {
+        config()->set('watchtower.never_block', ['2001:db8::1']);
+
+        expect(fn () => $this->service->block('2001:db8::1'))->toThrow(NeverBlockException::class);
+        expect($this->service->block('2001:db8::2')->ip)->toBe('2001:db8::/64');
+    });
+
+    it('unblocks a /64 from any address inside it', function () {
+        $this->service->block('2001:db8::1');
+
+        expect($this->service->unblock('2001:db8::abcd'))->toBeTrue()
+            ->and($this->service->isBlocked('2001:db8::1'))->toBeFalse();
+    });
+
+    it('unblocks a bare IPv6 row left from before prefixes', function () {
+        BlacklistedIp::create(['ip' => '2001:db8::5', 'source' => BlockSource::Manual]);
+
+        expect($this->service->unblock('2001:db8::5'))->toBeTrue()
+            ->and($this->service->isBlocked('2001:db8::5'))->toBeFalse();
+    });
+
+    it('unblocks a range by its CIDR', function () {
+        $this->service->block('203.0.113.0/24');
+
+        expect($this->service->unblock('203.0.113.9/24'))->toBeTrue()
+            ->and($this->service->isBlocked('203.0.113.9'))->toBeFalse();
+    });
+
+    it('leaves a range in place when one IP inside it is unblocked', function () {
+        $this->service->block('203.0.113.0/24');
+
+        expect($this->service->unblock('203.0.113.9'))->toBeFalse()
+            ->and($this->service->isBlocked('203.0.113.9'))->toBeTrue();
+    });
+
+    it('reports a never-block address as unblocked, as the middleware treats it', function (string $neverBlock, string $blocked, string $protected) {
+        config()->set('watchtower.never_block', [$neverBlock]);
+        $this->service->block($blocked);
+
+        // Status said "blocked" here while the middleware let the address
+        // through — and LogScope's Unblock button then lifted the whole block.
+        expect($this->service->isBlocked($protected))->toBeFalse()
+            ->and($this->service->isBlocked($blocked))->toBeTrue();
+    })->with([
+        'IPv6 address inside a blocked /64' => ['2001:db8::1', '2001:db8::2', '2001:db8::1'],
+        'IPv4 address inside a blocked /24' => ['10.0.0.1', '10.0.0.0/24', '10.0.0.1'],
+    ]);
+
+    it('reports a range that a wider blocked range covers', function () {
+        $this->service->block('203.0.113.0/24');
+
+        expect($this->service->isBlocked('203.0.113.0/25'))->toBeTrue()
+            ->and($this->service->find('203.0.113.0/25')?->ip)->toBe('203.0.113.0/24')
+            ->and($this->service->isBlocked('198.51.100.0/25'))->toBeFalse();
+    });
+
+    it('prefers the range now blocking an IP over its own lapsed row', function () {
+        BlacklistedIp::create(['ip' => '203.0.113.9', 'source' => BlockSource::Manual, 'expires_at' => now()->subMinute()]);
+        $this->service->block('203.0.113.0/24');
+
+        expect($this->service->find('203.0.113.9')?->ip)->toBe('203.0.113.0/24');
+    });
+
+    it('reports an expired range as unblocked while still naming its row', function () {
+        BlacklistedIp::create(['ip' => '203.0.113.0/24', 'source' => BlockSource::Manual, 'expires_at' => now()->subMinute()]);
+
+        expect($this->service->isBlocked('203.0.113.0/24'))->toBeFalse()
+            ->and($this->service->find('203.0.113.0/24')?->ip)->toBe('203.0.113.0/24');
+    });
+
+    it('skips a malformed range row when looking for what blocks an IP', function () {
+        BlacklistedIp::create(['ip' => 'not-an-ip/24', 'source' => BlockSource::Manual]);
+        $this->service->block('203.0.113.0/24');
+
+        expect($this->service->find('203.0.113.9')?->ip)->toBe('203.0.113.0/24')
+            ->and($this->service->find('198.51.100.9'))->toBeNull();
+    });
+
+    it('answers a query that is not an IP at all', function () {
+        $this->service->block('203.0.113.0/24');
+
+        // Without the null guard, the covering-range search hands null to a
+        // string parameter under strict_types — a 500 on /api/status/{junk}.
+        expect($this->service->find('not-an-ip'))->toBeNull()
+            ->and($this->service->isBlocked('not-an-ip'))->toBeFalse();
+    });
+
+    it('prefers the row for the exact address when its /64 is blocked too', function () {
+        $this->service->block('2001:db8::1/128', ['reason' => 'this address']);
+        $this->service->block('2001:db8::2', ['reason' => 'the whole /64']);
+
+        // Both rows are live and the query has no order of its own.
+        expect(BlacklistedIp::count())->toBe(2)
+            ->and($this->service->find('2001:db8::1')?->reason)->toBe('this address');
+    });
+
+    it('looks the record up once when reporting status for a range', function () {
+        $this->service->block('203.0.113.0/24');
+
+        DB::enableQueryLog();
+        $status = $this->service->status('203.0.113.0/25');
+        $queries = DB::getQueryLog();
+        DB::disableQueryLog();
+
+        expect($status['blocked'])->toBeTrue()
+            ->and($status['record']?->ip)->toBe('203.0.113.0/24')
+            // find() runs the own-row lookup plus the covering-range scan.
+            // Asking isBlocked() separately would double both.
+            ->and($queries)->toHaveCount(2);
+    });
+
+    it('finds the range blocking an IP that has no row of its own', function () {
+        $this->service->block('203.0.113.0/24');
+        $this->service->block('198.51.100.0/24', ['expires_at' => now()->subMinute()]);
+
+        expect($this->service->find('203.0.113.9')?->ip)->toBe('203.0.113.0/24')
+            ->and($this->service->find('198.51.100.9'))->toBeNull()
+            ->and($this->service->find('192.0.2.1'))->toBeNull();
+    });
+
+    it('prefers an IP\'s own row over a range that covers it', function () {
+        $this->service->block('203.0.113.0/24');
+        $this->service->block('203.0.113.9', ['reason' => 'its own']);
+
+        expect($this->service->find('203.0.113.9')?->reason)->toBe('its own');
     });
 });

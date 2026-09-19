@@ -123,3 +123,112 @@ it('does not return expired blocks in the list', function () {
     $response->assertStatus(200)
         ->assertJsonCount(1, 'data');
 });
+
+describe('ranges', function () {
+    it('blocks a CIDR range', function (string $ip, string $stored) {
+        $this->postJson('/logscope/watchtower/api/block', ['ip' => $ip])
+            ->assertOk()
+            ->assertJsonPath('data.ip', $stored);
+    })->with([
+        'IPv4'              => ['203.0.113.0/24', '203.0.113.0/24'],
+        'IPv6'              => ['2001:db8::/48', '2001:db8::/48'],
+        'host bits set'     => ['203.0.113.9/24', '203.0.113.0/24'],
+        'single IPv6 → /64' => ['2001:db8::1', '2001:db8::/64'],
+    ]);
+
+    it('refuses a range broader than /16 or /32 without force', function (string $ip) {
+        $this->postJson('/logscope/watchtower/api/block', ['ip' => $ip])
+            ->assertStatus(422)
+            ->assertJsonValidationErrors(['ip' => 'force=true']);
+
+        $this->assertDatabaseCount('blacklisted_ips', 0);
+    })->with(['10.0.0.0/15', '2001:d00::/31']);
+
+    it('blocks a broad range when force is sent', function () {
+        $this->postJson('/logscope/watchtower/api/block', ['ip' => '10.0.0.0/8', 'force' => true])
+            ->assertOk()
+            ->assertJsonPath('data.ip', '10.0.0.0/8');
+    });
+
+    it('refuses something that is not an IP or range', function (mixed $ip) {
+        $this->postJson('/logscope/watchtower/api/block', ['ip' => $ip])
+            ->assertStatus(422)
+            ->assertJsonValidationErrors('ip');
+    })->with(['10.0.0.0/33', '10.0.0.0/1a', 'example.com', 123]);
+
+    it('unblocks a range by its CIDR in the path', function (string $path) {
+        $this->postJson('/logscope/watchtower/api/block', ['ip' => '203.0.113.0/24'])->assertOk();
+
+        $this->deleteJson('/logscope/watchtower/api/block/'.$path)
+            ->assertOk()
+            ->assertJsonPath('deleted', true);
+
+        $this->assertDatabaseCount('blacklisted_ips', 0);
+    })->with([
+        'slash'   => ['203.0.113.0/24'],
+        'encoded' => ['203.0.113.0%2F24'],
+    ]);
+
+    it('reports the range that blocks an IP', function () {
+        $this->postJson('/logscope/watchtower/api/block', ['ip' => '203.0.113.0/24'])->assertOk();
+
+        $this->getJson('/logscope/watchtower/api/status/203.0.113.9')
+            ->assertOk()
+            ->assertJsonPath('blocked', true)
+            ->assertJsonPath('data.ip', '203.0.113.0/24');
+    });
+
+    it('refuses an IP containing a NUL byte with a 422, not a 500', function () {
+        // inet_pton() throws on a NUL byte, and `@` doesn't suppress that.
+        // It has to sit inside the string: TrimStrings strips a trailing one.
+        $this->postJson('/logscope/watchtower/api/block', ['ip' => "1.2.3\u{0000}.4"])
+            ->assertStatus(422)
+            ->assertJsonValidationErrors('ip');
+    });
+
+    it('reports a never-block address covered by a blocked range as unblocked', function () {
+        config()->set('watchtower.never_block', ['203.0.113.9']);
+        $this->postJson('/logscope/watchtower/api/block', ['ip' => '203.0.113.0/24'])->assertOk();
+
+        $this->getJson('/logscope/watchtower/api/status/203.0.113.9')
+            ->assertOk()
+            ->assertJsonPath('blocked', false);
+    });
+
+    it('reports a range covered by a wider blocked range', function () {
+        $this->postJson('/logscope/watchtower/api/block', ['ip' => '203.0.113.0/24'])->assertOk();
+
+        $this->getJson('/logscope/watchtower/api/status/203.0.113.0%2F25')
+            ->assertOk()
+            ->assertJsonPath('blocked', true)
+            ->assertJsonPath('data.ip', '203.0.113.0/24');
+    });
+
+    it('reports an expired range as unblocked', function () {
+        BlacklistedIp::create([
+            'ip'         => '203.0.113.0/24',
+            'source'     => BlockSource::Manual,
+            'source_env' => 'testing',
+            'expires_at' => now()->subMinute(),
+        ]);
+
+        $this->getJson('/logscope/watchtower/api/status/203.0.113.0%2F24')
+            ->assertOk()
+            ->assertJsonPath('blocked', false)
+            ->assertJsonPath('data.ip', '203.0.113.0/24');
+    });
+
+    it('reports the status of a range', function () {
+        $this->postJson('/logscope/watchtower/api/block', ['ip' => '203.0.113.0/24'])->assertOk();
+
+        $this->getJson('/logscope/watchtower/api/status/203.0.113.0%2F24')
+            ->assertOk()
+            ->assertJsonPath('blocked', true)
+            ->assertJsonPath('data.ip', '203.0.113.0/24');
+
+        $this->getJson('/logscope/watchtower/api/status/198.51.100.0%2F24')
+            ->assertOk()
+            ->assertJsonPath('blocked', false)
+            ->assertJsonPath('data', null);
+    });
+});

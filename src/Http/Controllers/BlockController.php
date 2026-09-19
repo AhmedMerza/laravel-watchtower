@@ -9,6 +9,7 @@ use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
 use Watchtower\Exceptions\NeverBlockException;
 use Watchtower\Models\BlacklistedIp;
+use Watchtower\Rules\BlockTarget;
 use Watchtower\Services\BlacklistService;
 
 class BlockController extends Controller
@@ -18,7 +19,8 @@ class BlockController extends Controller
     public function block(Request $request): JsonResponse
     {
         $validated = $request->validate([
-            'ip'           => ['required', 'string', 'ip', 'max:50'],
+            'ip'           => ['required', 'string', 'max:50', new BlockTarget(allowBroad: $request->boolean('force'))],
+            'force'        => ['sometimes', 'boolean'],
             'reason'       => ['nullable', 'string', 'max:500'],
             'expires_at'   => ['nullable', 'date'],
             'log_entry_id' => ['nullable', 'string', 'max:26'],
@@ -54,15 +56,11 @@ class BlockController extends Controller
     public function status(string $ip): JsonResponse
     {
         $ip = urldecode($ip);
-        $normalized = $this->service->normalizeIp($ip);
-
-        // Use Redis as source of truth — same check the middleware uses
-        $blocked = $this->service->isBlocked($normalized);
-        $record = BlacklistedIp::where('ip', $normalized)->first();
+        $status = $this->service->status($ip);
 
         return response()->json([
-            'blocked' => $blocked,
-            'data'    => $record,
+            'blocked' => $status['blocked'],
+            'data'    => $status['record'],
         ]);
     }
 

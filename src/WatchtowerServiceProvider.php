@@ -57,11 +57,6 @@ class WatchtowerServiceProvider extends PackageServiceProvider
 
         $this->registerMiddleware();
 
-        // Warm Redis from DB on boot if the key is missing (e.g. after Redis flush)
-        $this->app->booted(function () {
-            $this->app->make(BlacklistCache::class)->warmOnBoot();
-        });
-
         $this->defineGate();
         $this->registerRoutes();
         $this->registerSyncRoutes();

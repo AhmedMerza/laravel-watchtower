@@ -32,7 +32,7 @@
                         <svg class="w-4 h-4 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
                             <path fill-rule="evenodd" d="M13.477 14.89A6 6 0 015.11 6.524l8.367 8.368zm1.414-1.414L6.524 5.11a6 6 0 018.367 8.367zM18 10a8 8 0 11-16 0 8 8 0 0116 0z" clip-rule="evenodd"/>
                         </svg>
-                        <span>Blocked <span x-show="blockedSince" class="font-mono text-xs opacity-75" x-text="'since ' + blockedSince"></span></span>
+                        <span>Blocked <span x-show="blockedVia" class="font-mono text-xs opacity-75" x-text="'via ' + blockedVia"></span> <span x-show="blockedSince" class="font-mono text-xs opacity-75" x-text="'since ' + blockedSince"></span></span>
                     </div>
                     <button @click="unblock()"
                         :disabled="loading"
@@ -85,6 +85,7 @@ function watchtowerIpActions(urls) {
         currentIp: null,
         blockStatus: null,  // null=loading, 'blocked', 'unblocked'
         blockedSince: null,
+        blockedVia: null,   // the range blocking this IP, when it isn't the IP's own row
         confirming: false,
         loading: false,
 
@@ -94,6 +95,7 @@ function watchtowerIpActions(urls) {
             this.currentIp = log?.ip_address ?? null;
             this.blockStatus = null;
             this.blockedSince = null;
+            this.blockedVia = null;
             this.confirming = false;
 
             if (this.currentIp) {
@@ -114,9 +116,10 @@ function watchtowerIpActions(urls) {
                 if (!res.ok) { this.blockStatus = 'unblocked'; return; }
                 const json = await res.json();
                 this.blockStatus = json.blocked ? 'blocked' : 'unblocked';
-                if (json.blocked && json.data?.created_at) {
-                    this.blockedSince = new Date(json.data.created_at).toLocaleDateString();
-                }
+                this.blockedVia = json.blocked && json.data?.ip?.includes('/') ? json.data.ip : null;
+                this.blockedSince = json.blocked && json.data?.created_at
+                    ? new Date(json.data.created_at).toLocaleDateString()
+                    : null;
             } catch {
                 this.blockStatus = 'unblocked';
             }
@@ -136,8 +139,8 @@ function watchtowerIpActions(urls) {
                     body: JSON.stringify({ ip: this.currentIp }),
                 });
                 if (res.ok) {
-                    this.blockStatus = 'blocked';
-                    this.blockedSince = new Date().toLocaleDateString();
+                    // A single IPv6 address is stored as its /64.
+                    await this.checkStatus();
                 }
             } finally {
                 this.loading = false;
@@ -156,9 +159,10 @@ function watchtowerIpActions(urls) {
                         'X-XSRF-TOKEN': this.getCsrfToken(),
                     },
                 });
+                // Unblocking an IP leaves a range that covers it in place,
+                // so ask rather than assume it's gone.
                 if (res.ok) {
-                    this.blockStatus = 'unblocked';
-                    this.blockedSince = null;
+                    await this.checkStatus();
                 }
             } finally {
                 this.loading = false;

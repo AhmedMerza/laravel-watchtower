@@ -8,33 +8,36 @@ use Carbon\Carbon;
 use Illuminate\Contracts\Cache\Repository;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
+use Symfony\Component\HttpFoundation\IpUtils;
 use Watchtower\Models\BlacklistedIp;
 use Watchtower\Support\FailureWindow;
+use Watchtower\Support\IpRange;
 
 /**
  * Stores the active blacklist in Laravel's cache so the request-path
- * blocked-IP check is one cache lookup with no DB hit.
+ * blocked-IP check reads two cache keys and never the DB.
  *
- * The cache uses per-IP keys (`{prefix}:ip:{ip}`) plus a sidecar index
- * key (`{prefix}:_index`) that tracks the set of currently-blocked IPs.
- * The index lets `rebuild()` clear stale entries on any cache driver —
- * we can't rely on `Cache::tags()` because file and database stores
- * don't support tagging, and dropping support for those is exactly what
- * this design avoids.
+ * Three kinds of key:
  *
- * Trade-off vs. the previous single-Redis-Hash design:
- *
- * - Request-time cost is unchanged: one cache `get` per request.
- * - Rebuilds do N+1 writes (N IPs + 1 index) instead of a single HMSET.
- *   Rebuilds are rare (only on block/unblock/sync), so this is fine.
- * - Index ordering isn't load-bearing — we never iterate it for
- *   correctness, only to forget stale entries on rebuild.
+ * - `{prefix}:ip:{target}` — one per single IP, and one per IPv6 range at
+ *   the configured block prefix (`{prefix}:ip:2001:db8::/64`). A request is
+ *   looked up by its own key, so these stay O(1) however many there are,
+ *   which matters because auto-block only ever produces these.
+ * - `{prefix}:_ranges` — every other range, in one list, with the IPv6
+ *   prefix the keys above were built for. It's read on every request, and
+ *   every rebuild writes it, so its absence is what marks the cache cold.
+ * - `{prefix}:_index` — the targets that have their own key, read only by
+ *   `rebuild()` so it can forget stale entries on any cache driver. We
+ *   can't rely on `Cache::tags()`: file and database stores don't support
+ *   tagging, and dropping those stores is exactly what this avoids.
  */
 class BlacklistCache
 {
     private string $keyPrefix;
 
     private string $indexKey;
+
+    private string $rangesKey;
 
     private int $ttlSeconds;
 
@@ -45,6 +48,7 @@ class BlacklistCache
         $config = config('watchtower.cache', []);
         $this->keyPrefix = (string) ($config['key'] ?? 'watchtower:blacklist');
         $this->indexKey = $this->keyPrefix.':_index';
+        $this->rangesKey = $this->keyPrefix.':_ranges';
         $this->ttlSeconds = (int) ($config['ttl_hours'] ?? 24) * 3600;
         $this->store = $config['store'] ?? null;
     }
@@ -62,18 +66,41 @@ class BlacklistCache
             : Cache::store($this->store);
     }
 
-    private function ipKey(string $ip): string
+    private function key(string $target): string
     {
-        return $this->keyPrefix.':ip:'.$ip;
+        return $this->keyPrefix.':ip:'.$target;
     }
 
     /**
      * Check whether an already-normalized IP is currently blocked.
-     * Pure cache read — no DB hit.
+     * Two cache reads, no DB hit — unless the cache is cold, in which case
+     * it's warmed from the DB first.
      */
     public function isBlocked(string $ip): bool
     {
-        $value = $this->cache()->get($this->ipKey($ip));
+        $cache = $this->cache();
+        $ranges = $cache->get($this->rangesKey);
+
+        if ((! is_array($ranges) || ! empty($ranges['partial'])) && $this->warm()) {
+            $ranges = $cache->get($this->rangesKey);
+        }
+
+        $now = now()->getTimestamp();
+        $active = array_keys(array_filter(
+            (array) ($ranges['ranges'] ?? []),
+            fn ($expires) => $expires === 0 || $expires > $now,
+        ));
+
+        if ($active !== [] && IpUtils::checkIp($ip, $active)) {
+            return true;
+        }
+
+        $ipv6Prefix = (int) ($ranges['ipv6_prefix'] ?? IpRange::ipv6BlockPrefix());
+        $target = str_contains($ip, ':') && $ipv6Prefix < 128
+            ? IpRange::canonical("{$ip}/{$ipv6Prefix}") ?? $ip
+            : $ip;
+
+        $value = $cache->get($this->key($target));
 
         if ($value === null) {
             return false;
@@ -90,26 +117,32 @@ class BlacklistCache
 
     /**
      * Rebuild the cache from the DB.
-     * Called after every block/unblock and after watchtower:sync.
+     * Called after every block/unblock, after watchtower:sync, and when a
+     * lookup finds the cache cold.
      *
      * Clears stale entries by iterating the previous index, then writes
-     * fresh per-IP keys and an updated index. If the DB read fails (e.g.
-     * migration not run yet), the existing cache state is left intact —
-     * we'd rather serve stale-but-correct entries than wipe everything.
+     * fresh per-target keys, the index, and the range list — in that order,
+     * because the range list is what marks the cache warm. If the DB read
+     * fails (e.g. migration not run yet), the existing cache state is left
+     * intact — we'd rather serve stale-but-correct entries than wipe
+     * everything.
+     *
+     * Each row is filed by the IPv6 block prefix configured now, not the one
+     * it was blocked under, and the range list records which prefix that
+     * was so lookups agree with it until the next rebuild.
      *
      * ⚠️ Atomicity caveat: rebuild is NOT atomic across the cache backend.
-     * The sequence is (1) forget old per-IP keys, (2) write new per-IP
-     * keys, (3) write new index. If the process is killed between steps —
-     * or if the cache backend partially fails mid-iteration — the cache
-     * can end up in an inconsistent state:
+     * If the process is killed between steps — or if the cache backend
+     * partially fails mid-iteration — the cache can end up in an
+     * inconsistent state:
      *
      *   - Worst case: an IP unblocked in the DB but whose forget call
      *     failed remains in the cache as "yes blocked" until its TTL
      *     expires (default 24h). A legitimate user is locked out for
      *     that window.
      *   - The TTL safety net bounds the worst case; subsequent rebuilds
-     *     read the new index (written last) and forget the right keys
-     *     on the next pass.
+     *     read the new index (written before the range list) and forget
+     *     the right keys on the next pass.
      *
      * This trade-off is accepted for v1 because (a) rebuilds are fast
      * (sub-millisecond on Redis for typical blocklists), (b) crashes
@@ -134,105 +167,167 @@ class BlacklistCache
         }
 
         $cache = $this->cache();
+        $ipv6Prefix = IpRange::ipv6BlockPrefix();
 
-        // Forget the previous generation's per-IP keys so unblocked IPs
-        // don't sit in the cache until their TTL expires.
-        $oldIndex = (array) $cache->get($this->indexKey, []);
-        foreach ($oldIndex as $oldIp) {
-            $cache->forget($this->ipKey((string) $oldIp));
+        // Forget the previous generation's keys so unblocked IPs don't sit
+        // in the cache until their TTL expires.
+        foreach ((array) $cache->get($this->indexKey, []) as $old) {
+            $cache->forget($this->key((string) $old));
         }
 
-        if ($blocks->isEmpty()) {
-            // Write the empty index rather than forgetting it. warmOnBoot()
-            // treats a missing index as "needs warming", so forgetting it
-            // here made every request re-run this DB query for the whole
-            // time a site's blocklist was empty — which is the default
-            // state of a fresh install.
-            $cache->put($this->indexKey, [], $this->ttlSeconds);
+        $index = [];
+        $ranges = [];
 
-            return true;
-        }
-
-        $newIndex = [];
         foreach ($blocks as $block) {
-            $this->put($block);
-            $newIndex[] = $block->ip;
+            $target = IpRange::canonical($block->ip);
+
+            if ($target === null) {
+                continue;
+            }
+
+            if ($this->hasOwnKey($target, $ipv6Prefix)) {
+                $cache->put($this->key($target), $this->value($block), $this->ttlSeconds);
+                $index[] = $target;
+            } else {
+                $ranges[$target] = $block->expires_at?->getTimestamp() ?? 0;
+            }
         }
 
-        $cache->put($this->indexKey, $newIndex, $this->ttlSeconds);
+        $cache->put($this->indexKey, $index, $this->ttlSeconds);
+
+        $this->putRanges([
+            'ipv6_prefix' => $ipv6Prefix,
+            'ranges'      => $ranges,
+            'expires'     => now()->addSeconds($this->ttlSeconds)->getTimestamp(),
+        ]);
 
         return true;
     }
 
     /**
-     * Write one IP's entry without reading the DB — the fallback for a
+     * Write one block's entry without reading the DB — the fallback for a
      * block whose rebuild() failed, so it takes effect anyway.
      *
-     * The entry is deliberately left out of the index: rewriting the index
-     * restarts its TTL, so it would outlive the other entries and
-     * warmOnBoot() would keep calling the cache warm after they expired.
-     * The cost is that no later rebuild forgets it, which is why
+     * A key written here is deliberately left out of the index: rewriting
+     * the index would restart its TTL, so it would outlive the entries it
+     * lists. The cost is that no later rebuild forgets it, which is why
      * BlacklistService::unblock() always calls forget(). The only other
      * delete path, watchtower:cleanup, removes expired blocks, and the
      * entry carries its own expiry.
+     *
+     * A range is added to the range list, which keeps its original expiry
+     * for the same reason. If there's no list, the cache is cold and the DB
+     * is failing; the list written then is marked partial, so lookups keep
+     * trying to warm the cache rather than trusting it.
+     *
+     * ⚠️ Reading the list, changing one entry and writing it back isn't
+     * atomic either, so two of these at once can lose one of the changes.
+     * The windows are narrow — this runs only when the DB write landed and
+     * the read right after it didn't, and every forget() is followed by a
+     * rebuild() that rewrites the list from the DB — and a lock on the
+     * request path would cost more than it saves.
      */
     public function put(BlacklistedIp $block): void
     {
-        $value = $block->expires_at
-            ? $block->expires_at->toIso8601String()
-            : '';
+        $target = IpRange::canonical($block->ip);
 
-        $this->cache()->put($this->ipKey($block->ip), $value, $this->ttlSeconds);
-    }
-
-    /**
-     * Forget one IP's entry without reading the DB. See put().
-     */
-    public function forget(string $ip): void
-    {
-        $this->cache()->forget($this->ipKey($ip));
-    }
-
-    /**
-     * Warm the cache from DB on application boot if the index is missing
-     * (e.g. fresh container, cache was flushed). No-op if the index is
-     * already present — the per-IP entries are assumed valid until their
-     * TTL expires or a block/unblock triggers a rebuild.
-     *
-     * Wrapped in try/catch because boot must never fail because of a cache
-     * backend error. Examples: cache driver = database but the cache table
-     * isn't migrated yet; Redis is down at boot time; DynamoDB is rate-
-     * limiting. In all of those, we'd rather skip the warm-up and let the
-     * first block/unblock trigger a rebuild than crash the whole app.
-     * The failure surfaces via the configured log channel.
-     *
-     * This runs on every request (the service provider's `booted` callback),
-     * so a failure stands the warm-up down for a minute. Otherwise an outage
-     * repeats the same doomed round-trip and writes a warning on every
-     * single request, which fills the disk while the cache is already down.
-     */
-    public function warmOnBoot(): void
-    {
-        if (FailureWindow::isOpen('warm')) {
+        if ($target === null) {
             return;
         }
 
-        try {
-            if ($this->cache()->has($this->indexKey)) {
-                return;
-            }
+        $cache = $this->cache();
+        $ranges = $cache->get($this->rangesKey);
 
+        if ($this->hasOwnKey($target, (int) ($ranges['ipv6_prefix'] ?? IpRange::ipv6BlockPrefix()))) {
+            $cache->put($this->key($target), $this->value($block), $this->ttlSeconds);
+
+            return;
+        }
+
+        if (! is_array($ranges)) {
+            $ranges = [
+                'ipv6_prefix' => IpRange::ipv6BlockPrefix(),
+                'ranges'      => [],
+                'expires'     => now()->addSeconds($this->ttlSeconds)->getTimestamp(),
+                'partial'     => true,
+            ];
+        }
+
+        $ranges['ranges'][$target] = $block->expires_at?->getTimestamp() ?? 0;
+        $this->putRanges($ranges);
+    }
+
+    /**
+     * Forget one target's entry without reading the DB. See put().
+     */
+    public function forget(string $target): void
+    {
+        $cache = $this->cache();
+        $cache->forget($this->key($target));
+
+        $ranges = $cache->get($this->rangesKey);
+
+        if (isset($ranges['ranges'][$target])) {
+            unset($ranges['ranges'][$target]);
+            $this->putRanges($ranges);
+        }
+    }
+
+    /**
+     * Rebuild a cold cache from the DB, and say whether it did.
+     *
+     * Runs inside a lookup, so it must never throw: a cache backend error
+     * (Redis down, the cache table not migrated yet) or a DB read failure
+     * skips the warm-up rather than failing the request. The failure
+     * surfaces via the configured log channel.
+     *
+     * Every lookup finds a cold cache until this succeeds, so a failure
+     * stands the warm-up down for a minute. Otherwise an outage repeats the
+     * same doomed round-trip and writes a warning on every single request,
+     * which fills the disk while the backend is already down.
+     */
+    private function warm(): bool
+    {
+        if (FailureWindow::isOpen('warm')) {
+            return false;
+        }
+
+        try {
             // rebuild() logs and swallows its own DB failure, so ask it.
-            if (! $this->rebuild()) {
-                FailureWindow::open('warm');
+            if ($this->rebuild()) {
+                return true;
             }
         } catch (\Throwable $e) {
-            FailureWindow::open('warm');
-
             Log::channel(config('watchtower.log_channel', 'stack'))
-                ->warning('Watchtower: warmOnBoot failed, skipping cache warm-up', [
+                ->warning('Watchtower: cache warm-up failed, skipping it', [
                     'error' => $e->getMessage(),
                 ]);
         }
+
+        FailureWindow::open('warm');
+
+        return false;
+    }
+
+    /** Whether a target gets its own key, rather than a place in the range list. */
+    private function hasOwnKey(string $target, int $ipv6Prefix): bool
+    {
+        [$address, $length] = IpRange::split($target);
+
+        return $length === (str_contains($address, ':') ? $ipv6Prefix : 32);
+    }
+
+    /** Empty string for a permanent block, ISO-8601 expiry for a temporary one. */
+    private function value(BlacklistedIp $block): string
+    {
+        return $block->expires_at ? $block->expires_at->toIso8601String() : '';
+    }
+
+    /** Write the range list, keeping the expiry it was first written with. */
+    private function putRanges(array $ranges): void
+    {
+        $expires = $ranges['expires'] ?? now()->addSeconds($this->ttlSeconds)->getTimestamp();
+
+        $this->cache()->put($this->rangesKey, $ranges, Carbon::createFromTimestamp($expires));
     }
 }
