@@ -4,6 +4,8 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-19
+
 ### Added
 
 - **Block CIDR ranges.** A block can now be a range as well as a single IP (`203.0.113.0/24`, `2001:db8::/48`), stored as its network address. `POST /api/block` accepts one, and `DELETE /api/block/{ip}` and `GET /api/status/{ip}` take one in the path. For a single IP, status now also reports the range that blocks it. Ranges broader than IPv4 /16 or IPv6 /32 get a 422 unless the request sends `force=true`. The sync endpoint accepts any range, since the satellite already made that call. ([#16](https://github.com/AhmedMerza/laravel-watchtower/issues/16))
@@ -19,6 +21,7 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 - **A cache flush no longer switches blocking off under Octane.** The cache warmed only at boot, which Octane does once per worker, so after a flush every request went through unchecked until something rebuilt the cache (a block, an unblock, `watchtower:sync` or `watchtower:cleanup`) or the workers restarted.
 - **An IPv6 entry in `never_block` now matches however it's written.** Entries were compared as strings, so `2001:DB8::1` didn't protect `2001:db8::1`.
+- **A NUL byte in an IP no longer returns a 500.** `DELETE /api/block/{ip}` and `GET /api/status/{ip}` passed the path straight to `inet_pton()`, which throws on a NUL byte rather than returning false, so `%00` in the path crashed the request. Malformed input is now refused the same way as any other.
 
 ## [0.2.1] - 2026-09-17
 
@@ -90,6 +93,7 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 - **There is no transitional `ahmedmerza/logscope-guard` package.** It has been removed from Packagist. To upgrade, `composer remove ahmedmerza/logscope-guard`, `composer require ahmedmerza/watchtower`, then work through the BREAKING entries under Changed.
 
-[Unreleased]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.1.0...v0.2.0
