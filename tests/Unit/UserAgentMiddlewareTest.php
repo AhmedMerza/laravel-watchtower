@@ -2,7 +2,9 @@
 
 declare(strict_types=1);
 
+use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Http\Request;
+use Watchtower\Http\Middleware\BlockedIpMiddleware;
 use Watchtower\Http\Middleware\UserAgentMiddleware;
 use Watchtower\Services\AutoBlockService;
 use Watchtower\Services\UserAgentFilter;
@@ -122,4 +124,42 @@ it('still rejects the request when the counted address is already blocked', func
     $this->autoBlock->shouldReceive('record')->once()->andReturn(true);
 
     expect($this->middleware->handle(uaRequest('sqlmap/1.8.2'), $this->next)->getStatusCode())->toBe(403);
+});
+
+it('names the signed-in user, so the shared-IP guard can see them', function () {
+    config()->set('watchtower.auto_block.detectors.bad_user_agent.enabled', true);
+
+    $user = Mockery::mock(Authenticatable::class);
+    $user->shouldReceive('getAuthIdentifier')->andReturn(42);
+
+    // A signed-in user behind a scanner User-Agent is exactly the case the
+    // shared-IP guard exists to weigh. Every other test here runs
+    // unauthenticated, so without this one a broken accessor or a cast that
+    // dropped the id would leave the guard blind and nothing would fail.
+    $this->autoBlock->shouldReceive('record')
+        ->once()
+        ->with('bad_user_agent', '203.0.113.9', 42)
+        ->andReturn(false);
+
+    $request = uaRequest('sqlmap/1.8.2');
+    $request->setUserResolver(fn () => $user);
+
+    expect($this->middleware->handle($request, $this->next)->getStatusCode())->toBe(403);
+});
+
+it('prefers the address the blocking middleware already resolved', function () {
+    config()->set('watchtower.auto_block.detectors.bad_user_agent.enabled', true);
+
+    // Symfony recomputes getClientIps() on every call, so the stashed value
+    // saves re-walking the proxy chain. It must be USED, not just written:
+    // a stash nobody reads is a silent no-op.
+    $this->autoBlock->shouldReceive('record')
+        ->once()
+        ->with('bad_user_agent', '198.51.100.7', null)
+        ->andReturn(false);
+
+    $request = uaRequest('sqlmap/1.8.2');
+    $request->attributes->set(BlockedIpMiddleware::CLIENT_IP, '198.51.100.7');
+
+    $this->middleware->handle($request, $this->next);
 });

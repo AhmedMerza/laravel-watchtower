@@ -82,8 +82,9 @@ return [
     |                and remember signed-in users at
     |                `{key}:users:{detector}:{ip}`, both decaying with
     |                the detector's own window. Search-bot verification,
-    |                when on, caches its verdict per address at
-    |                `{key}:ua:bot:{bot}:{ip}`. Change the prefix only
+    |                when on, caches its verdict at
+    |                `{key}:ua:bot:{bot}:{target}` and counts its lookup
+    |                budget at `{key}:ua:bot:lookups`. Change the prefix only
     |                if it conflicts with another package's cache keys.
     |
     | 'ttl_hours'  - Safety-net TTL on every cache entry. The cache is
@@ -224,10 +225,32 @@ return [
     | be Googlebot or Bingbot with forward-confirmed reverse DNS: the PTR
     | record must sit under one of the bot's domains AND resolve back to the
     | same address, since whoever controls an address can point its PTR
-    | anywhere. Both outcomes are cached at `{cache.key}:ua:bot:{bot}:{ip}`
-    | for `cache_hours`, so an address costs at most one DNS round-trip per
-    | TTL. It fails open: an unavailable resolver or cache lets the claim
-    | through rather than adding a lookup timeout to every request.
+    | anywhere. Only the forward half is hard to fake.
+    |
+    | ⚠️ These are BLOCKING resolver calls on the request path, and PHP gives
+    | them no timeout — the OS resolver decides how long they take, which is
+    | tens of seconds against a black-holed nameserver. They also fail by
+    | returning false rather than throwing, so no try/catch bounds them.
+    | Anyone can trigger the path by sending `User-Agent: Googlebot`, so
+    | three things keep it from being a way to tie up the worker pool:
+    |
+    |   - BOTH outcomes are cached, not just the successes. Caching only
+    |     successes would hand a spoofer a free lookup per request.
+    |   - The key is what a BLOCK would cover (`{cache.key}:ua:bot:{bot}:
+    |     {target}`), not the bare address — keyed per address, one
+    |     attacker-owned IPv6 /64 is billions of free cache misses.
+    |   - `max_lookups_per_minute` caps lookups across the whole app. Over
+    |     budget, the claim is trusted and nothing is written, so it gets
+    |     verified properly once there is budget again. 0 switches the cap
+    |     off.
+    |
+    | Run a local caching resolver in front of this, and note what a resolver
+    | outage costs: a lookup that cannot answer is NOT the same as a claim
+    | that checks out, so real crawlers are rejected while it lasts. That
+    | verdict is deliberately cached for minutes rather than `cache_hours`,
+    | because gethostbyaddr() cannot distinguish "no PTR record" from "the
+    | resolver did not answer" — a definitive no (a PTR that exists and does
+    | not match, or does not resolve back) is cached for the full TTL.
     |
     | Note that `enabled` is read at boot — the middleware is only added to
     | the stack when it is on — so toggling it needs a worker restart under
@@ -254,6 +277,10 @@ return [
         'verify_search_bots' => [
             'enabled'     => env('WATCHTOWER_VERIFY_SEARCH_BOTS', false),
             'cache_hours' => 24,
+
+            // Ceiling on how much of the worker pool can sit in a blocking
+            // DNS call at once. 0 removes the cap.
+            'max_lookups_per_minute' => 30,
 
             // User-Agent substring => the domains its PTR record must sit
             // under. A verified crawler skips the deny list; one that fails

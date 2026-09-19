@@ -31,8 +31,17 @@ it('serves an ordinary client the route', function () {
 
 it('rejects the request without ever blocking the address', function () {
     // The headline safety property: the User-Agent is written by the client,
-    // so on its own it rejects requests and nothing more. An address only
-    // gets blocked once bad_user_agent is armed deliberately.
+    // so on its own it rejects requests and nothing more.
+    //
+    // The engine is deliberately ARMED here, with another detector running.
+    // Asserting this on the shipped defaults would prove nothing at all:
+    // AutoBlockService::detect() returns early whenever auto_block.enabled
+    // is false, so the count would stay at zero however broken the
+    // middleware was.
+    config()->set('watchtower.auto_block.enabled', true);
+    config()->set('watchtower.auto_block.mode', 'block');
+    config()->set('watchtower.auto_block.detectors.scanner_paths.enabled', true);
+
     foreach (range(1, 20) as $ignored) {
         $this->withServerVariables(['REMOTE_ADDR' => '203.0.113.32'])
             ->withHeaders(['User-Agent' => $this->sqlmap])

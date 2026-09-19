@@ -4,8 +4,11 @@ declare(strict_types=1);
 
 namespace Watchtower\Services;
 
+use Illuminate\Cache\RateLimiter;
 use Illuminate\Contracts\Cache\Repository;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Log;
+use Watchtower\Support\FailureWindow;
 use Watchtower\Support\IpRange;
 
 /**
@@ -25,6 +28,19 @@ use Watchtower\Support\IpRange;
  */
 class UserAgentFilter
 {
+    /**
+     * How long a "the resolver could not answer" verdict is cached for.
+     *
+     * Far shorter than `cache_hours`, because that verdict is ambiguous:
+     * gethostbyaddr() returns the address unchanged both when there is
+     * genuinely no PTR record and when the resolver simply failed to
+     * answer, and the two are indistinguishable. Cached for a full day, a
+     * momentary resolver blip would tell a real crawler to go away for a
+     * day. A definitive answer — a PTR that exists and doesn't match, or
+     * doesn't resolve back — is cached for the full TTL.
+     */
+    private const UNRESOLVED_TTL = 300;
+
     /**
      * The compiled `allow` and `deny` regexes, each kept alongside the
      * patterns it was built from.
@@ -49,10 +65,7 @@ class UserAgentFilter
      *
      * @param  string  $agent  the request's User-Agent, already known non-empty
      * @param  string|null  $ip  the canonical client address, for search-bot
-     *                           verification. Null skips verification: with
-     *                           no address there is nothing to resolve, and
-     *                           a claim we cannot check is not a claim we
-     *                           should punish.
+     *                           verification
      */
     public function reject(string $agent, ?string $ip): ?string
     {
@@ -63,13 +76,23 @@ class UserAgentFilter
             return null;
         }
 
-        $bot = $this->claimedSearchBot($agent);
+        // Only consider the search-bot branch when there is an address to
+        // resolve. Without one the claim can be neither confirmed nor
+        // disproved — and treating "unverifiable" as "verified" would let
+        // this branch swallow the deny list entirely, so a User-Agent of
+        // `sqlmap Googlebot` would sail past a list that names sqlmap.
+        // Unverifiable means "judge it like any other User-Agent", not
+        // "let it through".
+        if ($ip !== null) {
+            $bot = $this->claimedSearchBot($agent);
 
-        if ($bot !== null) {
-            // A verified crawler is genuine and skips the deny list
-            // entirely; an unverified one is something pretending to be
-            // Google, which is a stronger signal than any name on the list.
-            return $this->verified($bot, $ip) ? null : "unverified {$bot}";
+            if ($bot !== null) {
+                // A verified crawler is genuine and skips the deny list
+                // entirely; an unverified one is something pretending to be
+                // Google, which is a stronger signal than any name on the
+                // list.
+                return $this->verified($bot, $ip) ? null : "unverified {$bot}";
+            }
         }
 
         return $this->firstMatch('deny', $agent);
@@ -166,60 +189,108 @@ class UserAgentFilter
     /**
      * Forward-confirmed reverse DNS, cached per address.
      *
-     * Both outcomes are cached, which is what holds each address to one DNS
-     * round-trip per TTL: caching only the successes would hand anyone
-     * spoofing Googlebot a free resolver lookup on every request.
+     * ⚠️ These are BLOCKING resolver calls on the request path, and PHP
+     * gives them no timeout — how long they can take is the OS resolver's
+     * `timeout`/`attempts` to decide, which can be tens of seconds against
+     * a black-holed nameserver. They also fail by RETURNING FALSE rather
+     * than throwing, so the try/catch below does not bound them. Three
+     * things keep that from being a way to tie up the worker pool, and all
+     * three matter:
      *
-     * Fails open at every step a resolver or cache can fail, because the
-     * whole feature is noise reduction — losing it for a TTL is a far
-     * better outcome than a slow resolver adding its timeout to every
-     * request, or a cold cache turning a spoofing run into a DNS flood.
+     * - Both outcomes are cached, not just the successes — otherwise
+     *   anyone spoofing Googlebot would get a free resolver lookup on
+     *   every request of a scan.
+     * - The key is the address a BLOCK would cover, not the bare address.
+     *   Keyed per address, one attacker-owned IPv6 /64 is billions of
+     *   distinct cache misses, each a fresh lookup and a fresh cache entry.
+     * - Lookups are capped per minute across the whole app, so the very
+     *   worst case is a bounded number of workers waiting on DNS rather
+     *   than all of them.
+     *
+     * It is off by default for these reasons, and wants a local caching
+     * resolver in front of it.
      */
-    private function verified(string $bot, ?string $ip): bool
+    private function verified(string $bot, string $ip): bool
     {
-        if ($ip === null) {
-            return true;
-        }
-
         $settings = (array) config('watchtower.user_agents.verify_search_bots', []);
         $prefix = (string) config('watchtower.cache.key', 'watchtower:blacklist');
-        $key = "{$prefix}:ua:bot:{$bot}:{$ip}";
+
+        // The same target AutoBlockService counts against, for the same
+        // reason: an IPv6 client controls its whole /64 and can move
+        // anywhere inside it.
+        $target = IpRange::blockTarget($ip) ?? $ip;
 
         try {
             $cache = $this->cache();
-            $cached = $cache->get($key);
+            $cached = $cache->get("{$prefix}:ua:bot:{$bot}:{$target}");
 
             if (is_bool($cached)) {
                 return $cached;
             }
 
-            $verdict = $this->resolve(
-                $ip,
-                (array) (($settings['bots'] ?? [])[$bot] ?? []),
+            if (! $this->withinLookupBudget($cache, $prefix, $settings)) {
+                // Over budget: trust the claim and write nothing, so it is
+                // verified properly once there is budget again. Detection
+                // is never worth the app itself.
+                return true;
+            }
+
+            $verdict = $this->resolve($ip, (array) (($settings['bots'] ?? [])[$bot] ?? []));
+
+            $cache->put(
+                "{$prefix}:ua:bot:{$bot}:{$target}",
+                $verdict === true,
+                $verdict === null
+                    ? self::UNRESOLVED_TTL
+                    : max(1, (int) ($settings['cache_hours'] ?? 24)) * 3600,
             );
 
-            $cache->put($key, $verdict, max(1, (int) ($settings['cache_hours'] ?? 24)) * 3600);
+            return $verdict === true;
+        } catch (\Throwable $e) {
+            // With the cache unavailable we cannot promise a bounded number
+            // of lookups, so we don't look up at all.
+            $this->reportVerificationFailure($e);
 
-            return $verdict;
-        } catch (\Throwable) {
-            // With the cache unavailable we cannot promise one lookup per
-            // TTL, so we don't look up at all.
             return true;
         }
     }
 
     /**
-     * @param  list<string>|array<array-key, string>  $domains
+     * Whether the app has resolver budget left this minute.
+     *
+     * A cap on how much of the worker pool can be sitting in a DNS call at
+     * once. `0` switches it off, the way `shared_ip_user_threshold` does.
+     *
+     * @param  array<string, mixed>  $settings
      */
-    private function resolve(string $ip, array $domains): bool
+    private function withinLookupBudget(Repository $cache, string $prefix, array $settings): bool
+    {
+        $max = (int) ($settings['max_lookups_per_minute'] ?? 30);
+
+        if ($max <= 0) {
+            return true;
+        }
+
+        return (new RateLimiter($cache))->hit("{$prefix}:ua:bot:lookups", 60) <= $max;
+    }
+
+    /**
+     * True when the claim checks out, false when it is definitively wrong,
+     * and null when the resolver could not answer at all.
+     *
+     * @param  array<array-key, string>  $domains
+     */
+    private function resolve(string $ip, array $domains): ?bool
     {
         $host = $this->reverseLookup($ip);
 
-        // gethostbyaddr() hands back the address itself when there is no
-        // PTR record, which is not a hostname and must not be compared as
-        // one.
+        // gethostbyaddr() hands back the address unchanged when it cannot
+        // answer — which covers both "this address has no PTR record" and
+        // "the resolver did not respond", indistinguishably. Neither is a
+        // hostname, and neither is a definitive "this is not Googlebot",
+        // so the verdict is cached only briefly.
         if ($host === null || $host === $ip) {
-            return false;
+            return null;
         }
 
         $host = rtrim(strtolower($host), '.');
@@ -258,8 +329,14 @@ class UserAgentFilter
     {
         $canonical = IpRange::canonical($ip);
 
-        foreach ($this->forwardLookup($host, str_contains($ip, ':')) as $address) {
-            if ($canonical !== null && IpRange::canonical($address) === $canonical) {
+        if ($canonical === null) {
+            return false;
+        }
+
+        $ipv6 = str_contains($ip, ':');
+
+        foreach ($this->addressesFrom($this->forwardLookup($host, $ipv6), $ipv6) as $address) {
+            if (IpRange::canonical($address) === $canonical) {
                 return true;
             }
         }
@@ -268,7 +345,38 @@ class UserAgentFilter
     }
 
     /**
-     * The PTR hostname for an address, or null when there isn't one.
+     * Pull the addresses out of whatever the resolver handed back.
+     *
+     * The two lookups have different shapes — gethostbynamel() returns a
+     * flat list of addresses, dns_get_record() a list of record arrays — and
+     * both return false when they cannot answer. Kept apart from the lookup
+     * itself so this mapping is exercised by tests rather than mocked away
+     * with it: a typo in the `ipv6` key would otherwise fail every IPv6
+     * crawler silently, which reads exactly like a spoofer.
+     *
+     * @return list<string>
+     */
+    private function addressesFrom(array|false $records, bool $ipv6): array
+    {
+        if ($records === false) {
+            return [];
+        }
+
+        if (! $ipv6) {
+            return array_values(array_map(strval(...), $records));
+        }
+
+        return array_values(array_filter(
+            array_map(
+                static fn ($record): string => is_array($record) ? (string) ($record['ipv6'] ?? '') : '',
+                $records,
+            ),
+            static fn (string $address): bool => $address !== '',
+        ));
+    }
+
+    /**
+     * The PTR hostname for an address, or null when the lookup was refused.
      *
      * Protected, and doing nothing but the lookup, so tests can stand in for
      * the resolver without reaching the network.
@@ -281,24 +389,40 @@ class UserAgentFilter
     }
 
     /**
-     * Every address a hostname resolves to, in the family being verified.
+     * The raw forward lookup, in the family being verified. Returns the
+     * resolver's own shape — see addressesFrom(), which unpacks it.
      *
-     * @return list<string>
+     * @return array<array-key, mixed>|false
      */
-    protected function forwardLookup(string $host, bool $ipv6): array
+    protected function forwardLookup(string $host, bool $ipv6): array|false
     {
-        if ($ipv6) {
-            $records = @dns_get_record($host, DNS_AAAA);
+        return $ipv6 ? @dns_get_record($host, DNS_AAAA) : @gethostbynamel($host);
+    }
 
-            return $records === false ? [] : array_values(array_filter(array_map(
-                static fn (array $record): string => (string) ($record['ipv6'] ?? ''),
-                $records,
-            )));
+    /**
+     * Log the failure at most once per window, the way every other fail-open
+     * path in this package does.
+     *
+     * Without it, a cache backend that is down means search-bot
+     * verification silently degrades to "trust every claim" for the whole
+     * outage, with nothing anywhere to say so.
+     */
+    private function reportVerificationFailure(\Throwable $e): void
+    {
+        if (FailureWindow::isOpen('user_agent_verify')) {
+            return;
         }
 
-        $addresses = @gethostbynamel($host);
+        FailureWindow::open('user_agent_verify');
 
-        return $addresses === false ? [] : $addresses;
+        try {
+            Log::channel(config('watchtower.log_channel', 'stack'))
+                ->error('Watchtower: search-bot verification failed, trusting the claim', [
+                    'error' => $e->getMessage(),
+                ]);
+        } catch (\Throwable) {
+            // A broken log channel must not undo the fail-open.
+        }
     }
 
     /**

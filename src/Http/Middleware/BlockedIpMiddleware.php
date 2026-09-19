@@ -15,6 +15,17 @@ use Watchtower\Support\IpRange;
 
 class BlockedIpMiddleware
 {
+    /**
+     * Request attribute carrying the canonical client address.
+     *
+     * Resolving it means re-deriving the client IP through the trusted-proxy
+     * chain (Symfony recomputes getClientIps() on every call, it does not
+     * memoise) and an inet_pton/inet_ntop round trip. Middleware further
+     * down the stack needs the same value and cannot get a different answer,
+     * so it is computed once here and read from there.
+     */
+    public const CLIENT_IP = 'watchtower.ip';
+
     public function __construct(private readonly BlacklistCache $cache) {}
 
     public function handle(Request $request, Closure $next): Response
@@ -30,6 +41,8 @@ class BlockedIpMiddleware
         }
 
         $normalized = IpRange::canonical($ip) ?? $ip;
+
+        $request->attributes->set(self::CLIENT_IP, $normalized);
 
         // Never block whitelisted IPs or ranges — check before the cache to
         // guarantee safety, so they win over any block that covers them.
@@ -47,7 +60,7 @@ class BlockedIpMiddleware
         }
 
         if ($blocked) {
-            return BlockResponse::make();
+            return BlockResponse::make($request);
         }
 
         return $next($request);

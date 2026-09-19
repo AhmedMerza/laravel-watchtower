@@ -29,9 +29,12 @@ use Watchtower\Support\BlockResponse;
  * every global middleware that has the method, whether or not the pipeline
  * short-circuited, so response_bursts still runs for a request that
  * BlockedIpMiddleware turned away — visibly so if block_response.status is
- * set to 404 to disguise a block. What protects it there is
+ * set to 404 to disguise a block. Two things protect it there:
  * AutoBlockService::record()'s own already-blocked check, which is
- * load-bearing rather than redundant with this ordering.
+ * load-bearing rather than redundant with this ordering, and the
+ * BlockResponse::ANSWERED marker, which also covers the User-Agent filter's
+ * rejections — those do NOT block the address, so the already-blocked check
+ * would let them through to the counter.
  */
 class SignalDetectorMiddleware
 {
@@ -53,7 +56,7 @@ class SignalDetectorMiddleware
             // overlap a live route would otherwise serve it once before the
             // block took effect.
             if ($this->record('scanner_paths', $request)) {
-                return BlockResponse::make();
+                return BlockResponse::make($request);
             }
         }
 
@@ -65,6 +68,16 @@ class SignalDetectorMiddleware
         $settings = (array) config('watchtower.auto_block.detectors.response_bursts', []);
 
         if (! ($settings['enabled'] ?? false)) {
+            return;
+        }
+
+        // Never count a response Watchtower wrote itself. The already-blocked
+        // check covers the address BlockedIpMiddleware turned away, but a
+        // User-Agent rejection does not block the address, so without this a
+        // `block_response.status` of 404 would feed every rejection straight
+        // into the burst counter and block on a threshold it was never
+        // tuned for.
+        if (BlockResponse::answered($request)) {
             return;
         }
 

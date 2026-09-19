@@ -143,6 +143,7 @@ WATCHTOWER_DETECT_BAD_USER_AGENT=false    # rejected User-Agents    — start at
 # Reject requests whose User-Agent names a known attack tool (ON by default)
 WATCHTOWER_USER_AGENT_FILTER=true
 WATCHTOWER_VERIFY_SEARCH_BOTS=false       # forward-confirmed reverse DNS for Googlebot/Bingbot claims
+                                          # ⚠️ blocking DNS on the request path — see the section below
 
 # Webhook notification on every block (optional — useful for n8n, Slack, WhatsApp)
 WATCHTOWER_WEBHOOK_URL=
@@ -325,7 +326,17 @@ It starts at **5 in 10 minutes** rather than the `1` [`scanner_paths`](#detector
 
 Off by default. With `WATCHTOWER_VERIFY_SEARCH_BOTS=true`, a request claiming to be Googlebot or Bingbot is checked with **forward-confirmed reverse DNS**: its PTR record must sit under one of the bot's domains *and* resolve back to the same address. The forward half is the half that matters — whoever controls an address controls its PTR and can point it at `googlebot.com`; only Google can make `googlebot.com` resolve back to them. A verified crawler skips the deny list; one that fails is something pretending to be Google.
 
-Both outcomes are cached at `{cache.key}:ua:bot:{bot}:{ip}` for 24 hours, so **an address costs at most one DNS round-trip per TTL** — caching only the successes would hand anyone spoofing Googlebot a free resolver lookup on every request of a scan. It fails open at every step: an unavailable resolver or cache lets the claim through rather than adding a lookup timeout to every request.
+> ⚠️ **These are blocking resolver calls on the request path, and PHP gives them no timeout.** How long they take is the OS resolver's `timeout`/`attempts` to decide — tens of seconds against a black-holed nameserver. They also fail by *returning false* rather than throwing, so no `try`/`catch` bounds them, and anyone can trigger the path by sending `User-Agent: Googlebot`. That is why it is off by default, and why it wants a local caching resolver in front of it.
+
+Three things keep it from being a way to tie up your worker pool:
+
+- **Both outcomes are cached**, not just the successes — otherwise anyone spoofing Googlebot gets a free resolver lookup on every request of a scan. A confirmed verdict lasts `cache_hours` (default 24).
+- **The key is the network a block would cover** (`{cache.key}:ua:bot:{bot}:{target}`), not the bare address. Keyed per address, one attacker-owned IPv6 /64 would be billions of distinct cache misses, each a fresh lookup and a fresh cache entry.
+- **`max_lookups_per_minute` (default 30) caps lookups across the whole app.** Over budget, the claim is trusted and nothing is written, so it gets verified properly once there is budget again. `0` removes the cap.
+
+A successful verification costs *two* lookups — the PTR, then the forward confirmation — so read the cache as "one verification per address per TTL", not one round-trip.
+
+**What a resolver outage costs you:** a lookup that cannot answer is not the same as a claim that checks out, so real crawlers are rejected while it lasts. `gethostbyaddr()` returns the address unchanged both when there is genuinely no PTR record and when the resolver simply failed, and the two are indistinguishable — so that verdict is cached for **5 minutes**, not `cache_hours`, and a momentary blip costs a crawler minutes rather than a day. A *definitive* no — a PTR that exists and doesn't match, or doesn't resolve back — is cached for the full TTL. A cache outage is the one case that does fail open: without somewhere to record the verdict there is no way to bound the lookups, so the claim is trusted and the degradation is logged.
 
 ---
 
