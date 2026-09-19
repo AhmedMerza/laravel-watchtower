@@ -57,12 +57,7 @@ class BlockController extends Controller
     {
         $ip = urldecode($ip);
         $record = $this->service->find($ip);
-
-        // For an IP, ask the cache — the same check the middleware uses. A
-        // range has no single address to ask about, so its row answers.
-        $blocked = str_contains($ip, '/')
-            ? $record !== null && ! $record->isExpired()
-            : $this->service->isBlocked($ip);
+        $blocked = $this->service->isBlocked($ip);
 
         return response()->json([
             'blocked' => $blocked,

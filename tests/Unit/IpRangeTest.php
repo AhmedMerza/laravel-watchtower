@@ -37,6 +37,9 @@ it('rejects anything that is not an IP or range', function (string $value) {
     'padded'                       => [' 10.0.0.1'],
     'zone id'                      => ['fe80::1%eth0'],
     'mapped range outside IPv4'    => ['::ffff:203.0.113.7/90'],
+    // inet_pton() throws on these rather than returning false.
+    'NUL byte'                     => ["1.2.3.4\0"],
+    'NUL byte in a range'          => ["10.0.0.0\0/8"],
 ]);
 
 it('widens a single IPv6 address to the configured prefix', function (mixed $prefix, string $value, string $expected) {

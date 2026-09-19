@@ -178,6 +178,46 @@ describe('ranges', function () {
             ->assertJsonPath('data.ip', '203.0.113.0/24');
     });
 
+    it('refuses an IP containing a NUL byte with a 422, not a 500', function () {
+        // inet_pton() throws on a NUL byte, and `@` doesn't suppress that.
+        // It has to sit inside the string: TrimStrings strips a trailing one.
+        $this->postJson('/logscope/watchtower/api/block', ['ip' => "1.2.3\u{0000}.4"])
+            ->assertStatus(422)
+            ->assertJsonValidationErrors('ip');
+    });
+
+    it('reports a never-block address covered by a blocked range as unblocked', function () {
+        config()->set('watchtower.never_block', ['203.0.113.9']);
+        $this->postJson('/logscope/watchtower/api/block', ['ip' => '203.0.113.0/24'])->assertOk();
+
+        $this->getJson('/logscope/watchtower/api/status/203.0.113.9')
+            ->assertOk()
+            ->assertJsonPath('blocked', false);
+    });
+
+    it('reports a range covered by a wider blocked range', function () {
+        $this->postJson('/logscope/watchtower/api/block', ['ip' => '203.0.113.0/24'])->assertOk();
+
+        $this->getJson('/logscope/watchtower/api/status/203.0.113.0%2F25')
+            ->assertOk()
+            ->assertJsonPath('blocked', true)
+            ->assertJsonPath('data.ip', '203.0.113.0/24');
+    });
+
+    it('reports an expired range as unblocked', function () {
+        BlacklistedIp::create([
+            'ip'         => '203.0.113.0/24',
+            'source'     => BlockSource::Manual,
+            'source_env' => 'testing',
+            'expires_at' => now()->subMinute(),
+        ]);
+
+        $this->getJson('/logscope/watchtower/api/status/203.0.113.0%2F24')
+            ->assertOk()
+            ->assertJsonPath('blocked', false)
+            ->assertJsonPath('data.ip', '203.0.113.0/24');
+    });
+
     it('reports the status of a range', function () {
         $this->postJson('/logscope/watchtower/api/block', ['ip' => '203.0.113.0/24'])->assertOk();
 

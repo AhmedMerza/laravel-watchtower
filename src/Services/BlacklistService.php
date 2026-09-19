@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace Watchtower\Services;
 
-use Symfony\Component\HttpFoundation\IpUtils;
 use Watchtower\Enums\BlockSource;
 use Watchtower\Events\IpBlocked;
 use Watchtower\Exceptions\NeverBlockException;
@@ -93,30 +92,51 @@ class BlacklistService
     }
 
     /**
-     * The record blocking an IP or range: its own row, or for a single IP,
-     * the active range covering it when it has none.
+     * The record blocking an IP or range: its own live row, else whichever
+     * wider range covers it. An expired row of its own is the last resort,
+     * so a lapsed block can still be reported.
      */
     public function find(string $ip): ?BlacklistedIp
     {
-        $record = BlacklistedIp::whereIn('ip', $this->targetsFor($ip))->first();
+        $own = BlacklistedIp::whereIn('ip', $this->targetsFor($ip))->get();
+        $record = $own->first(fn (BlacklistedIp $row) => ! $row->isExpired());
 
-        if ($record !== null || str_contains($ip, '/')) {
+        if ($record !== null) {
             return $record;
         }
 
-        $address = $this->normalizeIp($ip);
+        $target = IpRange::canonical($ip);
 
-        return BlacklistedIp::active()
+        // Rows whose ip doesn't parse are skipped by covers().
+        $covering = $target === null ? null : BlacklistedIp::active()
             ->where('ip', 'like', '%/%')
             ->get()
-            ->first(fn (BlacklistedIp $range) => IpUtils::checkIp($address, (string) IpRange::canonical($range->ip)));
+            ->first(fn (BlacklistedIp $range) => IpRange::covers([$range->ip], $target));
+
+        return $covering ?? $own->first();
     }
 
     /**
-     * Check if an IP is currently blocked (delegates to the cache).
+     * Whether an IP or range is currently blocked, decided the way the
+     * middleware decides it: never_block first, then the cache.
+     *
+     * A range has no single address to ask the cache about, so the row
+     * blocking it answers instead.
      */
     public function isBlocked(string $ip): bool
     {
+        // The middleware lets these through whatever covers them, so
+        // reporting them as blocked would contradict what happens.
+        if ($this->isNeverBlock($ip)) {
+            return false;
+        }
+
+        if (str_contains($ip, '/')) {
+            $record = $this->find($ip);
+
+            return $record !== null && ! $record->isExpired();
+        }
+
         return $this->cache->isBlocked($this->normalizeIp($ip));
     }
 

@@ -33,6 +33,12 @@ final class IpRange
      */
     public static function canonical(string $value): ?string
     {
+        // inet_pton() throws on a NUL byte rather than returning false, and
+        // `@` suppresses warnings, not thrown errors.
+        if (str_contains($value, "\0")) {
+            return null;
+        }
+
         [$address, $prefix] = str_contains($value, '/') ? explode('/', $value, 2) : [$value, null];
 
         $packed = @inet_pton($address);

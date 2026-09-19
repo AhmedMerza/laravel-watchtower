@@ -271,6 +271,49 @@ describe('ranges and IPv6 prefixes', function () {
             ->and($this->service->isBlocked('203.0.113.9'))->toBeTrue();
     });
 
+    it('reports a never-block address as unblocked, as the middleware treats it', function (string $neverBlock, string $blocked, string $protected) {
+        config()->set('watchtower.never_block', [$neverBlock]);
+        $this->service->block($blocked);
+
+        // Status said "blocked" here while the middleware let the address
+        // through — and LogScope's Unblock button then lifted the whole block.
+        expect($this->service->isBlocked($protected))->toBeFalse()
+            ->and($this->service->isBlocked($blocked))->toBeTrue();
+    })->with([
+        'IPv6 address inside a blocked /64' => ['2001:db8::1', '2001:db8::2', '2001:db8::1'],
+        'IPv4 address inside a blocked /24' => ['10.0.0.1', '10.0.0.0/24', '10.0.0.1'],
+    ]);
+
+    it('reports a range that a wider blocked range covers', function () {
+        $this->service->block('203.0.113.0/24');
+
+        expect($this->service->isBlocked('203.0.113.0/25'))->toBeTrue()
+            ->and($this->service->find('203.0.113.0/25')?->ip)->toBe('203.0.113.0/24')
+            ->and($this->service->isBlocked('198.51.100.0/25'))->toBeFalse();
+    });
+
+    it('prefers the range now blocking an IP over its own lapsed row', function () {
+        BlacklistedIp::create(['ip' => '203.0.113.9', 'source' => BlockSource::Manual, 'expires_at' => now()->subMinute()]);
+        $this->service->block('203.0.113.0/24');
+
+        expect($this->service->find('203.0.113.9')?->ip)->toBe('203.0.113.0/24');
+    });
+
+    it('reports an expired range as unblocked while still naming its row', function () {
+        BlacklistedIp::create(['ip' => '203.0.113.0/24', 'source' => BlockSource::Manual, 'expires_at' => now()->subMinute()]);
+
+        expect($this->service->isBlocked('203.0.113.0/24'))->toBeFalse()
+            ->and($this->service->find('203.0.113.0/24')?->ip)->toBe('203.0.113.0/24');
+    });
+
+    it('skips a malformed range row when looking for what blocks an IP', function () {
+        BlacklistedIp::create(['ip' => 'not-an-ip/24', 'source' => BlockSource::Manual]);
+        $this->service->block('203.0.113.0/24');
+
+        expect($this->service->find('203.0.113.9')?->ip)->toBe('203.0.113.0/24')
+            ->and($this->service->find('198.51.100.9'))->toBeNull();
+    });
+
     it('finds the range blocking an IP that has no row of its own', function () {
         $this->service->block('203.0.113.0/24');
         $this->service->block('198.51.100.0/24', ['expires_at' => now()->subMinute()]);

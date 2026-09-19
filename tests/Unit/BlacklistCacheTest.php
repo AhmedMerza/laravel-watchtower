@@ -410,6 +410,25 @@ describe('ranges', function () {
             ->toMatchArray(['partial' => true, 'ranges' => ['203.0.113.0/24' => 0]]);
     });
 
+    it('gives a single IP its own key when the rebuild fallback writes it', function () {
+        putRangeList();
+
+        $this->cache->put(new BlacklistedIp(['ip' => '1.2.3.4']));
+
+        // A bare IP parked in the range list would still match isBlocked(),
+        // so only the key itself shows the O(1) path was taken.
+        expect(Cache::store('array')->get('watchtower:blacklist:ip:1.2.3.4'))->toBe('')
+            ->and(Cache::store('array')->get('watchtower:blacklist:_ranges')['ranges'])->toBe([]);
+    });
+
+    it('leaves a cold cache cold when forgetting a target it never held', function () {
+        $this->cache->forget('203.0.113.0/24');
+
+        // Writing a null list here would read as "warm" and stop lookups
+        // from rebuilding. unblock() hides this by always rebuilding after.
+        expect(Cache::store('array')->has('watchtower:blacklist:_ranges'))->toBeFalse();
+    });
+
     it('forgets a range without a rebuild', function () {
         blacklistRow('203.0.113.0/24');
         $this->cache->rebuild();

@@ -219,6 +219,13 @@ class BlacklistCache
      * for the same reason. If there's no list, the cache is cold and the DB
      * is failing; the list written then is marked partial, so lookups keep
      * trying to warm the cache rather than trusting it.
+     *
+     * ⚠️ Reading the list, changing one entry and writing it back isn't
+     * atomic either, so two of these at once can lose one of the changes.
+     * The windows are narrow — this runs only when the DB write landed and
+     * the read right after it didn't, and every forget() is followed by a
+     * rebuild() that rewrites the list from the DB — and a lock on the
+     * request path would cost more than it saves.
      */
     public function put(BlacklistedIp $block): void
     {
