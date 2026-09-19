@@ -18,7 +18,7 @@ class BlacklistService
 
     /**
      * Block an IP or CIDR range. Normalizes the target, enforces the
-     * never-block whitelist, writes to DB, rebuilds the cache, fires the
+     * never-block whitelist, writes to DB, writes the cache entry, fires the
      * IpBlocked event, and dispatches a push job to the master environment
      * (if configured).
      *
@@ -26,10 +26,11 @@ class BlacklistService
      * (`ipv6_block_prefix`, /64 by default), since the client can hop to
      * any other address inside it.
      *
-     * If the rebuild can't read the DB, this block's entry is written
-     * directly, since the middleware only reads the cache and would
-     * otherwise let the IP through while every caller is told it was
-     * blocked.
+     * A single address costs one cache key; only a range pays for a full
+     * rebuild. See BlacklistCache::write(), which also keeps the entry
+     * correct when the DB read behind a rebuild fails — the middleware only
+     * reads the cache, and would otherwise let the IP through while every
+     * caller is told it was blocked.
      *
      * @throws NeverBlockException when the never-block whitelist covers what was asked for
      * @throws NeverAutoBlockException when automation aims at the never-auto-block list
@@ -76,9 +77,7 @@ class BlacklistService
             ]
         );
 
-        if (! $this->cache->rebuild()) {
-            $this->cache->put($record);
-        }
+        $this->cache->write($record);
 
         event(new IpBlocked($record));
 

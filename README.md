@@ -5,7 +5,7 @@
 
 > **Active blocking and cross-server coordination at the edge of your Laravel app** — block a bad actor in one environment and every other environment sees the block within minutes. No Cloudflare, no AWS WAF, no infrastructure changes. Block over a JSON API standalone, or one-click from any log entry when LogScope is installed.
 
-> **Status — heading to v1.0.** Core IP blocking, cross-environment push/pull sync, the cache abstraction (works on **any** Laravel cache driver — Redis is no longer required), and the opt-in auto-block engine (with `block` / `warn` / `disabled` modes) are all in place and tested. LogScope is optional: you need it for one-click blocking from its log detail panel, and for the auto-block engine, which reads LogScope's log table.
+> **Status — heading to v1.0.** Core IP blocking, cross-environment push/pull sync, the cache abstraction (works on **any** Laravel cache driver — Redis is no longer required), and the opt-in auto-block engine (with `block` / `warn` / `disabled` modes) are all in place and tested. LogScope is optional: you need it for one-click blocking from its log detail panel, and for the log-based auto-block rules, which read LogScope's log table. The real-time detectors — failed logins, login lockouts, scanner paths and response bursts — work without it.
 >
 > Still landing before `v1.0.0`: a **standalone management UI** (today the standalone interface is the JSON API below; LogScope users get the in-panel Block-IP button).
 
@@ -62,7 +62,7 @@ Every incoming request is checked against Laravel's cache (Redis, Memcached, fil
 - [Installation](#-installation)
 - [Configuration](#%EF%B8%8F-configuration)
 - [Cross-Environment Sync](#-cross-environment-sync)
-- [Auto-Block Rules](#-auto-block-rules)
+- [Auto-Block](#-auto-block)
 - [Artisan Commands](#-artisan-commands)
 - [Security Notes](#-security-notes)
 - [Contributing](#-contributing)
@@ -75,7 +75,7 @@ Every incoming request is checked against Laravel's cache (Redis, Memcached, fil
 - PHP 8.2, 8.3 or 8.4
 - Laravel 12 or 13 — both are exercised by CI, and `composer.json` won't install on a major that isn't. Laravel 13 itself requires PHP 8.3+. Laravel 11 is not supported: it is past security support, so every 11.x release carries an open advisory and a current Composer refuses to install one.
 - A configured Laravel cache store (any driver — redis, memcached, file, database, array). Redis is recommended for production.
-- [ahmedmerza/logscope](https://github.com/AhmedMerza/laravel-logscope) >= 1.6.1 *(optional — needed for the Block-IP button in its detail panel, and for [auto-block rules](#-auto-block-rules))*. LogScope only started including this package's `watchtower::` partial in 1.6.1; 1.5.2–1.6.0 include the pre-rename `logscope-guard::` one, so the button never renders on those.
+- [ahmedmerza/logscope](https://github.com/AhmedMerza/laravel-logscope) >= 1.6.1 *(optional — needed for the Block-IP button in its detail panel, and for [log-based auto-block rules](#log-rules); the [detectors](#detectors) need no LogScope)*. LogScope only started including this package's `watchtower::` partial in 1.6.1; 1.5.2–1.6.0 include the pre-rename `logscope-guard::` one, so the button never renders on those.
 
 ---
 
@@ -131,6 +131,12 @@ WATCHTOWER_AUTO_BLOCK_MODE=warn    # warn (default) | block | disabled
 WATCHTOWER_AUTO_BLOCK_DURATION=60
 WATCHTOWER_SHARED_IP_USER_THRESHOLD=3   # distinct signed-in users before a block downgrades to a warning; 0 disables
 WATCHTOWER_NEVER_AUTO_BLOCK_IPS=        # automation skips these; an admin can still block them by hand
+
+# Real-time detectors (all disabled by default; no LogScope needed)
+WATCHTOWER_DETECT_FAILED_LOGINS=false     # Auth\Events\Failed      — start at 10 in 5 min
+WATCHTOWER_DETECT_LOGIN_LOCKOUTS=false    # Auth\Events\Lockout     — start at 3 in 15 min
+WATCHTOWER_DETECT_SCANNER_PATHS=false     # /.env, /.git/*, …       — start at 1 in 5 min
+WATCHTOWER_DETECT_RESPONSE_BURSTS=false   # 404/429 bursts          — start at 40 in 1 min
 
 # Webhook notification on every block (optional — useful for n8n, Slack, WhatsApp)
 WATCHTOWER_WEBHOOK_URL=
@@ -256,11 +262,16 @@ Block on staging → staging protected instantly → master updated asynchronous
 
 ---
 
-## 🤖 Auto-Block Rules
+## 🤖 Auto-Block
 
-Automatically block IPs based on patterns in LogScope's log table (`logscope.table`, default `log_entries`), so auto-block needs LogScope installed ([#23](https://github.com/AhmedMerza/laravel-watchtower/issues/23) tracks rules that work without it). Disabled by default, and ships with an **empty `rules` array** — you opt in by defining rules yourself.
+Two ways to block automatically, sharing one set of guards:
 
-> ⚠️ **Tune carefully or lock real users out.** An overly broad rule can block legitimate traffic across every environment. **A new rule is a dry run by default** — it reports what it would have caught and blocks nobody until you arm it.
+- **Detectors** react to Laravel's own signals — a failed login, a login lockout, a probe for `/.env`, a burst of 404s — as they happen. No log table, **no LogScope**, and the block lands within the same request instead of on the next scheduled run.
+- **Log rules** match patterns in LogScope's log table (`logscope.table`, default `log_entries`), evaluated every minute by the scheduler. These need LogScope installed.
+
+Everything here is off unless you turn it on: auto-block itself is disabled, **every detector is disabled**, and `rules` ships empty.
+
+> ⚠️ **Tune carefully or lock real users out.** An overly broad rule or detector can block legitimate traffic across every environment. **Both are a dry run by default** — they report what they would have caught and block nobody until you arm them.
 
 ```env
 WATCHTOWER_AUTO_BLOCK_ENABLED=true
@@ -268,15 +279,66 @@ WATCHTOWER_AUTO_BLOCK_MODE=warn    # warn (default) | block | disabled
 WATCHTOWER_AUTO_BLOCK_DURATION=60  # minutes
 WATCHTOWER_SHARED_IP_USER_THRESHOLD=3
 WATCHTOWER_NEVER_AUTO_BLOCK_IPS=203.0.113.0/24
+
+# Detectors — all off by default, turn on one at a time
+WATCHTOWER_DETECT_FAILED_LOGINS=false
+WATCHTOWER_DETECT_LOGIN_LOCKOUTS=false
+WATCHTOWER_DETECT_SCANNER_PATHS=false
+WATCHTOWER_DETECT_RESPONSE_BURSTS=false
 ```
 
-**Modes** (global default, overridable per rule):
+**Modes** (global default, overridable per rule *and* per detector):
 
 | Mode | Behaviour |
 |------|-----------|
 | `warn` | **The default.** Match the rule and emit a structured `would_have_blocked: true` log entry on the configured log channel — but **do not** block. Tail your logs for that key to see what the rule would catch, then set `WATCHTOWER_AUTO_BLOCK_MODE=block` to arm it. |
 | `block` | Actually block matching IPs. |
 | `disabled` | Skip the rule entirely. A per-rule kill switch without deleting the definition. |
+
+### Detectors
+
+Each one counts per IP in the cache and blocks through the same path a rule does, so `never_block`, `never_auto_block` and the shared-IP guard all still apply. A request that matches nothing costs nothing — the middleware isn't even added to the stack unless a detector that reads the request is enabled.
+
+| Detector | Signal | Default | Start at |
+|---|---|---|---|
+| `failed_logins` | `Illuminate\Auth\Events\Failed`, fired by every guard on a bad credential | off | 10 in 5 min |
+| `login_lockouts` | `Illuminate\Auth\Events\Lockout`, fired by the Breeze / Fortify / `ThrottlesLogins` login throttle | off | 3 in 15 min |
+| `scanner_paths` | A request for a configured path pattern | off | 1 in 5 min |
+| `response_bursts` | Responses with a configured status (`404`, `429`) | off | 40 in 1 min |
+
+```php
+'auto_block' => [
+    'detectors' => [
+        'failed_logins'  => ['enabled' => true, 'count' => 10, 'window_minutes' => 5],
+        'login_lockouts' => ['enabled' => true, 'count' => 3,  'window_minutes' => 15],
+
+        'scanner_paths' => [
+            'enabled'        => true,
+            'count'          => 1,
+            'window_minutes' => 5,
+            'patterns'       => ['/.env', '/.git/*', '/wp-login.php', '/xmlrpc.php', '/phpmyadmin*'],
+        ],
+
+        // Armed only after watching it in warn mode for a full traffic cycle
+        'response_bursts' => [
+            'enabled'        => true,
+            'count'          => 40,
+            'window_minutes' => 1,
+            'statuses'       => [404, 429],
+            'mode'           => 'warn',
+        ],
+    ],
+],
+```
+
+A few things worth knowing before you arm any of these:
+
+- **`scanner_paths` answers the matching request itself.** A probe for `/.env` gets the block response rather than your 404, so a pattern that overlaps a real route never serves it even once. That cuts both ways: **a pattern that overlaps a route your users need will lock them out of it**, so keep the list to paths nothing legitimate asks for. Matching runs against the *decoded* path, so `/%2Eenv` is caught too. The threshold of `1` is deliberate — a single request for `/.env` is not a mistake.
+- **`response_bursts` is the loosest and most likely to catch a real person.** It reads the status after the response is sent, so it costs the request nothing, but a broken deploy that 404s its own assets looks exactly like enumeration. Leave it in `warn` mode for a full traffic cycle and raise the count to whatever your own logs say is normal.
+- **`login_lockouts` builds on a limit you already set.** It counts the throttle your login form already applies, so one lockout is someone fumbling a password and several is someone working through a list.
+- **The counter resets on every decision**, so a block that lapses doesn't re-fire on the next signal, and a detector held back in `warn` mode reports once per `count` signals rather than once per request.
+- **`scanner_paths` at `count: 1` means one request is enough to block.** Every other path to a block needs accumulation. That is deliberate for paths nothing legitimate requests, but it also means a **misconfigured trusted proxy** — one that forwards a client-supplied `X-Forwarded-For` verbatim — lets an attacker name an innocent address and get it blocked with a single crafted request. Watchtower warns when `TrustProxies` is missing entirely, but it cannot detect an overly-permissive one. Get proxy trust right before arming this.
+- **Toggling a detector's `enabled` flag takes effect at boot, not live.** Its `count`, `window_minutes`, `mode` and `patterns` are re-read on every signal, but whether a detector is wired up at all is decided when the provider boots. Under Octane, Swoole, RoadRunner or a long-lived queue worker, switching one on or off needs a worker restart.
 
 ### Shared IPs
 
@@ -286,7 +348,13 @@ So before it blocks, watchtower counts how many **distinct signed-in users** the
 
 The count covers **all** of the address's logged traffic, not just the rows the rule matched — the question is how many people a block would hit, not how many of them tripped it. An address where one buggy client throws every error while two hundred others browse fine is the case this exists for.
 
-Three limits worth knowing:
+**Detectors have no log table to ask**, so they count the signed-in users seen on the requests they themselves counted, and the `would_have_blocked` entry carries the actual `user_ids` alongside `distinct_users` — deciding whether to arm a detector is much easier when you can see *who* was behind a flagged address rather than just how many. Nothing is recorded for traffic that matches no detector.
+
+**The same caveat applies, and more sharply.** The guard counts signed-in users and can't tell real ones from accounts an attacker made — and for detectors the identity comes from the *matching* requests themselves, so an attacker doesn't even need separate innocent traffic: signing in as three throwaway accounts while probing is enough to downgrade `response_bursts` to warn-only for their address. Read the guard as protection against **your own detector misfiring on a real shared gateway** — a broken deploy 404ing assets for three signed-in staff, which it handles exactly right — and never as a control an adversary respects. For that, use `never_block`, or keep `scanner_paths` at its default `count` of `1`, which fires before any accumulation is possible.
+
+That makes the guard strongest for `response_bursts`, where the requests are often signed in, and **blind for `failed_logins` and `login_lockouts`**, where by definition nobody is. It would be easy to count the account the credentials were *aimed* at instead — and wrong: an attacker working through a list of usernames would report a new distinct "user" on every attempt, read as a busy office, and stand the guard down. The guard would be disarmed by exactly the attack it is in the way of. So those two detectors report no users at all, and **`never_auto_block` is the protection for a known office or carrier range** before you arm them.
+
+Limits worth knowing:
 
 - **It can be gamed wherever anyone can sign up.** The guard counts signed-in users; it cannot tell real ones from accounts an attacker made. Where registration is open, someone who authenticates three throwaway accounts from their own address — one harmless request each is enough — downgrades every auto-block against that address to a warning, and the attack traffic itself needn't be signed in at all. Raise `WATCHTOWER_SHARED_IP_USER_THRESHOLD` above what an attacker will bother creating, and treat the guard as protection against *your own rules misfiring*, not as a control an adversary respects. When you need a decision automation can't be argued out of, that's `never_block`.
 - It only sees users your app actually logged. It protects an address your users are signed in from; it can't recognise a busy gateway whose traffic is all anonymous.
@@ -302,7 +370,9 @@ WATCHTOWER_NEVER_AUTO_BLOCK_IPS=203.0.113.0/24,2001:db8:2::/48
 
 > ⚠️ **It does not survive sync.** The list is applied where the automated decision is made. A block that a *satellite* decided arrives here as a synced block, not an automated one, and this node's `never_auto_block` is not consulted — the sync payload doesn't carry where the block came from, so the receiving node can't tell an admin's block from a rule's. `never_block` is still enforced on arrival and is the list to use if the address must survive a sync push. Tracked in [#56](https://github.com/AhmedMerza/laravel-watchtower/issues/56).
 
-Define rules in `config/watchtower.php`:
+### Log rules
+
+These read LogScope's log table, so they need LogScope installed — and they only see what your app actually logged, which is why Laravel's own 404s are invisible to them and `scanner_paths` exists. Define them in `config/watchtower.php`:
 
 ```php
 'auto_block' => [
@@ -330,7 +400,7 @@ Define rules in `config/watchtower.php`:
 ],
 ```
 
-Rules run every minute via the scheduler. Add the scheduler to your server if not already running:
+Rules run every minute via the scheduler — detectors don't need it, since they act inside the request. Add the scheduler to your server if not already running:
 
 ```bash
 * * * * * cd /your-app && php artisan schedule:run >> /dev/null 2>&1

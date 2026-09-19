@@ -17,6 +17,7 @@ use Watchtower\Services\BlacklistService;
 
 beforeEach(function () {
     $this->cache = Mockery::mock(BlacklistCache::class);
+    $this->cache->shouldReceive('write')->byDefault();
     $this->cache->shouldReceive('rebuild')->andReturn(true)->byDefault();
     $this->cache->shouldReceive('forget')->byDefault();
 
@@ -26,6 +27,13 @@ beforeEach(function () {
 it('blocks an IP and creates a DB record', function () {
     Event::fake();
     Queue::fake();
+
+    // Acceptance criterion: creating a block writes one cache key rather
+    // than rebuilding the whole blocklist. Asserted at the call site, not
+    // just on BlacklistCache::write() in isolation — otherwise a revert to
+    // the old rebuild()-or-put() pattern would leave every test green.
+    $this->cache->shouldReceive('write')->once();
+    $this->cache->shouldReceive('rebuild')->never();
 
     $record = $this->service->block('1.2.3.4', ['reason' => 'test block']);
 
@@ -166,6 +174,22 @@ describe('when the cache rebuild fails', function () {
         expect(Cache::store('array')->get('watchtower:blacklist:_index'))->toBe(['5.6.7.8']);
         $this->travel(61)->minutes();
         expect(Cache::store('array')->has('watchtower:blacklist:_index'))->toBeFalse();
+    });
+
+    it('still enforces a blocked RANGE, the case that actually reaches rebuild()', function () {
+        Event::fake();
+        Queue::fake();
+
+        // Every other case in this block targets a single address, and
+        // BlacklistCache::write() answers those with one put() without ever
+        // calling rebuild() — so the failing rebuild() above is never
+        // invoked and those cases pass on the fast path rather than on the
+        // fallback they are named for. A range is the only input that still
+        // goes through rebuild(), so this is what keeps the fallback
+        // covered from the BlacklistService side.
+        $this->failing->block('198.18.0.0/16');
+
+        expect($this->working->isBlocked('198.18.4.4'))->toBeTrue();
     });
 
     it('still lifts the block', function () {

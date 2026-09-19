@@ -205,15 +205,57 @@ class BlacklistCache
     }
 
     /**
-     * Write one block's entry without reading the DB — the fallback for a
-     * block whose rebuild() failed, so it takes effect anyway.
+     * Write one new block into the cache, the cheap way wherever that's safe.
+     *
+     * A single address — and an IPv6 network already at the block prefix —
+     * owns its key, so one put() is the entire write and the other entries
+     * are left alone. That matters because auto-block only ever produces
+     * these: a scanner storm creating hundreds of blocks would otherwise
+     * trigger hundreds of full rebuilds, each one re-reading every active
+     * row, exactly when the app is least able to afford it.
+     *
+     * A wider range has no key of its own; it lives in the shared range
+     * list, which put() can only update by reading it and writing it back.
+     * Rebuilding from the DB keeps that list authoritative and avoids two
+     * concurrent range blocks losing one of the two, so ranges keep paying
+     * for a rebuild — they're made by hand, one at a time.
+     */
+    public function write(BlacklistedIp $block): void
+    {
+        $target = IpRange::canonical($block->ip);
+
+        if ($target !== null && $this->hasOwnKey($target, IpRange::ipv6BlockPrefix())) {
+            $this->put($block);
+
+            return;
+        }
+
+        if (! $this->rebuild()) {
+            $this->put($block);
+        }
+    }
+
+    /**
+     * Write one block's entry without reading the DB — the write path for a
+     * single address, and the fallback for a block whose rebuild() failed so
+     * it takes effect anyway.
      *
      * A key written here is deliberately left out of the index: rewriting
      * the index would restart its TTL, so it would outlive the entries it
-     * lists. The cost is that no later rebuild forgets it, which is why
-     * BlacklistService::unblock() always calls forget(). The only other
-     * delete path, watchtower:cleanup, removes expired blocks, and the
-     * entry carries its own expiry.
+     * lists. The cost is that no later rebuild forgets it, which write()
+     * now makes true of most of the blocklist rather than the rare entry
+     * left behind by a failed rebuild. Two guarantees carry that weight:
+     *
+     * - A temporary block's entry holds its own expiry, so it stops
+     *   matching on its own. watchtower:cleanup only ever deletes rows
+     *   that have one, which is why a key it leaves behind is harmless.
+     * - A permanent block has no expiry to fall back on, and is only ever
+     *   removed through BlacklistService::unblock(), which calls forget()
+     *   for each target before rebuilding. watchtower:sync never deletes.
+     *
+     * So deleting a permanent block's row directly — bypassing unblock() —
+     * is the one way to strand a cached block, and it stays stranded until
+     * the TTL expires.
      *
      * A range is added to the range list, which keeps its original expiry
      * for the same reason. If there's no list, the cache is cold and the DB

@@ -9,6 +9,8 @@ use Illuminate\Support\Facades\Log;
 use Watchtower\Enums\BlockSource;
 use Watchtower\Exceptions\NeverAutoBlockException;
 use Watchtower\Exceptions\NeverBlockException;
+use Watchtower\Support\FailureWindow;
+use Watchtower\Support\HitWindow;
 
 class AutoBlockService
 {
@@ -21,7 +23,240 @@ class AutoBlockService
     /** Distinct signed-in users from one address before a block downgrades. */
     private const DEFAULT_SHARED_IP_USER_THRESHOLD = 3;
 
-    public function __construct(private readonly BlacklistService $blacklist) {}
+    public function __construct(
+        private readonly BlacklistService $blacklist,
+        private readonly HitWindow $hits,
+    ) {}
+
+    /**
+     * Count one real-time detector signal against an address, and block it
+     * if that crosses the detector's threshold.
+     *
+     * This is the other half of the engine: run() evaluates log-based rules
+     * on a schedule, so it can only see what the app wrote to a log table
+     * and only reacts on the next tick. The detectors call here instead, as
+     * the signal happens, which is why they work with no log table at all.
+     * Both ends share one set of guards — mode, the shared-IP threshold,
+     * never_auto_block — so arming a detector can't sidestep a protection
+     * that a rule respects.
+     *
+     * Nothing is written for traffic a detector doesn't match: the caller
+     * decides whether this is a signal at all, and only then does an
+     * address get a counter.
+     *
+     * @param  int|string|null  $userId  the signed-in user this signal came
+     *                                   from, when there is one, so the
+     *                                   shared-IP guard can tell a carrier
+     *                                   gateway from one bad actor.
+     * @return bool whether the address is blocked now — the scanner-path
+     *              detector answers the request itself when it is.
+     */
+    public function record(string $detector, string $ip, int|string|null $userId = null): bool
+    {
+        // Fail open, the way BlockedIpMiddleware does. This runs inside the
+        // request — in middleware, and in an event listener inside the auth
+        // flow — so a cache backend that is down or slow must not turn an
+        // ordinary 404 or a failed login into a 500. Detection is a
+        // best-effort layer on top of the app; it is never worth the app
+        // itself. Losing a few counts during an outage is the right trade.
+        try {
+            return $this->detect($detector, $ip, $userId);
+        } catch (\Throwable $e) {
+            $this->reportDetectorFailure($e);
+
+            return false;
+        }
+    }
+
+    /**
+     * Count one signal and decide. See record(), which is this behind a
+     * fail-open guard.
+     */
+    private function detect(string $detector, string $ip, int|string|null $userId): bool
+    {
+        if (! config('watchtower.auto_block.enabled', false)) {
+            return false;
+        }
+
+        $settings = (array) config("watchtower.auto_block.detectors.{$detector}", []);
+
+        if (! ($settings['enabled'] ?? false)) {
+            return false;
+        }
+
+        $mode = $this->resolveRuleMode(
+            $settings,
+            $this->normaliseMode(config('watchtower.auto_block.mode', 'warn')),
+        );
+
+        if ($mode === 'disabled') {
+            return false;
+        }
+
+        // Already blocked: don't count, and don't block again. A blocked
+        // scanner keeps knocking, and re-blocking on every knock would
+        // restart the duration each time and never let it lapse.
+        if ($this->blacklist->isBlocked($ip)) {
+            return true;
+        }
+
+        $windowMinutes = max(1, (int) ($settings['window_minutes'] ?? 5));
+        $windowSeconds = $windowMinutes * 60;
+        $threshold = max(1, (int) ($settings['count'] ?? 1));
+
+        // Count against what a block would actually cover, not the address
+        // the request came from. A block widens a single IPv6 address to its
+        // prefix because the client can hop anywhere inside it — and a
+        // counter keyed on the bare address would hand it a fresh budget on
+        // every hop, so an IPv6 attacker could outlast any threshold by
+        // moving within the /64 that a block would have caught anyway.
+        $counted = $this->blacklist->normalizeTarget($ip);
+
+        $hits = $this->hits->hit($detector, $counted, $windowSeconds);
+
+        if ($userId !== null) {
+            $this->hits->recordUser($detector, $counted, $userId, $windowSeconds);
+        }
+
+        if ($hits < $threshold) {
+            return false;
+        }
+
+        return $this->blockDetected(
+            $detector,
+            $ip,
+            $counted,
+            $mode,
+            $hits,
+            $threshold,
+            $windowMinutes,
+            // Resolved once here rather than inside the decision, for the
+            // reason holdBack() gives: parsing it warns on a bad value, and
+            // this runs per request rather than per tick.
+            $this->sharedIpUserThreshold(),
+        );
+    }
+
+    /**
+     * Log the detector failure at most once per window — every request hits
+     * this during a cache outage, and a line per request fills the disk
+     * while the backend is already struggling.
+     */
+    private function reportDetectorFailure(\Throwable $e): void
+    {
+        if (FailureWindow::isOpen('detector')) {
+            return;
+        }
+
+        FailureWindow::open('detector');
+
+        try {
+            Log::channel(config('watchtower.log_channel', 'stack'))
+                ->error('Watchtower: detector failed, letting the request through uncounted', [
+                    'error' => $e->getMessage(),
+                ]);
+        } catch (\Throwable) {
+            // A broken log channel must not undo the fail-open.
+        }
+    }
+
+    /**
+     * A detector reached its threshold: apply the same guards a rule gets,
+     * then block or report the near miss.
+     */
+    private function blockDetected(
+        string $detector,
+        string $ip,
+        string $counted,
+        string $mode,
+        int $hits,
+        int $threshold,
+        int $windowMinutes,
+        int $sharedIpThreshold,
+    ): bool {
+        // Read before clearing below — forget() drops the user set too.
+        $users = $this->hits->users($detector, $counted);
+
+        // Whatever is decided below, this crossing has been answered, so the
+        // count starts again. Clearing here rather than only on a successful
+        // block is what stops a held-back detector re-reporting per request:
+        // warn mode never blocks, so a counter left sitting at its threshold
+        // would re-decide — and re-log — on every matching request for the
+        // rest of the window. A scanner sending thousands would write
+        // thousands of near-identical lines, which is both a disk-filling
+        // handle for an unauthenticated attacker and the fastest way to
+        // drown the dry run warn mode exists for. It now reports once per
+        // `count` signals instead, the same cadence a rule reports at once
+        // per tick. Blocking clears it for its own reason too: a lapsed
+        // block shouldn't re-fire on the very next signal.
+        $this->hits->forget($detector, $counted);
+
+        $reason = sprintf(
+            'Auto-blocked: %s reached %d in %d min',
+            $detector,
+            $threshold,
+            $windowMinutes,
+        );
+
+        // The ids, not just the count: an operator deciding whether to arm a
+        // detector needs to see WHO was behind a flagged address, since
+        // "three users" reads very differently from three ids they recognise
+        // as staff. Empty for anonymous traffic, which is most of it.
+        $context = [
+            'detector'       => $detector,
+            'threshold'      => $threshold,
+            'window_minutes' => $windowMinutes,
+            'hits'           => $hits,
+            'user_ids'       => $users,
+        ];
+
+        $notBlockedBecause = $this->holdBack($mode, count($users), $sharedIpThreshold);
+
+        if ($notBlockedBecause !== null) {
+            $this->logWouldHaveBlocked($ip, $reason, $notBlockedBecause, count($users), $context);
+
+            return false;
+        }
+
+        try {
+            $this->blacklist->block($ip, [
+                'reason'     => $reason,
+                'source'     => BlockSource::Auto,
+                'expires_at' => now()->addMinutes((int) config('watchtower.auto_block.block_duration_minutes', 60)),
+            ]);
+        } catch (NeverAutoBlockException) {
+            $this->logWouldHaveBlocked($ip, $reason, 'never_auto_block', count($users), $context);
+
+            return false;
+        } catch (NeverBlockException) {
+            Log::channel(config('watchtower.log_channel', 'stack'))
+                ->debug('Watchtower: auto-block skipped for whitelisted IP', ['ip' => $ip]);
+
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * Which guard, if any, holds a block back once a rule or detector has
+     * matched — shared so both ends of the engine answer this identically.
+     *
+     * never_auto_block isn't here: it lives in BlacklistService::block(), so
+     * that a new automated path can't forget it.
+     *
+     * The threshold is passed in rather than read here because parsing it
+     * warns on a bad value, and run() resolves it once for a whole tick —
+     * reading it per offender would repeat that warning per offender.
+     */
+    private function holdBack(string $mode, int $distinctUsers, int $sharedIpThreshold): ?string
+    {
+        return match (true) {
+            $mode === 'warn' => 'warn mode',
+            $sharedIpThreshold > 0 && $distinctUsers >= $sharedIpThreshold => 'shared IP',
+            default => null,
+        };
+    }
 
     public function run(): void
     {
@@ -165,14 +400,17 @@ class AutoBlockService
 
             $users = $distinctUsers[$ip] ?? 0;
 
-            $notBlockedBecause = match (true) {
-                $mode === 'warn' => 'warn mode',
-                $sharedIpThreshold > 0 && $users >= $sharedIpThreshold => 'shared IP',
-                default => null,
-            };
+            $context = [
+                'rule_index'     => $ruleIndex,
+                'rule'           => $rule,
+                'threshold'      => $threshold,
+                'window_minutes' => $windowMinutes,
+            ];
+
+            $notBlockedBecause = $this->holdBack($mode, $users, $sharedIpThreshold);
 
             if ($notBlockedBecause !== null) {
-                $this->logWouldHaveBlocked($ip, $ruleIndex, $rule, $threshold, $windowMinutes, $reason, $notBlockedBecause, $users);
+                $this->logWouldHaveBlocked($ip, $reason, $notBlockedBecause, $users, $context);
 
                 continue;
             }
@@ -188,7 +426,7 @@ class AutoBlockService
                 // Caught before NeverBlockException, its parent: this one is
                 // a rule that fired on real traffic and was held back, which
                 // is worth the same visibility as any other near miss.
-                $this->logWouldHaveBlocked($ip, $ruleIndex, $rule, $threshold, $windowMinutes, $reason, 'never_auto_block', $users);
+                $this->logWouldHaveBlocked($ip, $reason, 'never_auto_block', $users, $context);
             } catch (NeverBlockException) {
                 Log::channel(config('watchtower.log_channel', 'stack'))
                     ->debug('Watchtower: auto-block skipped for whitelisted IP', ['ip' => $ip]);
@@ -231,24 +469,24 @@ class AutoBlockService
      * `not_blocked_because` says which of the three held it back, so a rule
      * that is merely unarmed reads differently from one that fired and was
      * overruled by the shared-IP guard or never_auto_block.
+     *
+     * `$identity` is whatever names the thing that matched — the rule and
+     * its index for a scheduled rule, the detector and its hit count for a
+     * real-time one — so one log shape covers both ends of the engine.
+     *
+     * @param  array<string, mixed>  $identity
      */
     private function logWouldHaveBlocked(
         string $ip,
-        int $ruleIndex,
-        array $rule,
-        int $threshold,
-        int $windowMinutes,
         string $reason,
         string $notBlockedBecause,
         int $distinctUsers,
+        array $identity = [],
     ): void {
         $context = [
             'would_have_blocked'  => true,
             'ip'                  => $ip,
-            'rule_index'          => $ruleIndex,
-            'rule'                => $rule,
-            'threshold'           => $threshold,
-            'window_minutes'      => $windowMinutes,
+            ...$identity,
             'reason'              => $reason,
             'not_blocked_because' => $notBlockedBecause,
             'distinct_users'      => $distinctUsers,
@@ -258,7 +496,7 @@ class AutoBlockService
             // Otherwise a correctly-configured dry run looks like a package
             // that quietly does nothing.
             $context['hint'] = 'Auto-block is in warn mode, so nothing was blocked. '
-                ."Set WATCHTOWER_AUTO_BLOCK_MODE=block, or the rule's own 'mode', once these look right.";
+                ."Set WATCHTOWER_AUTO_BLOCK_MODE=block, or the rule's or detector's own 'mode', once these look right.";
         }
 
         Log::channel(config('watchtower.log_channel', 'stack'))->warning(
