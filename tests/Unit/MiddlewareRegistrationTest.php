@@ -7,6 +7,7 @@ use Illuminate\Http\Middleware\HandleCors;
 use Illuminate\Http\Middleware\TrustProxies;
 use Illuminate\Support\Facades\Log;
 use Watchtower\Http\Middleware\BlockedIpMiddleware;
+use Watchtower\Http\Middleware\UserAgentMiddleware;
 use Watchtower\Support\FailureWindow;
 use Watchtower\WatchtowerServiceProvider;
 
@@ -38,6 +39,7 @@ it('splices the middleware directly after an app subclass of TrustProxies', func
         HandleCors::class,
         AppTrustProxies::class,
         BlockedIpMiddleware::class,
+        UserAgentMiddleware::class,
     ]);
 });
 
@@ -54,6 +56,7 @@ it('finds an instantiated TrustProxies, rather than splicing in front of it', fu
         HandleCors::class,
         $proxies,
         BlockedIpMiddleware::class,
+        UserAgentMiddleware::class,
     ]);
 });
 
@@ -62,6 +65,7 @@ it('puts the middleware first when TrustProxies is absent from the global stack'
 
     expect(reRegister())->toBe([
         BlockedIpMiddleware::class,
+        UserAgentMiddleware::class,
         HandleCors::class,
     ]);
 });

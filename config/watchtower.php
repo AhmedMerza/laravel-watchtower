@@ -81,7 +81,9 @@ return [
     |                also count per IP at `{key}:hits:{detector}:{ip}`
     |                and remember signed-in users at
     |                `{key}:users:{detector}:{ip}`, both decaying with
-    |                the detector's own window. Change the prefix only
+    |                the detector's own window. Search-bot verification,
+    |                when on, caches its verdict per address at
+    |                `{key}:ua:bot:{bot}:{ip}`. Change the prefix only
     |                if it conflicts with another package's cache keys.
     |
     | 'ttl_hours'  - Safety-net TTL on every cache entry. The cache is
@@ -173,6 +175,96 @@ return [
     */
 
     'ipv6_block_prefix' => (int) env('WATCHTOWER_IPV6_BLOCK_PREFIX', 64),
+
+    /*
+    |--------------------------------------------------------------------------
+    | User-Agent Filtering
+    |--------------------------------------------------------------------------
+    |
+    | Reject requests whose User-Agent names a known attack tool. The five
+    | defaults all announce themselves in their stock User-Agent and have no
+    | legitimate production traffic:
+    |
+    |   sqlmap   - automated SQL injection finder and exploiter
+    |   nikto    - web server vulnerability scanner
+    |   wpscan   - WordPress user, plugin and version enumeration
+    |   masscan  - internet-wide port scanner, on its HTTP banner grab
+    |   zgrab    - the HTTP side of ZMap, used for internet-wide surveys
+    |
+    | ⚠️ This is NOT a security boundary and cannot be one. The client writes
+    | its own User-Agent, and every tool above changes it with a single flag
+    | (`sqlmap --random-agent`, `nikto -useragent`, `wpscan --user-agent`).
+    | What it removes is the background noise of unattended scanners running
+    | defaults — which is most of what actually reaches a production app —
+    | for the cost of one regex match, with no cache read and no DB read.
+    |
+    | Because it is spoofable, a match rejects THE REQUEST and nothing more;
+    | it never blocks the address. Arm the `bad_user_agent` detector below if
+    | you want repeat offenders escalated into a real block.
+    |
+    | Patterns are plain case-insensitive SUBSTRINGS, not regexes — a `.` is
+    | a literal dot. They are compiled into one expression and reused, so
+    | matching is a single regex call per request however long the list gets.
+    | An empty User-Agent is deliberately let through: webhooks, health
+    | checks, uptime monitors and plenty of real API clients send none.
+    |
+    | Three ways past the filter, in the order they are checked:
+    |
+    |   1. `never_block` addresses skip it entirely.
+    |   2. `allow` wins over `deny`. Name your own scanner here — run it as
+    |      `sqlmap --user-agent="acme-security-audit"` — rather than dropping
+    |      a pattern that everyone else benefits from.
+    |   3. Remove the entry from `deny`.
+    |
+    | Rejections are logged at DEBUG on `log_channel`. A single scan is
+    | thousands of requests and this has no throttle, so production levels
+    | drop them; turn the channel up while you are tuning patterns.
+    |
+    | Search-bot verification (off by default) checks requests that claim to
+    | be Googlebot or Bingbot with forward-confirmed reverse DNS: the PTR
+    | record must sit under one of the bot's domains AND resolve back to the
+    | same address, since whoever controls an address can point its PTR
+    | anywhere. Both outcomes are cached at `{cache.key}:ua:bot:{bot}:{ip}`
+    | for `cache_hours`, so an address costs at most one DNS round-trip per
+    | TTL. It fails open: an unavailable resolver or cache lets the claim
+    | through rather than adding a lookup timeout to every request.
+    |
+    | Note that `enabled` is read at boot — the middleware is only added to
+    | the stack when it is on — so toggling it needs a worker restart under
+    | Octane and similar runtimes. The lists themselves are live.
+    |
+    */
+
+    'user_agents' => [
+        'enabled' => env('WATCHTOWER_USER_AGENT_FILTER', true),
+
+        'deny' => [
+            'sqlmap',
+            'nikto',
+            'wpscan',
+            'masscan',
+            'zgrab',
+        ],
+
+        // Checked before `deny`. Add a substring of your own scanner's
+        // User-Agent when you run one of the tools above against your own
+        // site.
+        'allow' => [],
+
+        'verify_search_bots' => [
+            'enabled'     => env('WATCHTOWER_VERIFY_SEARCH_BOTS', false),
+            'cache_hours' => 24,
+
+            // User-Agent substring => the domains its PTR record must sit
+            // under. A verified crawler skips the deny list; one that fails
+            // is something pretending to be Google, which is a stronger
+            // signal than any name on that list.
+            'bots' => [
+                'googlebot' => ['googlebot.com', 'google.com'],
+                'bingbot'   => ['search.msn.com'],
+            ],
+        ],
+    ],
 
     /*
     |--------------------------------------------------------------------------
@@ -342,6 +434,24 @@ return [
                 'count'          => 40,
                 'window_minutes' => 1,
                 'statuses'       => [404, 429],
+            ],
+
+            // Escalates the `user_agents` filter above from rejecting each
+            // request to blocking the address behind them. Only counts
+            // requests that filter already rejected, so it does nothing
+            // unless the filter is on.
+            //
+            // The threshold is not 1 the way scanner_paths' is, even though
+            // both read a client-controlled part of the request: a path
+            // like /.env is one a real client never asks for by accident,
+            // while a User-Agent is a single header anyone can set to
+            // anything, including on someone else's behalf where proxy
+            // trust is loose. A real scan reaches 5 within seconds; one
+            // crafted header does not.
+            'bad_user_agent' => [
+                'enabled'        => env('WATCHTOWER_DETECT_BAD_USER_AGENT', false),
+                'count'          => 5,
+                'window_minutes' => 10,
             ],
         ],
     ],

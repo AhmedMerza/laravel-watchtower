@@ -24,12 +24,14 @@ use Watchtower\Http\Controllers\SyncController;
 use Watchtower\Http\Middleware\Authorize;
 use Watchtower\Http\Middleware\BlockedIpMiddleware;
 use Watchtower\Http\Middleware\SignalDetectorMiddleware;
+use Watchtower\Http\Middleware\UserAgentMiddleware;
 use Watchtower\Http\Middleware\VerifySyncSignature;
 use Watchtower\Listeners\DetectAuthFailures;
 use Watchtower\Listeners\NotifyOnBlock;
 use Watchtower\Services\AutoBlockService;
 use Watchtower\Services\BlacklistCache;
 use Watchtower\Services\BlacklistService;
+use Watchtower\Services\UserAgentFilter;
 use Watchtower\Support\FailureWindow;
 use Watchtower\Support\HitWindow;
 use Watchtower\Support\SyncSignature;
@@ -53,6 +55,9 @@ class WatchtowerServiceProvider extends PackageServiceProvider
         $this->app->singleton(BlacklistService::class);
         $this->app->singleton(AutoBlockService::class);
         $this->app->singleton(HitWindow::class);
+        // Singleton so the deny/allow patterns compile once per worker
+        // rather than once per request.
+        $this->app->singleton(UserAgentFilter::class);
     }
 
     public function bootingPackage(): void
@@ -135,6 +140,14 @@ class WatchtowerServiceProvider extends PackageServiceProvider
         // so a stock install carries no extra stack frame at all.
         if ($this->requestDetectorsEnabled()) {
             $ours[] = SignalDetectorMiddleware::class;
+        }
+
+        // After the detectors, so a scanner probing `/.env` is counted
+        // toward a real IP block before its User-Agent gets the request
+        // rejected. The User-Agent check only decides about one request;
+        // the detectors decide about the address, which outlives it.
+        if (config('watchtower.user_agents.enabled', true)) {
+            $ours[] = UserAgentMiddleware::class;
         }
 
         // is_a() also matches an app's own subclass, e.g. App\Http\Middleware\TrustProxies,

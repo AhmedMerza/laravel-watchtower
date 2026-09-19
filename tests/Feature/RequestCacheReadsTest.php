@@ -52,3 +52,26 @@ it('reads the cache at most twice, boot included, for a request from an IP that 
         'watchtower:blacklist:ip:2001:db8:1:3::/64',
     ]);
 });
+
+it('adds no cache operations for a User-Agent the filter does not match', function () {
+    $reads = app('test.cache-reads');
+
+    Route::get('/watchtower-test', fn () => 'ok');
+
+    app(BlacklistCache::class)->rebuild();
+    $reads->exchangeArray([]);
+
+    $this->withServerVariables(['REMOTE_ADDR' => '203.0.113.9'])
+        ->withHeaders(['User-Agent' => 'curl/8.5.0'])
+        ->get('/watchtower-test')
+        ->assertOk();
+
+    // The User-Agent filter ships enabled, so it is in the stack for this
+    // request. Matching is one regex against a literal alternation and
+    // nothing else: the two reads below are the block check's, exactly as
+    // they are without the filter.
+    expect($reads->getArrayCopy())->toBe([
+        'watchtower:blacklist:_ranges',
+        'watchtower:blacklist:ip:203.0.113.9',
+    ]);
+});

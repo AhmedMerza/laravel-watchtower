@@ -52,7 +52,7 @@ Admin blocks an IP from LogScope's UI or the API (staging)
                     └─► Cache rebuilt → all environments protected
 ```
 
-Every incoming request is checked against Laravel's cache (Redis, Memcached, file, database — your choice via `WATCHTOWER_CACHE_STORE`) right after `TrustProxies`, before sessions, auth or routing run. The blocklist table itself is never queried per request. A block can be a single IP or a CIDR range; see [IP Ranges and IPv6](#ip-ranges-and-ipv6).
+Every incoming request is checked against Laravel's cache (Redis, Memcached, file, database — your choice via `WATCHTOWER_CACHE_STORE`) right after `TrustProxies`, before sessions, auth or routing run. The blocklist table itself is never queried per request. A block can be a single IP or a CIDR range; see [IP Ranges and IPv6](#ip-ranges-and-ipv6). Requests that get past the blocklist are also checked against a short list of [attack-tool User-Agents](#%EF%B8%8F-attack-tool-user-agents).
 
 ---
 
@@ -62,6 +62,7 @@ Every incoming request is checked against Laravel's cache (Redis, Memcached, fil
 - [Installation](#-installation)
 - [Configuration](#%EF%B8%8F-configuration)
 - [Cross-Environment Sync](#-cross-environment-sync)
+- [Attack-Tool User-Agents](#%EF%B8%8F-attack-tool-user-agents)
 - [Auto-Block](#-auto-block)
 - [Artisan Commands](#-artisan-commands)
 - [Security Notes](#-security-notes)
@@ -137,6 +138,11 @@ WATCHTOWER_DETECT_FAILED_LOGINS=false     # Auth\Events\Failed      — start at
 WATCHTOWER_DETECT_LOGIN_LOCKOUTS=false    # Auth\Events\Lockout     — start at 3 in 15 min
 WATCHTOWER_DETECT_SCANNER_PATHS=false     # /.env, /.git/*, …       — start at 1 in 5 min
 WATCHTOWER_DETECT_RESPONSE_BURSTS=false   # 404/429 bursts          — start at 40 in 1 min
+WATCHTOWER_DETECT_BAD_USER_AGENT=false    # rejected User-Agents    — start at 5 in 10 min
+
+# Reject requests whose User-Agent names a known attack tool (ON by default)
+WATCHTOWER_USER_AGENT_FILTER=true
+WATCHTOWER_VERIFY_SEARCH_BOTS=false       # forward-confirmed reverse DNS for Googlebot/Bingbot claims
 
 # Webhook notification on every block (optional — useful for n8n, Slack, WhatsApp)
 WATCHTOWER_WEBHOOK_URL=
@@ -262,11 +268,72 @@ Block on staging → staging protected instantly → master updated asynchronous
 
 ---
 
+## 🕵️ Attack-Tool User-Agents
+
+**On by default.** A request whose `User-Agent` names a known attack tool is answered with your [block response](#block-response) instead of being served. Five tools ship on the deny list — every one announces itself in its stock `User-Agent` and none has legitimate production traffic:
+
+| Tool | What it is | Stock `User-Agent` |
+|---|---|---|
+| **sqlmap** | Automated SQL-injection finder and exploiter | `sqlmap/1.8.2#stable (https://sqlmap.org)` |
+| **Nikto** | Web server vulnerability scanner | `Mozilla/5.00 (Nikto/2.5.0) (Evasions:None)…` |
+| **WPScan** | WordPress user, plugin and version enumeration | `WPScan v3.8.22 (https://wpscan.com/…)` |
+| **masscan** | Internet-wide port scanner, on its HTTP banner grab | `masscan/1.3 (https://github.com/…/masscan)` |
+| **zgrab** | The HTTP side of ZMap, used for internet-wide surveys | contains `zgrab` |
+
+> ⚠️ **This is not a security boundary and cannot be one.** The client writes its own `User-Agent`, and every tool above changes it with a single flag — `sqlmap --random-agent`, `nikto -useragent`, `wpscan --user-agent`. What it removes is the background noise of unattended scanners running defaults, which is most of what actually reaches a production app, for the cost of one regex match with no cache read and no DB read. Someone deliberately after *you* walks straight past it.
+
+Because it is spoofable, **a match rejects the request and never blocks the address.** That is the headline safety property, and it holds until you arm the [`bad_user_agent` detector](#detectors) deliberately.
+
+### What it deliberately does not reject
+
+`curl`, `python-requests`, `Go-http-client`, `okhttp` — and **an empty `User-Agent`**. Real API clients, webhooks, mobile apps and uptime monitors all send those, and the big community "bad bot" lists that include them are why people switch this kind of filtering back off. Keep anything you add to the deny list equally unambiguous: a pattern that overlaps a real client 403s the people using it.
+
+### Running these tools against your own site
+
+Three ways past the filter, in the order they are checked:
+
+1. **`never_block`** — those addresses and ranges skip the check entirely. Your pentest source range or CI egress IP belongs here.
+2. **`user_agents.allow`** — checked before `deny`, so it wins. Name your own scanner rather than dropping a pattern everyone else benefits from:
+   ```bash
+   sqlmap --user-agent="sqlmap acme-security-audit" -u https://example.com
+   ```
+   ```php
+   'allow' => ['acme-security-audit'],
+   ```
+3. **Remove the entry from `user_agents.deny`** — it is a plain config array.
+
+To turn the whole thing off, `WATCHTOWER_USER_AGENT_FILTER=false`. That is read at boot, so the middleware is not in the stack at all — but it also means toggling it needs a worker restart under Octane. The lists themselves are live.
+
+### Patterns
+
+Plain **case-insensitive substrings**, not regexes — a `.` is a literal dot. They are compiled into one expression and reused, so matching is a single regex call per request however long the list grows, and a malformed entry cannot break the expression or the request.
+
+Rejections are logged at **debug** level on `log_channel`. A single scan is thousands of requests and this has no throttle, so production levels drop them; turn the channel up while you are tuning patterns.
+
+### Escalating to a real block
+
+`bad_user_agent` is an ordinary [detector](#detectors), off by default, that counts requests the filter already rejected:
+
+```env
+WATCHTOWER_AUTO_BLOCK_ENABLED=true
+WATCHTOWER_DETECT_BAD_USER_AGENT=true
+```
+
+It starts at **5 in 10 minutes** rather than the `1` [`scanner_paths`](#detectors) uses. Both read a client-controlled part of the request, but a path like `/.env` is one a real client never asks for by accident, while a `User-Agent` is a single header anyone can set to anything — including on someone else's behalf where proxy trust is loose. A real scan reaches 5 within seconds; one crafted header does not. Once armed it goes through the same `AutoBlockService::record()` every other detector uses, so `warn` mode, `never_block`, `never_auto_block` and the [shared-IP guard](#shared-ips) all apply.
+
+### Verifying search bots
+
+Off by default. With `WATCHTOWER_VERIFY_SEARCH_BOTS=true`, a request claiming to be Googlebot or Bingbot is checked with **forward-confirmed reverse DNS**: its PTR record must sit under one of the bot's domains *and* resolve back to the same address. The forward half is the half that matters — whoever controls an address controls its PTR and can point it at `googlebot.com`; only Google can make `googlebot.com` resolve back to them. A verified crawler skips the deny list; one that fails is something pretending to be Google.
+
+Both outcomes are cached at `{cache.key}:ua:bot:{bot}:{ip}` for 24 hours, so **an address costs at most one DNS round-trip per TTL** — caching only the successes would hand anyone spoofing Googlebot a free resolver lookup on every request of a scan. It fails open at every step: an unavailable resolver or cache lets the claim through rather than adding a lookup timeout to every request.
+
+---
+
 ## 🤖 Auto-Block
 
 Two ways to block automatically, sharing one set of guards:
 
-- **Detectors** react to Laravel's own signals — a failed login, a login lockout, a probe for `/.env`, a burst of 404s — as they happen. No log table, **no LogScope**, and the block lands within the same request instead of on the next scheduled run.
+- **Detectors** react to Laravel's own signals — a failed login, a login lockout, a probe for `/.env`, a burst of 404s, a scanner naming itself in its `User-Agent` — as they happen. No log table, **no LogScope**, and the block lands within the same request instead of on the next scheduled run.
 - **Log rules** match patterns in LogScope's log table (`logscope.table`, default `log_entries`), evaluated every minute by the scheduler. These need LogScope installed.
 
 Everything here is off unless you turn it on: auto-block itself is disabled, **every detector is disabled**, and `rules` ships empty.
@@ -285,6 +352,7 @@ WATCHTOWER_DETECT_FAILED_LOGINS=false
 WATCHTOWER_DETECT_LOGIN_LOCKOUTS=false
 WATCHTOWER_DETECT_SCANNER_PATHS=false
 WATCHTOWER_DETECT_RESPONSE_BURSTS=false
+WATCHTOWER_DETECT_BAD_USER_AGENT=false
 ```
 
 **Modes** (global default, overridable per rule *and* per detector):
@@ -305,6 +373,7 @@ Each one counts per IP in the cache and blocks through the same path a rule does
 | `login_lockouts` | `Illuminate\Auth\Events\Lockout`, fired by the Breeze / Fortify / `ThrottlesLogins` login throttle | off | 3 in 15 min |
 | `scanner_paths` | A request for a configured path pattern | off | 1 in 5 min |
 | `response_bursts` | Responses with a configured status (`404`, `429`) | off | 40 in 1 min |
+| `bad_user_agent` | A request the [User-Agent filter](#%EF%B8%8F-attack-tool-user-agents) already rejected | off | 5 in 10 min |
 
 ```php
 'auto_block' => [
@@ -327,6 +396,10 @@ Each one counts per IP in the cache and blocks through the same path a rule does
             'statuses'       => [404, 429],
             'mode'           => 'warn',
         ],
+
+        // Escalates the User-Agent filter from rejecting each request to
+        // blocking the address behind them
+        'bad_user_agent' => ['enabled' => true, 'count' => 5, 'window_minutes' => 10],
     ],
 ],
 ```
@@ -335,6 +408,7 @@ A few things worth knowing before you arm any of these:
 
 - **`scanner_paths` answers the matching request itself.** A probe for `/.env` gets the block response rather than your 404, so a pattern that overlaps a real route never serves it even once. That cuts both ways: **a pattern that overlaps a route your users need will lock them out of it**, so keep the list to paths nothing legitimate asks for. Matching runs against the *decoded* path, so `/%2Eenv` is caught too. The threshold of `1` is deliberate — a single request for `/.env` is not a mistake.
 - **`response_bursts` is the loosest and most likely to catch a real person.** It reads the status after the response is sent, so it costs the request nothing, but a broken deploy that 404s its own assets looks exactly like enumeration. Leave it in `warn` mode for a full traffic cycle and raise the count to whatever your own logs say is normal.
+- **`bad_user_agent` only sees what the filter already rejected**, so it does nothing unless `user_agents` is on, and a `never_block` address never reaches it. Its threshold is `5` rather than `scanner_paths`' `1` because a `User-Agent` is one header anyone can set to anything — see [Attack-Tool User-Agents](#%EF%B8%8F-attack-tool-user-agents).
 - **`login_lockouts` builds on a limit you already set.** It counts the throttle your login form already applies, so one lockout is someone fumbling a password and several is someone working through a list.
 - **The counter resets on every decision**, so a block that lapses doesn't re-fire on the next signal, and a detector held back in `warn` mode reports once per `count` signals rather than once per request.
 - **`scanner_paths` at `count: 1` means one request is enough to block.** Every other path to a block needs accumulation. That is deliberate for paths nothing legitimate requests, but it also means a **misconfigured trusted proxy** — one that forwards a client-supplied `X-Forwarded-For` verbatim — lets an attacker name an innocent address and get it blocked with a single crafted request. Watchtower warns when `TrustProxies` is missing entirely, but it cannot detect an overly-permissive one. Get proxy trust right before arming this.
