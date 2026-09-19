@@ -10,6 +10,7 @@ use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Str;
 use Watchtower\Enums\BlockSource;
+use Watchtower\Exceptions\NeverAutoBlockException;
 use Watchtower\Models\BlacklistedIp;
 use Watchtower\Services\AutoBlockService;
 use Watchtower\Services\BlacklistCache;
@@ -644,4 +645,88 @@ it('lets an admin block an IP in never_auto_block by hand', function () {
     $this->blacklist->block('26.26.26.26', ['reason' => 'Blocked by hand']);
 
     $this->assertDatabaseHas('blacklisted_ips', ['ip' => '26.26.26.26', 'source' => 'manual']);
+});
+
+/*
+ * Review fixes (#55) — each of these is a way a misconfiguration or a
+ * caller's sloppiness could have quietly removed a guard.
+ */
+
+it('falls back to warn for an invalid per-rule mode rather than inheriting an armed global', function () {
+    // The dangerous shape: armed globally, and a rule that meant to opt out
+    // of that but misspelled it. Inheriting the global would block.
+    config()->set('watchtower.auto_block.mode', 'block');
+    config()->set('watchtower.auto_block.rules', [[
+        'level'            => 'error',
+        'message_contains' => null,
+        'count'            => 1,
+        'window_minutes'   => 5,
+        'mode'             => 'warm', // typo for 'warn'
+    ]]);
+
+    logEntry('30.30.30.30');
+
+    expectWarning('warn mode');
+
+    $this->service->run();
+
+    $this->assertDatabaseMissing('blacklisted_ips', ['ip' => '30.30.30.30']);
+});
+
+it('keeps the shared-IP guard on when the threshold is not a number', function () {
+    // 0 means "off", so a blank or misspelled env value must NOT read as 0.
+    config()->set('watchtower.auto_block.shared_ip_user_threshold', '');
+    config()->set('watchtower.auto_block.rules', [[
+        'level'            => 'error',
+        'message_contains' => null,
+        'count'            => 3,
+        'window_minutes'   => 5,
+    ]]);
+
+    foreach ([1, 2, 3] as $userId) {
+        logEntry('31.31.31.31', ['user_id' => $userId]);
+    }
+
+    $logChannel = Mockery::mock();
+    $logChannel->shouldReceive('warning')
+        ->with(Mockery::pattern('/shared_ip_user_threshold is not a whole number/'), Mockery::any())
+        ->once();
+    $logChannel->shouldReceive('warning')
+        ->withArgs(fn (string $message, array $context): bool => ($context['not_blocked_because'] ?? null) === 'shared IP')
+        ->once();
+    Log::shouldReceive('channel')->andReturn($logChannel);
+
+    $this->service->run();
+
+    // Guard still active on the default of 3, so this is a warning not a block.
+    $this->assertDatabaseMissing('blacklisted_ips', ['ip' => '31.31.31.31']);
+});
+
+it('still honours an explicit threshold of 0 as off, not as a misconfiguration', function () {
+    config()->set('watchtower.auto_block.shared_ip_user_threshold', '0');
+    config()->set('watchtower.auto_block.rules', [[
+        'level'            => 'error',
+        'message_contains' => null,
+        'count'            => 3,
+        'window_minutes'   => 5,
+    ]]);
+
+    foreach ([1, 2, 3] as $userId) {
+        logEntry('32.32.32.32', ['user_id' => $userId]);
+    }
+
+    $this->service->run();
+
+    $this->assertDatabaseHas('blacklisted_ips', ['ip' => '32.32.32.32', 'source' => 'auto']);
+});
+
+it('applies never_auto_block to a caller that passes the source as a string', function () {
+    // The model's enum cast accepts 'auto', so a strict enum comparison
+    // alone would have let this straight past the guard.
+    config()->set('watchtower.never_auto_block', ['33.33.33.33']);
+
+    expect(fn () => $this->blacklist->block('33.33.33.33', ['source' => 'auto']))
+        ->toThrow(NeverAutoBlockException::class);
+
+    $this->assertDatabaseMissing('blacklisted_ips', ['ip' => '33.33.33.33']);
 });

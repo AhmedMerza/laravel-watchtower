@@ -47,7 +47,20 @@ class BlacklistService
         // the source rather than the address alone: the same call an admin
         // makes by hand goes through. Living here rather than in each
         // detector means a new automated path can't forget it.
-        if (($options['source'] ?? BlockSource::Manual) === BlockSource::Auto && $this->isNeverAutoBlock($ip)) {
+        //
+        // The string form is resolved first because the model's enum cast
+        // accepts one, so `'source' => 'auto'` persists as an auto block
+        // while a strict enum comparison would wave it past this guard.
+        // Note this does NOT cover BlockSource::Sync — an auto block made on
+        // another node arrives here as Sync and is not re-evaluated. See the
+        // sync caveat in the README.
+        $source = $options['source'] ?? BlockSource::Manual;
+
+        if (is_string($source)) {
+            $source = BlockSource::tryFrom($source);
+        }
+
+        if ($source === BlockSource::Auto && $this->isNeverAutoBlock($ip)) {
             throw new NeverAutoBlockException("{$this->normalizeIp($ip)} is in the never-auto-block list; automation cannot block it, but an admin can.");
         }
 

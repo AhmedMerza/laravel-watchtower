@@ -220,7 +220,10 @@ return [
     'auto_block' => [
         'enabled'                  => env('WATCHTOWER_AUTO_BLOCK_ENABLED', env('GUARD_AUTO_BLOCK_ENABLED', false)),
         'mode'                     => env('WATCHTOWER_AUTO_BLOCK_MODE', 'warn'),
-        'shared_ip_user_threshold' => (int) env('WATCHTOWER_SHARED_IP_USER_THRESHOLD', 3),
+        // Not cast here: 0 means "guard off", and a bare (int) would turn a
+        // blank or misspelled value into 0 too. The service parses it and
+        // falls back to the default, loudly, when it isn't a whole number.
+        'shared_ip_user_threshold' => env('WATCHTOWER_SHARED_IP_USER_THRESHOLD', 3),
         'block_duration_minutes'   => env('WATCHTOWER_AUTO_BLOCK_DURATION', env('GUARD_AUTO_BLOCK_DURATION', 60)),
         'rules'                    => [
             // Example — a rule you're still tuning. With no 'mode' it runs

@@ -286,8 +286,9 @@ So before it blocks, watchtower counts how many **distinct signed-in users** the
 
 The count covers **all** of the address's logged traffic, not just the rows the rule matched — the question is how many people a block would hit, not how many of them tripped it. An address where one buggy client throws every error while two hundred others browse fine is the case this exists for.
 
-Two limits worth knowing:
+Three limits worth knowing:
 
+- **It can be gamed wherever anyone can sign up.** The guard counts signed-in users; it cannot tell real ones from accounts an attacker made. Where registration is open, someone who authenticates three throwaway accounts from their own address — one harmless request each is enough — downgrades every auto-block against that address to a warning, and the attack traffic itself needn't be signed in at all. Raise `WATCHTOWER_SHARED_IP_USER_THRESHOLD` above what an attacker will bother creating, and treat the guard as protection against *your own rules misfiring*, not as a control an adversary respects. When you need a decision automation can't be argued out of, that's `never_block`.
 - It only sees users your app actually logged. It protects an address your users are signed in from; it can't recognise a busy gateway whose traffic is all anonymous.
 - Anonymous traffic counts for nobody, so a scanner hitting you while signed out still gets blocked. That is deliberate.
 
@@ -299,13 +300,15 @@ WATCHTOWER_NEVER_AUTO_BLOCK_IPS=203.0.113.0/24,2001:db8:2::/48
 
 `never_auto_block` binds automation only — **an admin can still block a listed address by hand**, through the UI or the API. That is the whole difference from `never_block`, which nothing can override. Use `never_auto_block` for "a rule would be right about this traffic and wrong about the people behind it", and `never_block` for "never, under any circumstances".
 
+> ⚠️ **It does not survive sync.** The list is applied where the automated decision is made. A block that a *satellite* decided arrives here as a synced block, not an automated one, and this node's `never_auto_block` is not consulted — the sync payload doesn't carry where the block came from, so the receiving node can't tell an admin's block from a rule's. `never_block` is still enforced on arrival and is the list to use if the address must survive a sync push. Tracked in [#56](https://github.com/AhmedMerza/laravel-watchtower/issues/56).
+
 Define rules in `config/watchtower.php`:
 
 ```php
 'auto_block' => [
     'enabled'                  => env('WATCHTOWER_AUTO_BLOCK_ENABLED', false),
     'mode'                     => env('WATCHTOWER_AUTO_BLOCK_MODE', 'warn'),
-    'shared_ip_user_threshold' => (int) env('WATCHTOWER_SHARED_IP_USER_THRESHOLD', 3),
+    'shared_ip_user_threshold' => env('WATCHTOWER_SHARED_IP_USER_THRESHOLD', 3),
     'block_duration_minutes'   => 60,
     'rules' => [
         // Armed: block IPs that generate 50+ errors in 5 minutes

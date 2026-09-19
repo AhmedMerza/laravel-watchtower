@@ -32,6 +32,7 @@ class AutoBlockService
         $rules = config('watchtower.auto_block.rules', []);
         $durationMinutes = (int) config('watchtower.auto_block.block_duration_minutes', 60);
         $globalMode = $this->normaliseMode(config('watchtower.auto_block.mode', 'warn'));
+        $sharedIpThreshold = $this->sharedIpUserThreshold();
 
         foreach ($rules as $index => $rule) {
             $mode = $this->resolveRuleMode($rule, $globalMode);
@@ -40,7 +41,7 @@ class AutoBlockService
                 continue;
             }
 
-            $this->applyRule($rule, (int) $index, $mode, $durationMinutes);
+            $this->applyRule($rule, (int) $index, $mode, $durationMinutes, $sharedIpThreshold);
         }
     }
 
@@ -50,14 +51,55 @@ class AutoBlockService
      * on purpose. A rule is written from a guess about traffic nobody has
      * looked at yet, and the cost of guessing wrong is locking out real
      * users — so the untouched setting is the one that only reports.
+     *
+     * A rule that names a mode is answered on its own terms: misspell it and
+     * you get 'warn', not the global mode. Inheriting instead would mean
+     * that `'mode' => 'warm'` under an armed global silently blocks — the
+     * one outcome the typo was least likely to have intended.
      */
     private function resolveRuleMode(array $rule, string $globalMode): string
     {
-        if (isset($rule['mode']) && in_array($rule['mode'], self::VALID_MODES, true)) {
-            return $rule['mode'];
+        if (isset($rule['mode'])) {
+            return $this->normaliseMode($rule['mode']);
         }
 
         return $globalMode;
+    }
+
+    /**
+     * Distinct signed-in users from one address before a block downgrades.
+     *
+     * `0` switches the guard off, which is what makes a bare `(int)` cast
+     * the wrong tool: a blank or misspelled env value casts to 0 too, and
+     * would quietly remove the protection this feature exists to provide.
+     * Anything that isn't a whole number falls back to the default and says
+     * so, since the safe reading of a typo is "they meant to have a guard".
+     */
+    private function sharedIpUserThreshold(): int
+    {
+        $configured = config(
+            'watchtower.auto_block.shared_ip_user_threshold',
+            self::DEFAULT_SHARED_IP_USER_THRESHOLD,
+        );
+
+        if (is_int($configured) && $configured >= 0) {
+            return $configured;
+        }
+
+        if (is_string($configured) && ctype_digit(trim($configured))) {
+            return (int) trim($configured);
+        }
+
+        Log::channel(config('watchtower.log_channel', 'stack'))->warning(
+            'Watchtower: shared_ip_user_threshold is not a whole number, so the shared-IP guard fell back to its default.',
+            [
+                'configured' => $configured,
+                'using'      => self::DEFAULT_SHARED_IP_USER_THRESHOLD,
+                'hint'       => 'Set WATCHTOWER_SHARED_IP_USER_THRESHOLD to a whole number, or to 0 to switch the guard off on purpose.',
+            ],
+        );
+
+        return self::DEFAULT_SHARED_IP_USER_THRESHOLD;
     }
 
     private function normaliseMode(mixed $mode): string
@@ -67,7 +109,7 @@ class AutoBlockService
             : 'warn';
     }
 
-    private function applyRule(array $rule, int $ruleIndex, string $mode, int $durationMinutes): void
+    private function applyRule(array $rule, int $ruleIndex, string $mode, int $durationMinutes, int $sharedIpThreshold): void
     {
         $windowMinutes   = (int) ($rule['window_minutes'] ?? 5);
         $threshold       = (int) ($rule['count'] ?? 10);
@@ -92,17 +134,20 @@ class AutoBlockService
             $query->where('message', 'like', '%'.$messageContains.'%');
         }
 
-        $offenders = $query->pluck('ip_address');
+        // Dropped before the user-count query so it isn't computed for
+        // addresses that are already blocked — their rows keep matching for
+        // the rest of the window, so they reappear on every tick. Still
+        // re-checked in the loop below, because blocking one IPv6 address
+        // covers its whole prefix and can block a later offender mid-loop.
+        $offenders = $query->pluck('ip_address')
+            ->reject(fn (string $ip): bool => $this->blacklist->isBlocked($ip))
+            ->values();
 
         if ($offenders->isEmpty()) {
             return;
         }
 
         $distinctUsers = $this->distinctUsersPerIp($logsTable, $offenders->all(), $windowStart);
-        $sharedIpThreshold = (int) config(
-            'watchtower.auto_block.shared_ip_user_threshold',
-            self::DEFAULT_SHARED_IP_USER_THRESHOLD,
-        );
 
         $expiresAt = now()->addMinutes($durationMinutes);
         $reason = sprintf(
