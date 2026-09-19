@@ -134,6 +134,28 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Never Auto-Block
+    |--------------------------------------------------------------------------
+    |
+    | Addresses and ranges that automation leaves alone. Unlike never_block,
+    | these are not protected from you: an admin can still block one by hand,
+    | through the UI or the API. Use it where a rule would be right about the
+    | traffic and wrong about the people behind it — an office gateway, a VPN
+    | exit, a mobile carrier's NAT pool.
+    |
+    | A listed address that crosses a rule threshold is recorded as a
+    | would-have-blocked warning instead of being blocked.
+    |
+    | Example .env: WATCHTOWER_NEVER_AUTO_BLOCK_IPS=203.0.113.0/24,2001:db8:2::/48
+    |
+    */
+
+    'never_auto_block' => array_filter(
+        array_map('trim', explode(',', (string) env('WATCHTOWER_NEVER_AUTO_BLOCK_IPS', '')))
+    ),
+
+    /*
+    |--------------------------------------------------------------------------
     | IPv6 Block Prefix
     |--------------------------------------------------------------------------
     |
@@ -158,16 +180,33 @@ return [
     | Rules are evaluated every minute via the scheduler.
     |
     | Mode (global default — overrideable per rule):
-    |   'block'    - actually block matching IPs (production behaviour).
-    |   'warn'     - match the rule and emit a structured `would_have_blocked`
-    |                log entry on the configured `log_channel`, but do NOT
-    |                block. Use this when first turning auto-block on in a
-    |                new environment: tail your logs (or query LogScope) for
-    |                `would_have_blocked: true` to see what a rule WOULD
-    |                catch before letting it lock anyone out. Once you trust
-    |                the rule, flip to 'block'.
+    |   'warn'     - THE DEFAULT. Match the rule and emit a structured
+    |                `would_have_blocked` log entry on the configured
+    |                `log_channel`, but do NOT block. A new rule starts as a
+    |                dry run: tail your logs (or query LogScope) for
+    |                `would_have_blocked: true` to see what it WOULD catch
+    |                before letting it lock anyone out. Once you trust the
+    |                rule, set WATCHTOWER_AUTO_BLOCK_MODE=block to arm it.
+    |   'block'    - actually block matching IPs.
     |   'disabled' - skip the rule entirely. Useful as a per-rule kill switch
     |                without removing the rule definition.
+    |
+    | Shared-IP guard (applies in 'block' mode):
+    |   Many real users share one public address — mobile carriers put
+    |   subscribers behind carrier-grade NAT, and offices, universities and
+    |   VPN exits do the same. A rule tuned to catch one bad actor would
+    |   block everyone behind that gateway. So before blocking, watchtower
+    |   counts how many DISTINCT authenticated users the log saw from the
+    |   address across the window — all of its traffic, not just the rows
+    |   the rule matched, because the point is how many people a block would
+    |   hit. At or above shared_ip_user_threshold it downgrades to a warning
+    |   and records `not_blocked_because: shared IP`. Set it to 0 to switch
+    |   the guard off.
+    |
+    |   This can only see users the app actually logged. It protects an
+    |   address your users are signed in from; it can't recognise a busy
+    |   gateway whose traffic is all anonymous. List those in
+    |   never_auto_block above.
     |
     | Rule shape:
     |   level            - log level to match (e.g. 'error', 'warning'). Null = any.
@@ -179,11 +218,16 @@ return [
     */
 
     'auto_block' => [
-        'enabled'                => env('WATCHTOWER_AUTO_BLOCK_ENABLED', env('GUARD_AUTO_BLOCK_ENABLED', false)),
-        'mode'                   => env('WATCHTOWER_AUTO_BLOCK_MODE', 'block'),
-        'block_duration_minutes' => env('WATCHTOWER_AUTO_BLOCK_DURATION', env('GUARD_AUTO_BLOCK_DURATION', 60)),
-        'rules'                  => [
-            // Example — production rule:
+        'enabled'                  => env('WATCHTOWER_AUTO_BLOCK_ENABLED', env('GUARD_AUTO_BLOCK_ENABLED', false)),
+        'mode'                     => env('WATCHTOWER_AUTO_BLOCK_MODE', 'warn'),
+        // Not cast here: 0 means "guard off", and a bare (int) would turn a
+        // blank or misspelled value into 0 too. The service parses it and
+        // falls back to the default, loudly, when it isn't a whole number.
+        'shared_ip_user_threshold' => env('WATCHTOWER_SHARED_IP_USER_THRESHOLD', 3),
+        'block_duration_minutes'   => env('WATCHTOWER_AUTO_BLOCK_DURATION', env('GUARD_AUTO_BLOCK_DURATION', 60)),
+        'rules'                    => [
+            // Example — a rule you're still tuning. With no 'mode' it runs
+            // in warn mode, the global default:
             // [
             //     'level'            => 'error',
             //     'message_contains' => null,
@@ -191,13 +235,13 @@ return [
             //     'window_minutes'   => 5,
             // ],
             //
-            // Example — same rule running in warn mode while you tune it:
+            // Example — the same rule, armed, once the warnings look right:
             // [
             //     'level'            => 'error',
             //     'message_contains' => null,
             //     'count'            => 50,
             //     'window_minutes'   => 5,
-            //     'mode'             => 'warn',
+            //     'mode'             => 'block',
             // ],
         ],
     ],

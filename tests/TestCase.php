@@ -68,6 +68,11 @@ class TestCase extends Orchestra
                 level VARCHAR(20) NOT NULL,
                 message TEXT NOT NULL,
                 ip_address VARCHAR(50),
+                -- Matches the LogScope column as of v1.8.0. It is being
+                -- widened to a string upstream; the shared-IP guard counts
+                -- distinct values and never does arithmetic on them, so
+                -- either type works.
+                user_id BIGINT,
                 occurred_at DATETIME NOT NULL,
                 created_at DATETIME,
                 updated_at DATETIME
