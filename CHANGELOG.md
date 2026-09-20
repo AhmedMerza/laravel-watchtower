@@ -4,6 +4,8 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-20
+
 ### Added
 
 - **Route-scoped blocks: block an address from your login routes without taking it off the whole app.** A block now has an optional `scope`, and a scoped block only applies on routes carrying the new `watchtower:{scope}` route middleware (`Route::middleware('watchtower:auth')->group(…)`; one route can name several, `watchtower:auth,admin`). This is the middle option the shared-IP guard created the need for: mobile carriers, offices and VPN exits put many people behind one address, so a block there was downgraded to a warning — which protected them and left the attacker among them free to carry on. A scoped block takes away the routes the evidence points at and leaves everyone else the rest of the app, with the sessions they already have. **It takes two changes and neither does anything alone:** declare the name in the new top-level `scopes` config list, *and* put the middleware on your own routes — Watchtower cannot do the second half, because only your app knows where its login routes are. **Scopes are opt-in everywhere and nothing changes for an existing install:** every rule and detector ships `'scope' => null`, meaning app-wide, exactly as before. A name the config doesn't declare is refused rather than stored, since a block scoped to `atuh` would enforce nothing while reporting itself as a block — the API answers 422, and a rule or detector blocks nothing and logs why. `php artisan watchtower:install` now lists each declared scope and whether any route actually carries it, which is the only place "the middleware isn't wired up yet" and "that name is a typo" are told apart. **Cost is unchanged off the scoped routes:** a request to a route without the middleware reads exactly the two cache keys it always did, because scoped blocks live in their own cache namespace that only the route middleware reads; a scoped route reads two more, for the one scope it names. `never_block` is checked before any scope, on the same terms as everywhere else, and a cache outage on a scoped route **fails open** the way the global middleware does — these are the routes an app can least afford to turn into a 500. ([#27](https://github.com/AhmedMerza/laravel-watchtower/issues/27))
@@ -117,7 +119,8 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 - **There is no transitional `ahmedmerza/logscope-guard` package.** It has been removed from Packagist. To upgrade, `composer remove ahmedmerza/logscope-guard`, `composer require ahmedmerza/watchtower`, then work through the BREAKING entries under Changed.
 
-[Unreleased]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.1.0...v0.2.0
