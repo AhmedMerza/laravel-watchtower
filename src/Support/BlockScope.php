@@ -94,10 +94,29 @@ final class BlockScope
     /**
      * Resolve what a caller asked for into a scope that can be stored.
      *
-     * @throws UnknownScopeException when the name isn't declared in config
+     * Deliberately `mixed` rather than `?string`. This reads a config value,
+     * and every sibling key in the same array (`count`, `window_minutes`) is
+     * an unquoted int — so `'scope' => 5` is an easy typo. Under strict_types
+     * a `?string` parameter turns that into a TypeError, which callers do not
+     * catch: it would escape `AutoBlockService::run()` and take out the whole
+     * scheduled tick rather than the one misconfigured rule. A type mistake
+     * is refused the same loud, contained way a name mistake is.
+     *
+     * @throws UnknownScopeException when the value isn't a declared name
      */
-    public static function normalize(?string $scope): string
+    public static function normalize(mixed $scope): string
     {
+        if ($scope === null) {
+            return self::GLOBAL;
+        }
+
+        if (! is_scalar($scope)) {
+            throw new UnknownScopeException(sprintf(
+                'A block scope must be a string, %s given.',
+                get_debug_type($scope),
+            ));
+        }
+
         $scope = trim((string) $scope);
 
         if ($scope === self::GLOBAL) {

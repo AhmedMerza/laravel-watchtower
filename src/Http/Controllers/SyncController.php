@@ -57,7 +57,17 @@ class SyncController extends Controller
         ]);
 
         $ip = $this->service->normalizeTarget($validated['ip']);
-        $existing = BlacklistedIp::where('ip', $ip)->first();
+
+        // Scoped to the global row, because that is the only row this can
+        // ever write: the payload has no scope field, so block() below
+        // stores a global block. Matching any row would let an unrelated
+        // LOCAL scoped block for the same address — which is never a Sync
+        // block — trip the never-downgrade guard below and silently refuse a
+        // satellite's legitimate app-wide block. The pull path in
+        // SyncCommand scopes the same lookup for the same reason.
+        $existing = BlacklistedIp::where('ip', $ip)
+            ->where('scope', BlockScope::GLOBAL)
+            ->first();
 
         // Same rule watchtower:sync applies in the other direction: an
         // incoming sync record never downgrades a manual or auto block made

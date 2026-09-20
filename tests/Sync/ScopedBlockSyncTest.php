@@ -55,3 +55,33 @@ it('stores a pushed block as global even when a scoped row exists for the addres
     expect(BlacklistedIp::where('ip', '10.0.0.1')->pluck('scope')->sort()->values()->all())
         ->toBe([BlockScope::GLOBAL, 'auth']);
 });
+
+it('accepts a satellite\'s global block even when a local scoped block exists for that address', function () {
+    // The master holds its own scoped block for this address.
+    BlacklistedIp::create([
+        'ip'         => '10.0.0.3',
+        'scope'      => 'auth',
+        'source'     => BlockSource::Manual,
+        'source_env' => 'testing',
+    ]);
+
+    postSigned($this, json_encode(['ip' => '10.0.0.3', 'reason' => 'from satellite']))
+        ->assertOk()
+        ->assertJsonPath('applied', true);
+
+    // The never-downgrade guard must compare against the master's own GLOBAL
+    // row, not any row. Matching the scoped row instead made its Manual
+    // source trip the guard and silently refuse a legitimate app-wide block.
+    $this->assertDatabaseHas('blacklisted_ips', [
+        'ip'     => '10.0.0.3',
+        'scope'  => BlockScope::GLOBAL,
+        'source' => 'sync',
+    ]);
+
+    // …and the local scoped block is untouched.
+    $this->assertDatabaseHas('blacklisted_ips', [
+        'ip'     => '10.0.0.3',
+        'scope'  => 'auth',
+        'source' => 'manual',
+    ]);
+});

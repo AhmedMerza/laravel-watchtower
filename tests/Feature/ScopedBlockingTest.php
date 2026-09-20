@@ -125,3 +125,46 @@ it('lets requests through a route naming an undeclared scope', function () {
         ->get('/typo')
         ->assertOk();
 });
+
+it('reads no database when a declared scope has stray whitespace', function () {
+    // BlockScope::declared() trims, so blocks store under 'auth'. If the
+    // cache rebuild re-parsed the config without trimming, it would write the
+    // namespace under 'auth ' instead, leaving the real one with no range key
+    // — read as cold on every request, rebuilding the blocklist each time.
+    config()->set('watchtower.scopes', ['auth ']);
+
+    Route::get('/login-ws', fn () => 'ok')->middleware('watchtower:auth');
+
+    app(BlacklistCache::class)->rebuild();
+
+    $queries = 0;
+    DB::listen(function () use (&$queries) {
+        $queries++;
+    });
+
+    foreach (range(1, 3) as $i) {
+        $this->withServerVariables(['REMOTE_ADDR' => '203.0.113.9'])->get('/login-ws')->assertOk();
+    }
+
+    expect($queries)->toBe(0);
+});
+
+it('blocks on a route naming several scopes when the address is blocked in either', function () {
+    config()->set('watchtower.scopes', ['auth', 'admin']);
+    Route::get('/panel', fn () => 'ok')->middleware('watchtower:auth,admin');
+
+    blockScoped('203.0.113.9', 'admin');
+
+    $this->withServerVariables(['REMOTE_ADDR' => '203.0.113.9'])
+        ->get('/panel')
+        ->assertForbidden();
+});
+
+it('lets an address through a multi-scope route when it is blocked in neither', function () {
+    config()->set('watchtower.scopes', ['auth', 'admin']);
+    Route::get('/panel', fn () => 'ok')->middleware('watchtower:auth,admin');
+
+    $this->withServerVariables(['REMOTE_ADDR' => '203.0.113.9'])
+        ->get('/panel')
+        ->assertOk();
+});

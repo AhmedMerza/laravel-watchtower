@@ -3,9 +3,11 @@
 declare(strict_types=1);
 
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Queue;
+use Watchtower\Events\IpBlocked;
 use Watchtower\Services\AutoBlockService;
 use Watchtower\Services\BlacklistCache;
 use Watchtower\Services\BlacklistService;
@@ -118,7 +120,7 @@ it('still refuses a never_auto_block address, scope or not', function () {
     $this->assertDatabaseMissing('blacklisted_ips', ['ip' => '20.20.20.24']);
 });
 
-it('blocks globally when the address is not shared, even on a scoped rule', function () {
+it("blocks in the rule's own scope when the address is not shared", function () {
     scopedRule('auth');
 
     // One signed-in user, so the shared-IP guard never fires — the rule
@@ -214,7 +216,7 @@ it('still tells the global middleware to answer for an unscoped detector', funct
     expect($this->service->record('scanner_paths', '20.20.20.30'))->toBeTrue();
 });
 
-it('does not re-answer once a scoped block already exists', function () {
+it('does not block a second time once a scoped block already exists', function () {
     config()->set('watchtower.auto_block.detectors.scanner_paths', [
         'enabled'        => true,
         'count'          => 1,
@@ -224,8 +226,103 @@ it('does not re-answer once a scoped block already exists', function () {
     ]);
 
     $this->service->record('scanner_paths', '20.20.20.31');
+    $this->service->record('scanner_paths', '20.20.20.31');
 
-    // Second time through, the already-blocked branch answers — and it must
-    // answer false for the same reason as above.
-    expect($this->service->record('scanner_paths', '20.20.20.31'))->toBeFalse();
+    // Counting IpBlocked, not record()'s return value. detect() ends with
+    // `$blocked && $scope === GLOBAL`, so a scoped detector answers false
+    // whether the already-blocked guard fired or the code fell through and
+    // re-blocked — asserting on the return value cannot tell those apart,
+    // and a test that did passed with the guard deleted.
+    Event::assertDispatchedTimes(IpBlocked::class, 1);
+});
+
+it('does not re-block a scoped offender on the next tick', function () {
+    scopedRule('auth');
+
+    foreach (range(1, 3) as $i) {
+        logEntry('20.20.20.32', ['user_id' => 7]);
+    }
+
+    $this->service->run();
+    $this->service->run();
+
+    // The log rows still match on the second tick — a scoped block does not
+    // stop the address reaching the routes that produced them. Without a
+    // scope-aware already-blocked guard, every tick re-blocks: updateOrCreate
+    // slides expires_at forward so the block never lapses, and IpBlocked
+    // fires again, re-posting the webhook once a minute forever.
+    Event::assertDispatchedTimes(IpBlocked::class, 1);
+});
+
+it('skips a rule whose scope is not a string, without killing the whole tick', function () {
+    // Every sibling key here is an unquoted int, so 'scope' => 5 is an easy
+    // typo. Under strict_types that used to raise a TypeError that escaped
+    // run() — taking out every OTHER rule in the same scheduled tick.
+    config()->set('watchtower.auto_block.rules', [
+        ['level' => 'error', 'count' => 3, 'window_minutes' => 5, 'mode' => 'block', 'scope' => 5],
+        ['level' => 'error', 'count' => 3, 'window_minutes' => 5, 'mode' => 'block'],
+    ]);
+
+    foreach (range(1, 3) as $i) {
+        logEntry('20.20.20.33', ['user_id' => 7]);
+    }
+
+    $this->service->run();
+
+    // The second rule still ran, which is the whole point.
+    $this->assertDatabaseHas('blacklisted_ips', [
+        'ip'    => '20.20.20.33',
+        'scope' => BlockScope::GLOBAL,
+    ]);
+});
+
+it('does not re-block a scoped offender covered by a block made earlier in the same tick', function () {
+    scopedRule('auth');
+
+    // Two addresses inside one IPv6 /64. Blocking the first stores the /64,
+    // which already covers the second — so the second must be skipped.
+    foreach (range(1, 3) as $i) {
+        logEntry('2001:db8:1:2::1', ['user_id' => 7]);
+        logEntry('2001:db8:1:2::2', ['user_id' => 7]);
+    }
+
+    $this->service->run();
+
+    // This pins the guard INSIDE the loop specifically: the offender filter
+    // runs before any block exists, so it cannot catch this one. Both rows
+    // resolve to the same (2001:db8:1:2::/64, auth) record, so without the
+    // loop guard the second offender re-blocks it — sliding expires_at and
+    // firing IpBlocked a second time.
+    Event::assertDispatchedTimes(IpBlocked::class, 1);
+
+    $this->assertDatabaseHas('blacklisted_ips', [
+        'ip'    => '2001:db8:1:2::/64',
+        'scope' => 'auth',
+    ]);
+});
+
+it('does not count users for an offender already blocked in the rule scope', function () {
+    scopedRule('auth');
+
+    foreach (range(1, 3) as $i) {
+        logEntry('20.20.20.34', ['user_id' => 7]);
+    }
+
+    $this->service->run();
+
+    $userCountQueries = 0;
+    DB::listen(function ($query) use (&$userCountQueries) {
+        if (str_contains(strtolower($query->sql), 'count(distinct')) {
+            $userCountQueries++;
+        }
+    });
+
+    $this->service->run();
+
+    // This pins the offender FILTER rather than the loop guard. The filter's
+    // whole job is to drop already-blocked addresses before the shared-IP
+    // user count runs — their log rows keep matching for the rest of the
+    // window, so they reappear every tick. The loop guard would skip them
+    // too, but only after paying for the query.
+    expect($userCountQueries)->toBe(0);
 });

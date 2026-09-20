@@ -232,7 +232,13 @@ class BlacklistCache
      */
     private function namespacesToWrite(array $byScope): array
     {
-        $declared = array_map('strval', array_values((array) config('watchtower.scopes', [])));
+        // BlockScope::declared(), not a second read of the config. That class
+        // owns the vocabulary and trims each name; re-parsing here without
+        // the trim meant `'scopes' => ['auth ']` stored blocks under `auth`
+        // while writing this namespace under `auth ` — so the real namespace
+        // never got a range key, and every request to its routes read it as
+        // cold and rebuilt the whole blocklist from the DB.
+        $declared = BlockScope::declared();
 
         return array_values(array_unique(array_merge(
             [BlockScope::GLOBAL],

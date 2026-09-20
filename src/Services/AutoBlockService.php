@@ -118,7 +118,7 @@ class AutoBlockService
         // returns true, which for a scoped block would enforce it on every
         // route in the app. The route middleware carrying the scope is what
         // enforces a scoped block; nothing here may do it on its behalf.
-        if ($scope !== BlockScope::GLOBAL && $this->blacklist->isBlocked($ip, $scope)) {
+        if ($this->blockedInScope($ip, $scope)) {
             return false;
         }
 
@@ -376,6 +376,25 @@ class AutoBlockService
     }
 
     /**
+     * Whether a scoped rule or detector has already blocked this address in
+     * its own scope.
+     *
+     * Shared by both ends of the engine, because both must skip an address
+     * they have already dealt with and they answer it differently otherwise.
+     * A scoped block leaves the address globally free, so `isBlocked($ip)`
+     * alone is always false for one — which let the scheduled path re-block
+     * the same offender on every tick, sliding `expires_at` forward so the
+     * block never lapsed and re-firing IpBlocked (and the webhook) each time.
+     *
+     * Always false for the global scope: that case is `isBlocked($ip)`, which
+     * every caller checks first.
+     */
+    private function blockedInScope(string $ip, string $scope): bool
+    {
+        return $scope !== BlockScope::GLOBAL && $this->blacklist->isBlocked($ip, $scope);
+    }
+
+    /**
      * Which guard, if any, holds a block back once a rule or detector has
      * matched — shared so both ends of the engine answer this identically.
      *
@@ -518,7 +537,8 @@ class AutoBlockService
         // re-checked in the loop below, because blocking one IPv6 address
         // covers its whole prefix and can block a later offender mid-loop.
         $offenders = $query->pluck('ip_address')
-            ->reject(fn (string $ip): bool => $this->blacklist->isBlocked($ip))
+            ->reject(fn (string $ip): bool => $this->blacklist->isBlocked($ip)
+                || $this->blockedInScope($ip, $scope))
             ->values();
 
         if ($offenders->isEmpty()) {
@@ -537,7 +557,7 @@ class AutoBlockService
         );
 
         foreach ($offenders as $ip) {
-            if ($this->blacklist->isBlocked($ip)) {
+            if ($this->blacklist->isBlocked($ip) || $this->blockedInScope($ip, $scope)) {
                 continue;
             }
 

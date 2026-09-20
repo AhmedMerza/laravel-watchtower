@@ -104,3 +104,18 @@ it('still pushes a global block to the master', function () {
 
     Queue::assertPushed(PushBlockToMaster::class);
 });
+
+it('reports only the scopes an address is actually blocked in', function () {
+    config()->set('watchtower.scopes', ['auth', 'admin']);
+
+    $this->postJson('/logscope/watchtower/api/block', ['ip' => '10.0.0.1', 'scope' => 'auth'])->assertOk();
+
+    // Two scopes declared, one blocked. `scopes` must carry the blocked one
+    // and nothing for the other — every earlier test declared a single scope,
+    // so the loop body always ran exactly once.
+    $this->getJson('/logscope/watchtower/api/status/10.0.0.1')
+        ->assertOk()
+        ->assertJsonPath('blocked', false)
+        ->assertJsonPath('scopes.auth.ip', '10.0.0.1')
+        ->assertJsonMissingPath('scopes.admin');
+});
