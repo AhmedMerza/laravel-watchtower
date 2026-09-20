@@ -1,6 +1,7 @@
 <?php
 
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
 use Watchtower\Tests\StandaloneTestCase;
 use Watchtower\Tests\SyncTestCase;
 use Watchtower\Tests\TestCase;
@@ -23,4 +24,25 @@ uses(StandaloneTestCase::class)->in(__DIR__.'/Standalone');
 function failBlacklistInserts(): void
 {
     DB::statement("CREATE TRIGGER fail_blacklist_insert BEFORE INSERT ON blacklisted_ips BEGIN SELECT RAISE(ABORT, 'simulated write failure'); END");
+}
+
+/**
+ * A LogScope-shaped row for the log-driven auto-block rules to read.
+ *
+ * Shared rather than file-local: the scoped auto-block tests read the same
+ * table, and a second copy would be one more thing to keep in step with
+ * LogScope's own schema.
+ */
+function logEntry(string $ip, array $attributes = []): void
+{
+    DB::table('log_entries')->insert(array_merge([
+        'id'          => Str::ulid(),
+        'level'       => 'error',
+        'message'     => 'Boom',
+        'ip_address'  => $ip,
+        'user_id'     => null,
+        'occurred_at' => now(),
+        'created_at'  => now(),
+        'updated_at'  => now(),
+    ], $attributes));
 }

@@ -162,6 +162,47 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Block Scopes
+    |--------------------------------------------------------------------------
+    |
+    | A block normally covers the whole app. A scoped block covers only the
+    | routes carrying the matching middleware, so an address can lose your
+    | login routes while the people sharing it keep using everything else.
+    | That is the middle option between blocking everyone behind a carrier
+    | NAT and blocking nobody at all.
+    |
+    | The names listed here are the only ones accepted. A typo is refused
+    | rather than stored, because a block scoped to 'atuh' would enforce
+    | nothing and still report itself as a block.
+    |
+    | Using one takes TWO changes, and neither does anything alone:
+    |
+    |   1. Name the scope on a rule or detector below, or send it to
+    |      POST /watchtower/api/block:
+    |
+    |          'scope' => 'auth',
+    |
+    |   2. Put the middleware on the routes it should cover. Watchtower
+    |      cannot do this for you — only your app knows where its login
+    |      routes are:
+    |
+    |          Route::middleware('watchtower:auth')->group(function () {
+    |              Route::post('/login', [AuthController::class, 'store']);
+    |              Route::post('/forgot-password', [PasswordController::class, 'store']);
+    |          });
+    |
+    | Declaring a scope is free on its own. A request to a route without the
+    | middleware reads exactly the cache keys it does today.
+    |
+    | `php artisan watchtower:install` lists any scope declared here that no
+    | route carries.
+    |
+    */
+
+    'scopes' => ['auth'],
+
+    /*
+    |--------------------------------------------------------------------------
     | IPv6 Block Prefix
     |--------------------------------------------------------------------------
     |
@@ -391,6 +432,20 @@ return [
             //     'window_minutes'   => 5,
             //     'mode'             => 'block',
             // ],
+            //
+            // Example — armed, but only on the routes carrying
+            // watchtower:auth. A shared address crossing this rule gets a
+            // scoped block instead of the warning it would get otherwise,
+            // so the attacker loses those routes and everyone else behind
+            // the same address keeps working. See 'scopes':
+            // [
+            //     'level'            => 'warning',
+            //     'message_contains' => 'Failed login',
+            //     'count'            => 20,
+            //     'window_minutes'   => 5,
+            //     'mode'             => 'block',
+            //     'scope'            => 'auth',
+            // ],
         ],
 
         'detectors' => [
@@ -403,6 +458,12 @@ return [
                 'enabled'        => env('WATCHTOWER_DETECT_FAILED_LOGINS', false),
                 'count'          => 10,
                 'window_minutes' => 5,
+                // null blocks the whole app, which is what this has always
+                // done. Failed logins are evidence about your auth routes
+                // and not much else, so 'auth' is the closer match — but a
+                // scoped block enforces nothing until a route carries
+                // watchtower:auth, so it is not the default. See 'scopes'.
+                'scope'          => null,
             ],
 
             // Illuminate\Auth\Events\Lockout — fired by the login throttle
@@ -414,6 +475,8 @@ return [
                 'enabled'        => env('WATCHTOWER_DETECT_LOGIN_LOCKOUTS', false),
                 'count'          => 3,
                 'window_minutes' => 15,
+                // See failed_logins above — same reasoning, same default.
+                'scope'          => null,
             ],
 
             // Paths no legitimate client asks for, which is why the
@@ -446,6 +509,10 @@ return [
                     '/xmlrpc.php',
                     '/phpmyadmin*',
                 ],
+                // Scoping this one rarely makes sense — a client probing
+                // /.env is telling you nothing about your login routes — but
+                // it is accepted, like on every detector. See 'scopes'.
+                'scope'          => null,
             ],
 
             // A burst of 404s or 429s is what path enumeration looks like
@@ -461,6 +528,7 @@ return [
                 'count'          => 40,
                 'window_minutes' => 1,
                 'statuses'       => [404, 429],
+                'scope'          => null,
             ],
 
             // Escalates the `user_agents` filter above from rejecting each
@@ -479,6 +547,7 @@ return [
                 'enabled'        => env('WATCHTOWER_DETECT_BAD_USER_AGENT', false),
                 'count'          => 5,
                 'window_minutes' => 10,
+                'scope'          => null,
             ],
         ],
     ],

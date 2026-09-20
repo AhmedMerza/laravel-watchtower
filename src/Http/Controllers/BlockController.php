@@ -7,10 +7,12 @@ namespace Watchtower\Http\Controllers;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
+use Illuminate\Validation\Rule;
 use Watchtower\Exceptions\NeverBlockException;
 use Watchtower\Models\BlacklistedIp;
 use Watchtower\Rules\BlockTarget;
 use Watchtower\Services\BlacklistService;
+use Watchtower\Support\BlockScope;
 
 class BlockController extends Controller
 {
@@ -24,6 +26,11 @@ class BlockController extends Controller
             'reason'       => ['nullable', 'string', 'max:500'],
             'expires_at'   => ['nullable', 'date'],
             'log_entry_id' => ['nullable', 'string', 'max:26'],
+            // Rule::in rather than a free string, so a scope no route carries
+            // is a 422 the caller can read instead of a block that enforces
+            // nothing. BlacklistService refuses it too; this just says so in
+            // the shape the rest of the endpoint's errors take.
+            'scope'        => ['nullable', 'string', Rule::in(BlockScope::declared())],
         ]);
 
         // data_get() reads an Eloquent user's attributes and a GenericUser's
@@ -38,6 +45,7 @@ class BlockController extends Controller
                 'expires_at'   => isset($validated['expires_at']) ? now()->parse($validated['expires_at']) : null,
                 'log_entry_id' => $validated['log_entry_id'] ?? null,
                 'blocked_by'   => $blockedBy,
+                'scope'        => $validated['scope'] ?? null,
             ]);
         } catch (NeverBlockException $e) {
             return response()->json(['error' => $e->getMessage()], 422);
@@ -46,9 +54,18 @@ class BlockController extends Controller
         return response()->json(['data' => $record]);
     }
 
-    public function unblock(string $ip): JsonResponse
+    /**
+     * Lift a block. With no `scope`, every scope — which is what "unblock
+     * this address" has always meant here, and what LogScope's Unblock
+     * button says it does. `?scope=auth` lifts just that one.
+     */
+    public function unblock(Request $request, string $ip): JsonResponse
     {
-        $deleted = $this->service->unblock(urldecode($ip));
+        $validated = $request->validate([
+            'scope' => ['nullable', 'string', Rule::in(BlockScope::declared())],
+        ]);
+
+        $deleted = $this->service->unblock(urldecode($ip), $validated['scope'] ?? null);
 
         return response()->json(['deleted' => $deleted]);
     }
@@ -59,8 +76,13 @@ class BlockController extends Controller
         $status = $this->service->status($ip);
 
         return response()->json([
+            // `blocked` means blocked app-wide, the question the global
+            // middleware answers. A scoped block must not turn it true: a
+            // caller acting on it would be acting on an address that can
+            // still reach everything but a handful of routes.
             'blocked' => $status['blocked'],
             'data'    => $status['record'],
+            'scopes'  => $status['scopes'],
         ]);
     }
 

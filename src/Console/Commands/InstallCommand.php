@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Watchtower\Console\Commands;
 
 use Illuminate\Console\Command;
+use Watchtower\Support\BlockScope;
 
 class InstallCommand extends Command
 {
@@ -59,6 +60,43 @@ class InstallCommand extends Command
             $this->line('   Set <info>WATCHTOWER_ROUTES_ENABLED=false</info> if you don\'t need the API.');
         }
 
+        $this->reportScopes();
+
         return self::SUCCESS;
+    }
+
+    /**
+     * Report each declared scope and whether any route actually carries it.
+     *
+     * A scoped block is inert until a route names its scope, and nothing at
+     * runtime can tell "the middleware isn't wired up yet" from "that scope
+     * name is a typo" — both just quietly enforce nothing. This is the one
+     * place both are visible, so it is where they get said out loud.
+     */
+    private function reportScopes(): void
+    {
+        $scopes = BlockScope::declared();
+
+        if ($scopes === []) {
+            return;
+        }
+
+        $this->newLine();
+        $this->line('Block scopes declared in <info>config/watchtower.php</info>:');
+
+        $covered = BlockScope::routeCounts();
+
+        foreach ($scopes as $scope) {
+            $routes = $covered[$scope] ?? 0;
+
+            if ($routes > 0) {
+                $this->line("  <info>✓</info> {$scope} — on {$routes} route(s)");
+
+                continue;
+            }
+
+            $this->line("  <comment>⚠️  {$scope} — no route carries watchtower:{$scope}, so a block scoped to it does nothing</comment>");
+            $this->line("     <info>Route::middleware('watchtower:{$scope}')->group(fn () => /* your routes */);</info>");
+        }
     }
 }

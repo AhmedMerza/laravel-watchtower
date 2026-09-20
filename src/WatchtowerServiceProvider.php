@@ -23,6 +23,7 @@ use Watchtower\Http\Controllers\BlockController;
 use Watchtower\Http\Controllers\SyncController;
 use Watchtower\Http\Middleware\Authorize;
 use Watchtower\Http\Middleware\BlockedIpMiddleware;
+use Watchtower\Http\Middleware\ScopedBlockMiddleware;
 use Watchtower\Http\Middleware\SignalDetectorMiddleware;
 use Watchtower\Http\Middleware\UserAgentMiddleware;
 use Watchtower\Http\Middleware\VerifySyncSignature;
@@ -43,7 +44,15 @@ class WatchtowerServiceProvider extends PackageServiceProvider
         $package
             ->name('watchtower')
             ->hasConfigFile()
+            // ⚠️ Migration file names must sort in the order they have to run.
+            // runsMigrations() hands each file to loadMigrationsFrom(), and
+            // Laravel's migrator sorts by migration name — it does not honour
+            // the order they're declared in here. These names carry no
+            // timestamp, so a new migration whose name sorts before an earlier
+            // one runs first and fails on any install that doesn't publish
+            // migrations. MigrationOrderTest pins this.
             ->hasMigration('create_blacklisted_ips_table')
+            ->hasMigration('update_blacklisted_ips_table_add_scope')
             ->runsMigrations()
             ->hasViews()
             ->hasCommands([InstallCommand::class, SyncCommand::class, CleanupCommand::class]);
@@ -62,6 +71,13 @@ class WatchtowerServiceProvider extends PackageServiceProvider
 
     public function bootingPackage(): void
     {
+        // Registered before the enabled check, and never behind it. An app
+        // whose routes say `watchtower:auth` cannot resolve them without this
+        // alias, so gating it would turn WATCHTOWER_ENABLED=false — the
+        // switch you reach for when something is wrong — into an exception on
+        // every one of those routes. The middleware itself no-ops instead.
+        $this->app['router']->aliasMiddleware('watchtower', ScopedBlockMiddleware::class);
+
         if (! config('watchtower.enabled', true)) {
             return;
         }

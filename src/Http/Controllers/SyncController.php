@@ -12,6 +12,7 @@ use Watchtower\Exceptions\NeverBlockException;
 use Watchtower\Models\BlacklistedIp;
 use Watchtower\Rules\BlockTarget;
 use Watchtower\Services\BlacklistService;
+use Watchtower\Support\BlockScope;
 
 /**
  * The master side of cross-environment sync.
@@ -25,10 +26,21 @@ class SyncController extends Controller
 {
     public function __construct(private readonly BlacklistService $service) {}
 
-    /** Satellites pull this to rebuild their local cache. */
+    /**
+     * Satellites pull this to rebuild their local cache.
+     *
+     * Global blocks only. A scoped block means "this address loses the routes
+     * carrying watchtower:{scope}", and the satellite has its own route file
+     * — it may carry that scope somewhere else entirely, or not at all. The
+     * payload has no scope field either, so a scoped row sent here would
+     * arrive as a global block and take the address off the whole satellite.
+     * `scope` joins the wire format in #37.
+     */
     public function blocks(): JsonResponse
     {
-        return response()->json(['data' => BlacklistedIp::active()->get()]);
+        return response()->json([
+            'data' => BlacklistedIp::active()->where('scope', BlockScope::GLOBAL)->get(),
+        ]);
     }
 
     /** A satellite reporting a block it made locally. */

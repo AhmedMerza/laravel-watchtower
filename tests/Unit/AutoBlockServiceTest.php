@@ -474,20 +474,6 @@ it('invalid global mode value falls back to warn', function () {
  * bad actor must not take the whole gateway down with it.
  */
 
-function logEntry(string $ip, array $attributes = []): void
-{
-    DB::table('log_entries')->insert(array_merge([
-        'id'          => Str::ulid(),
-        'level'       => 'error',
-        'message'     => 'Boom',
-        'ip_address'  => $ip,
-        'user_id'     => null,
-        'occurred_at' => now(),
-        'created_at'  => now(),
-        'updated_at'  => now(),
-    ], $attributes));
-}
-
 function expectWarning(string $notBlockedBecause): void
 {
     $logChannel = Mockery::mock();

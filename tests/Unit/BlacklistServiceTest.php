@@ -213,6 +213,23 @@ describe('when the cache rebuild fails', function () {
 
         expect($this->working->isBlocked('1.2.3.4'))->toBeFalse();
     });
+
+    it('still lifts a scoped block', function () {
+        Event::fake();
+        Queue::fake();
+        config()->set('watchtower.scopes', ['auth']);
+
+        $this->working->block('1.2.3.4', ['scope' => 'auth']);
+
+        $this->failing->unblock('1.2.3.4');
+
+        // unblock() forgets each scope's key BEFORE rebuilding, which is the
+        // only thing that lifts this when the rebuild can't read the DB. With
+        // a working rebuild the namespaces are rewritten from the table and
+        // this passes either way — so a rebuild that works would make the
+        // test vacuous, the way #23's fallback test went quietly dead.
+        expect($this->working->isBlocked('1.2.3.4', 'auth'))->toBeFalse();
+    });
 });
 
 describe('ranges and IPv6 prefixes', function () {

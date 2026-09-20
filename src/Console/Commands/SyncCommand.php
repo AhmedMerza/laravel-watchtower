@@ -10,6 +10,7 @@ use Illuminate\Support\Facades\Log;
 use Watchtower\Enums\BlockSource;
 use Watchtower\Models\BlacklistedIp;
 use Watchtower\Services\BlacklistCache;
+use Watchtower\Support\BlockScope;
 use Watchtower\Support\SyncSignature;
 
 class SyncCommand extends Command
@@ -60,7 +61,15 @@ class SyncCommand extends Command
             foreach ($blocks as $block) {
                 // Never downgrade a manual or auto block with a sync record —
                 // only insert if the IP isn't already locally blocked.
-                $existing = BlacklistedIp::where('ip', $block['ip'])->first();
+                //
+                // Scoped on both queries below. The master only serves global
+                // blocks, so this row is one; without the filter it could
+                // match a LOCAL scoped block for the same address and either
+                // skip the sync or, worse, overwrite that scoped row and turn
+                // it into an app-wide block.
+                $existing = BlacklistedIp::where('ip', $block['ip'])
+                    ->where('scope', BlockScope::GLOBAL)
+                    ->first();
 
                 if ($existing && $existing->source !== BlockSource::Sync) {
                     $skipped++;
@@ -69,7 +78,7 @@ class SyncCommand extends Command
                 }
 
                 $written[] = BlacklistedIp::updateOrCreate(
-                    ['ip' => $block['ip']],
+                    ['ip' => $block['ip'], 'scope' => BlockScope::GLOBAL],
                     [
                         'reason'       => $block['reason'] ?? null,
                         'source_env'   => $block['source_env'] ?? 'master',

@@ -10,6 +10,7 @@ use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 use Symfony\Component\HttpFoundation\IpUtils;
 use Watchtower\Models\BlacklistedIp;
+use Watchtower\Support\BlockScope;
 use Watchtower\Support\FailureWindow;
 use Watchtower\Support\IpRange;
 
@@ -30,14 +31,16 @@ use Watchtower\Support\IpRange;
  *   `rebuild()` so it can forget stale entries on any cache driver. We
  *   can't rely on `Cache::tags()`: file and database stores don't support
  *   tagging, and dropping those stores is exactly what this avoids.
+ *
+ * A scoped block lives in its own namespace, `{prefix}:s:{scope}:…`, with
+ * the same three key kinds inside it. The global middleware only ever reads
+ * the global namespace, so a request to a route with no scope middleware
+ * costs exactly what it did before scopes existed. A scoped route pays for
+ * one more namespace, and only the one it names.
  */
 class BlacklistCache
 {
     private string $keyPrefix;
-
-    private string $indexKey;
-
-    private string $rangesKey;
 
     private int $ttlSeconds;
 
@@ -47,8 +50,6 @@ class BlacklistCache
     {
         $config = config('watchtower.cache', []);
         $this->keyPrefix = (string) ($config['key'] ?? 'watchtower:blacklist');
-        $this->indexKey = $this->keyPrefix.':_index';
-        $this->rangesKey = $this->keyPrefix.':_ranges';
         $this->ttlSeconds = (int) ($config['ttl_hours'] ?? 24) * 3600;
         $this->store = $config['store'] ?? null;
     }
@@ -66,23 +67,51 @@ class BlacklistCache
             : Cache::store($this->store);
     }
 
-    private function key(string $target): string
+    /**
+     * The key namespace for a scope. The global scope keeps the bare prefix,
+     * so every key written before scopes existed is still the key read now —
+     * upgrading does not cold-start the cache.
+     */
+    private function prefix(string $scope): string
     {
-        return $this->keyPrefix.':ip:'.$target;
+        return $scope === BlockScope::GLOBAL
+            ? $this->keyPrefix
+            : $this->keyPrefix.':s:'.$scope;
+    }
+
+    private function key(string $target, string $scope = BlockScope::GLOBAL): string
+    {
+        return $this->prefix($scope).':ip:'.$target;
+    }
+
+    private function indexKey(string $scope = BlockScope::GLOBAL): string
+    {
+        return $this->prefix($scope).':_index';
+    }
+
+    private function rangesKey(string $scope = BlockScope::GLOBAL): string
+    {
+        return $this->prefix($scope).':_ranges';
     }
 
     /**
-     * Check whether an already-normalized IP is currently blocked.
-     * Two cache reads, no DB hit — unless the cache is cold, in which case
-     * it's warmed from the DB first.
+     * Check whether an already-normalized IP is currently blocked, in one
+     * scope. Two cache reads, no DB hit — unless the cache is cold, in which
+     * case it's warmed from the DB first.
+     *
+     * The default scope is the global one, so the blocking middleware asks
+     * the same question it always did. A scoped lookup reads a different pair
+     * of keys and never consults the global ones: a globally blocked address
+     * has already been turned away by the global middleware before any
+     * scoped middleware runs.
      */
-    public function isBlocked(string $ip): bool
+    public function isBlocked(string $ip, string $scope = BlockScope::GLOBAL): bool
     {
         $cache = $this->cache();
-        $ranges = $cache->get($this->rangesKey);
+        $ranges = $cache->get($this->rangesKey($scope));
 
         if ((! is_array($ranges) || ! empty($ranges['partial'])) && $this->warm()) {
-            $ranges = $cache->get($this->rangesKey);
+            $ranges = $cache->get($this->rangesKey($scope));
         }
 
         $now = now()->getTimestamp();
@@ -100,7 +129,7 @@ class BlacklistCache
             ? IpRange::canonical("{$ip}/{$ipv6Prefix}") ?? $ip
             : $ip;
 
-        $value = $cache->get($this->key($target));
+        $value = $cache->get($this->key($target, $scope));
 
         if ($value === null) {
             return false;
@@ -156,7 +185,7 @@ class BlacklistCache
     public function rebuild(): bool
     {
         try {
-            $blocks = BlacklistedIp::active()->get(['ip', 'expires_at']);
+            $blocks = BlacklistedIp::active()->get(['ip', 'expires_at', 'scope']);
         } catch (\Throwable $e) {
             Log::channel(config('watchtower.log_channel', 'stack'))
                 ->warning('Watchtower: cache rebuild failed, keeping existing cache data', [
@@ -166,13 +195,65 @@ class BlacklistCache
             return false;
         }
 
-        $cache = $this->cache();
         $ipv6Prefix = IpRange::ipv6BlockPrefix();
 
-        // Forget the previous generation's keys so unblocked IPs don't sit
-        // in the cache until their TTL expires.
-        foreach ((array) $cache->get($this->indexKey, []) as $old) {
-            $cache->forget($this->key((string) $old));
+        $byScope = [];
+
+        foreach ($blocks as $block) {
+            $byScope[(string) $block->scope][] = $block;
+        }
+
+        // One DB read covers every scope, which is why callers that drive
+        // rebuild() themselves — watchtower:cleanup, watchtower:sync — stay
+        // correct without knowing scopes exist.
+        foreach ($this->namespacesToWrite($byScope) as $scope) {
+            $this->rebuildScope($scope, $byScope[$scope] ?? [], $ipv6Prefix);
+        }
+
+        return true;
+    }
+
+    /**
+     * Which namespaces a rebuild writes: the global one, every declared
+     * scope, and any scope that still has rows.
+     *
+     * Declared scopes are written even when nothing uses them. The range key
+     * is what marks a namespace warm, so a scope without one reads as cold on
+     * every request to its routes, and every one of those requests answers
+     * that by rebuilding from the DB — the exact full-table read the cache
+     * exists to avoid.
+     *
+     * A scope with rows but no longer in config is written too. It keeps
+     * enforcing until someone unblocks it, rather than silently lapsing
+     * because a config line was deleted.
+     *
+     * @param  array<string, list<BlacklistedIp>>  $byScope
+     * @return list<string>
+     */
+    private function namespacesToWrite(array $byScope): array
+    {
+        $declared = array_map('strval', array_values((array) config('watchtower.scopes', [])));
+
+        return array_values(array_unique(array_merge(
+            [BlockScope::GLOBAL],
+            $declared,
+            array_map('strval', array_keys($byScope)),
+        )));
+    }
+
+    /**
+     * Write one namespace: forget the previous generation's keys so unblocked
+     * IPs don't sit in the cache until their TTL expires, then write this
+     * one's per-target keys, index and range list.
+     *
+     * @param  list<BlacklistedIp>  $blocks
+     */
+    private function rebuildScope(string $scope, array $blocks, int $ipv6Prefix): void
+    {
+        $cache = $this->cache();
+
+        foreach ((array) $cache->get($this->indexKey($scope), []) as $old) {
+            $cache->forget($this->key((string) $old, $scope));
         }
 
         $index = [];
@@ -186,22 +267,20 @@ class BlacklistCache
             }
 
             if ($this->hasOwnKey($target, $ipv6Prefix)) {
-                $cache->put($this->key($target), $this->value($block), $this->ttlSeconds);
+                $cache->put($this->key($target, $scope), $this->value($block), $this->ttlSeconds);
                 $index[] = $target;
             } else {
                 $ranges[$target] = $block->expires_at?->getTimestamp() ?? 0;
             }
         }
 
-        $cache->put($this->indexKey, $index, $this->ttlSeconds);
+        $cache->put($this->indexKey($scope), $index, $this->ttlSeconds);
 
         $this->putRanges([
             'ipv6_prefix' => $ipv6Prefix,
             'ranges'      => $ranges,
             'expires'     => now()->addSeconds($this->ttlSeconds)->getTimestamp(),
-        ]);
-
-        return true;
+        ], $scope);
     }
 
     /**
@@ -277,11 +356,12 @@ class BlacklistCache
             return;
         }
 
+        $scope = (string) $block->scope;
         $cache = $this->cache();
-        $ranges = $cache->get($this->rangesKey);
+        $ranges = $cache->get($this->rangesKey($scope));
 
         if ($this->hasOwnKey($target, (int) ($ranges['ipv6_prefix'] ?? IpRange::ipv6BlockPrefix()))) {
-            $cache->put($this->key($target), $this->value($block), $this->ttlSeconds);
+            $cache->put($this->key($target, $scope), $this->value($block), $this->ttlSeconds);
 
             return;
         }
@@ -296,22 +376,23 @@ class BlacklistCache
         }
 
         $ranges['ranges'][$target] = $block->expires_at?->getTimestamp() ?? 0;
-        $this->putRanges($ranges);
+        $this->putRanges($ranges, $scope);
     }
 
     /**
-     * Forget one target's entry without reading the DB. See put().
+     * Forget one target's entry in one scope, without reading the DB.
+     * See put().
      */
-    public function forget(string $target): void
+    public function forget(string $target, string $scope = BlockScope::GLOBAL): void
     {
         $cache = $this->cache();
-        $cache->forget($this->key($target));
+        $cache->forget($this->key($target, $scope));
 
-        $ranges = $cache->get($this->rangesKey);
+        $ranges = $cache->get($this->rangesKey($scope));
 
         if (isset($ranges['ranges'][$target])) {
             unset($ranges['ranges'][$target]);
-            $this->putRanges($ranges);
+            $this->putRanges($ranges, $scope);
         }
     }
 
@@ -365,11 +446,11 @@ class BlacklistCache
         return $block->expires_at ? $block->expires_at->toIso8601String() : '';
     }
 
-    /** Write the range list, keeping the expiry it was first written with. */
-    private function putRanges(array $ranges): void
+    /** Write one scope's range list, keeping the expiry it was first written with. */
+    private function putRanges(array $ranges, string $scope = BlockScope::GLOBAL): void
     {
         $expires = $ranges['expires'] ?? now()->addSeconds($this->ttlSeconds)->getTimestamp();
 
-        $this->cache()->put($this->rangesKey, $ranges, Carbon::createFromTimestamp($expires));
+        $this->cache()->put($this->rangesKey($scope), $ranges, Carbon::createFromTimestamp($expires));
     }
 }

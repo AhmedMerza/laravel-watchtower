@@ -24,6 +24,10 @@ class NotifyOnBlock implements ShouldQueue
         try {
             Http::post($webhookUrl, [
                 'ip'         => $event->record->ip,
+                // null rather than the '' the column stores, so a receiver
+                // can test the field rather than compare it. This array is
+                // enumerated, so a new column never arrives here on its own.
+                'scope'      => $event->record->scope ?: null,
                 'reason'     => $event->record->reason,
                 'source'     => $event->record->source->value,
                 'source_env' => $event->record->source_env,
