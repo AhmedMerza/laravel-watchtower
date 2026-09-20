@@ -59,6 +59,10 @@ class ScopedBlockMiddleware
             return $next($request);
         }
 
+        // Resolved once, not once per scope: isDeclared() rebuilds the list
+        // from config on every call, and this is the request path.
+        $declared = BlockScope::declared();
+
         foreach ($scopes as $scope) {
             // An undeclared scope can hold no blocks at all — block() refuses
             // them — so there is nothing here to look up. Skipping is not
@@ -66,7 +70,7 @@ class ScopedBlockMiddleware
             // would read it as cold and warm it, turning one typo in a route
             // file into a full blocklist rebuild from the DB on every single
             // request to that route.
-            if (! BlockScope::isDeclared($scope)) {
+            if (! in_array($scope, $declared, true)) {
                 $this->reportUndeclaredScope($scope);
 
                 continue;

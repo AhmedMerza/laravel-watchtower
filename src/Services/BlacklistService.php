@@ -242,6 +242,14 @@ class BlacklistService
      */
     public function status(string $ip): array
     {
+        // Answered once up front rather than re-derived inside decide() for
+        // the global record and again for every scope — it re-canonicalises
+        // the address and rescans the whole never_block list each time, and
+        // the answer cannot depend on the scope.
+        if ($this->isNeverBlock($ip)) {
+            return ['blocked' => false, 'record' => $this->find($ip), 'scopes' => []];
+        }
+
         // Two queries whatever the scopes, the same as before they existed:
         // every row for this address, and — only if something needs it — the
         // ranges that might cover it. Resolving each scope in PHP is what
