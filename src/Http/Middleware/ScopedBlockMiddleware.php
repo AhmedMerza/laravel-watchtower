@@ -10,6 +10,7 @@ use Illuminate\Support\Facades\Log;
 use Symfony\Component\HttpFoundation\Response;
 use Watchtower\Services\BlacklistCache;
 use Watchtower\Support\BlockResponse;
+use Watchtower\Support\BlockScope;
 use Watchtower\Support\FailureWindow;
 use Watchtower\Support\IpRange;
 
@@ -59,6 +60,18 @@ class ScopedBlockMiddleware
         }
 
         foreach ($scopes as $scope) {
+            // An undeclared scope can hold no blocks at all — block() refuses
+            // them — so there is nothing here to look up. Skipping is not
+            // tidiness: its cache namespace is never written, so every lookup
+            // would read it as cold and warm it, turning one typo in a route
+            // file into a full blocklist rebuild from the DB on every single
+            // request to that route.
+            if (! BlockScope::isDeclared($scope)) {
+                $this->reportUndeclaredScope($scope);
+
+                continue;
+            }
+
             try {
                 $blocked = $this->cache->isBlocked($ip, $scope);
             } catch (\Throwable $e) {
@@ -103,6 +116,32 @@ class ScopedBlockMiddleware
         $ip = $request->ip();
 
         return $ip === null ? null : (IpRange::canonical($ip) ?? $ip);
+    }
+
+    /**
+     * Say once that a route names a scope the config doesn't declare.
+     *
+     * Its own window rather than the one AutoBlockService uses for the same
+     * mistake in config, so a typo in a route file can't silence a typo in a
+     * rule for the next minute — they are fixed in different places.
+     */
+    private function reportUndeclaredScope(string $scope): void
+    {
+        if (FailureWindow::isOpen('route_scope')) {
+            return;
+        }
+
+        FailureWindow::open('route_scope');
+
+        try {
+            Log::channel(config('watchtower.log_channel', 'stack'))
+                ->warning('Watchtower: a route names a block scope that is not declared, so it enforces nothing', [
+                    'scope'    => $scope,
+                    'declared' => BlockScope::declared(),
+                ]);
+        } catch (\Throwable) {
+            // A broken log channel must not turn this into a failed request.
+        }
     }
 
     /**

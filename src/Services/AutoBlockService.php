@@ -50,8 +50,12 @@ class AutoBlockService
      *                                   from, when there is one, so the
      *                                   shared-IP guard can tell a carrier
      *                                   gateway from one bad actor.
-     * @return bool whether the address is blocked now — the scanner-path
-     *              detector answers the request itself when it is.
+     * @return bool whether the address is blocked APP-WIDE now — the
+     *              scanner-path detector answers the request itself when it
+     *              is. A detector with a scope never returns true, because
+     *              this runs in the global middleware stack and a scoped
+     *              block must only be enforced by the route middleware
+     *              carrying its scope.
      */
     public function record(string $detector, string $ip, int|string|null $userId = null): bool
     {
@@ -104,12 +108,18 @@ class AutoBlockService
         // Already blocked: don't count, and don't block again. A blocked
         // scanner keeps knocking, and re-blocking on every knock would
         // restart the duration each time and never let it lapse.
-        //
-        // A scoped detector asks about its own scope as well, since a block
-        // it made earlier lives there rather than in the global list.
-        if ($this->blacklist->isBlocked($ip)
-            || ($scope !== BlockScope::GLOBAL && $this->blacklist->isBlocked($ip, $scope))) {
+        if ($this->blacklist->isBlocked($ip)) {
             return true;
+        }
+
+        // Already blocked where this detector aims, so there is still nothing
+        // to count — but the answer is false, not true. record()'s callers
+        // run in the GLOBAL middleware stack and answer the request when this
+        // returns true, which for a scoped block would enforce it on every
+        // route in the app. The route middleware carrying the scope is what
+        // enforces a scoped block; nothing here may do it on its behalf.
+        if ($scope !== BlockScope::GLOBAL && $this->blacklist->isBlocked($ip, $scope)) {
+            return false;
         }
 
         $windowMinutes = max(1, (int) ($settings['window_minutes'] ?? 5));
@@ -134,7 +144,7 @@ class AutoBlockService
             return false;
         }
 
-        return $this->blockDetected(
+        $blocked = $this->blockDetected(
             $detector,
             $ip,
             $counted,
@@ -148,6 +158,11 @@ class AutoBlockService
             // this runs per request rather than per tick.
             $this->sharedIpUserThreshold(),
         );
+
+        // Only an app-wide block licenses the caller to answer the request.
+        // A scoped block was still made — it is simply not this stack's to
+        // enforce. See the scoped early return above.
+        return $blocked && $scope === BlockScope::GLOBAL;
     }
 
     /**

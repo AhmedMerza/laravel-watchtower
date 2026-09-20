@@ -76,6 +76,16 @@ class InstallCommand extends Command
     private function reportScopes(): void
     {
         $scopes = BlockScope::declared();
+        $covered = BlockScope::routeCounts();
+
+        // The mirror mistake, and the one nothing else catches: a route names
+        // a scope the config never declared, usually a typo. No block can be
+        // stored in it, so the middleware is inert on that route.
+        foreach (array_diff(array_keys($covered), $scopes) as $undeclared) {
+            $this->newLine();
+            $this->warn("⚠️  Routes name the scope '{$undeclared}', which config/watchtower.php doesn't declare.");
+            $this->line("   Nothing can be blocked in it. Add it to <info>'scopes'</info>, or fix the route's middleware.");
+        }
 
         if ($scopes === []) {
             return;
@@ -83,8 +93,6 @@ class InstallCommand extends Command
 
         $this->newLine();
         $this->line('Block scopes declared in <info>config/watchtower.php</info>:');
-
-        $covered = BlockScope::routeCounts();
 
         foreach ($scopes as $scope) {
             $routes = $covered[$scope] ?? 0;

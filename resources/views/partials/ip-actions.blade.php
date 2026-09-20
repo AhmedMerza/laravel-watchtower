@@ -45,6 +45,15 @@
             {{-- Unblocked state --}}
             <template x-if="blockStatus === 'unblocked'">
                 <div>
+                    {{-- Scoped blocks don't make an address "blocked": it can still
+                         reach everything but the routes carrying the scope. Saying
+                         only "unblocked" here would hide a block that exists. --}}
+                    <template x-if="blockedScopes.length">
+                        <div class="mb-2 px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-400 text-xs">
+                            Blocked on <span class="font-mono" x-text="blockedScopes.join(', ')"></span> routes only — not app-wide.
+                        </div>
+                    </template>
+
                     <template x-if="!confirming">
                         <button @click="confirming = true"
                             :disabled="loading"
@@ -86,6 +95,7 @@ function watchtowerIpActions(urls) {
         blockStatus: null,  // null=loading, 'blocked', 'unblocked'
         blockedSince: null,
         blockedVia: null,   // the range blocking this IP, when it isn't the IP's own row
+        blockedScopes: [], // scopes this IP is blocked in, when it isn't blocked app-wide
         confirming: false,
         loading: false,
 
@@ -96,6 +106,7 @@ function watchtowerIpActions(urls) {
             this.blockStatus = null;
             this.blockedSince = null;
             this.blockedVia = null;
+            this.blockedScopes = [];
             this.confirming = false;
 
             if (this.currentIp) {
@@ -116,6 +127,7 @@ function watchtowerIpActions(urls) {
                 if (!res.ok) { this.blockStatus = 'unblocked'; return; }
                 const json = await res.json();
                 this.blockStatus = json.blocked ? 'blocked' : 'unblocked';
+                this.blockedScopes = Object.keys(json.scopes || {});
                 this.blockedVia = json.blocked && json.data?.ip?.includes('/') ? json.data.ip : null;
                 this.blockedSince = json.blocked && json.data?.created_at
                     ? new Date(json.data.created_at).toLocaleDateString()

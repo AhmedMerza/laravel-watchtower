@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Route;
 use Watchtower\Enums\BlockSource;
 use Watchtower\Models\BlacklistedIp;
@@ -89,5 +90,38 @@ it('fails open on a scoped route when the cache store is unavailable', function 
 
     $this->withServerVariables(['REMOTE_ADDR' => '203.0.113.9'])
         ->get('/login')
+        ->assertOk();
+});
+
+it('reads no database at all for a route naming an undeclared scope', function () {
+    Route::get('/typo', fn () => 'ok')->middleware('watchtower:atuh');
+
+    app(BlacklistCache::class)->rebuild();
+
+    $queries = 0;
+    DB::listen(function () use (&$queries) {
+        $queries++;
+    });
+
+    foreach (range(1, 3) as $i) {
+        $this->withServerVariables(['REMOTE_ADDR' => '203.0.113.9'])->get('/typo')->assertOk();
+    }
+
+    // An undeclared scope has no cache namespace, because rebuild() only
+    // writes declared ones and block() refuses to store an undeclared scope.
+    // Looking it up anyway would read the namespace as cold and warm it from
+    // the DB — a full blocklist read on every request, from one typo in a
+    // route file.
+    expect($queries)->toBe(0);
+});
+
+it('lets requests through a route naming an undeclared scope', function () {
+    config()->set('watchtower.scopes', ['auth']);
+    blockScoped('203.0.113.9', 'auth');
+
+    Route::get('/typo', fn () => 'ok')->middleware('watchtower:atuh');
+
+    $this->withServerVariables(['REMOTE_ADDR' => '203.0.113.9'])
+        ->get('/typo')
         ->assertOk();
 });

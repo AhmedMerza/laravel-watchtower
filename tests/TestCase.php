@@ -35,6 +35,7 @@ class TestCase extends Orchestra
         FailureWindow::forget('proxies');
         FailureWindow::forget('detector');
         FailureWindow::forget('scope');
+        FailureWindow::forget('route_scope');
 
         Factory::guessFactoryNamesUsing(
             fn (string $modelName) => 'Watchtower\\Database\\Factories\\'.class_basename($modelName).'Factory'

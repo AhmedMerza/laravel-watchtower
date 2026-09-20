@@ -183,3 +183,49 @@ it('records a detector block globally when it names no scope', function () {
         'scope' => BlockScope::GLOBAL,
     ]);
 });
+
+it('never tells the global middleware to answer a request for a scoped block', function () {
+    config()->set('watchtower.auto_block.detectors.scanner_paths', [
+        'enabled'        => true,
+        'count'          => 1,
+        'window_minutes' => 5,
+        'patterns'       => ['/.env'],
+        'scope'          => 'auth',
+    ]);
+
+    // record() returning true is what makes SignalDetectorMiddleware answer
+    // the request itself — from the GLOBAL stack, on whatever route the probe
+    // hit. For a scoped detector that would enforce the block everywhere,
+    // which is the one thing scopes must never do. The block is still made;
+    // only the route middleware carrying `auth` may act on it.
+    expect($this->service->record('scanner_paths', '20.20.20.29'))->toBeFalse();
+
+    $this->assertDatabaseHas('blacklisted_ips', ['ip' => '20.20.20.29', 'scope' => 'auth']);
+});
+
+it('still tells the global middleware to answer for an unscoped detector', function () {
+    config()->set('watchtower.auto_block.detectors.scanner_paths', [
+        'enabled'        => true,
+        'count'          => 1,
+        'window_minutes' => 5,
+        'patterns'       => ['/.env'],
+    ]);
+
+    expect($this->service->record('scanner_paths', '20.20.20.30'))->toBeTrue();
+});
+
+it('does not re-answer once a scoped block already exists', function () {
+    config()->set('watchtower.auto_block.detectors.scanner_paths', [
+        'enabled'        => true,
+        'count'          => 1,
+        'window_minutes' => 5,
+        'patterns'       => ['/.env'],
+        'scope'          => 'auth',
+    ]);
+
+    $this->service->record('scanner_paths', '20.20.20.31');
+
+    // Second time through, the already-blocked branch answers — and it must
+    // answer false for the same reason as above.
+    expect($this->service->record('scanner_paths', '20.20.20.31'))->toBeFalse();
+});

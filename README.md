@@ -560,7 +560,8 @@ A shared address that trips a **scoped** rule gets a scoped block instead of onl
 ### Things worth knowing
 
 - **Scopes default to off.** Every rule and detector ships with `'scope' => null`, meaning app-wide, exactly as before. Nothing changes for an existing install until you opt in.
-- **A scope no route carries enforces nothing.** `php artisan watchtower:install` lists each declared scope and whether any route names it. A scope name that isn't declared is refused outright — a typo blocks nothing loudly rather than silently.
+- **A scope no route carries enforces nothing.** `php artisan watchtower:install` lists each declared scope and whether any route names it, and warns about the mirror mistake — a route naming a scope the config doesn't declare. A scope name that isn't declared is refused outright — a typo blocks nothing loudly rather than silently.
+- **A scoped block is only ever enforced by the route middleware.** Nothing in the global stack acts on one, including the `scanner_paths` detector, which answers a probe itself when it blocks app-wide but not when it blocks in a scope.
 - **Scoped blocks don't sync.** They stay on the node that made them: the sync payload has no scope field, and your satellites have their own route files. Tracked in [#37](https://github.com/AhmedMerza/laravel-watchtower/issues/37).
 - **`GET /api/status/{ip}`** keeps `blocked` meaning *blocked app-wide*. Scoped blocks appear under a separate `scopes` key, so nothing reads a scoped block as a full one.
 - **`DELETE /api/block/{ip}`** lifts every scope. Add `?scope=auth` to lift just one.
