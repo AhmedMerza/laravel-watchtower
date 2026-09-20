@@ -8,6 +8,7 @@ use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Watchtower\Events\IpBlocked;
+use Watchtower\Support\BlockScope;
 
 class NotifyOnBlock implements ShouldQueue
 {
@@ -24,6 +25,14 @@ class NotifyOnBlock implements ShouldQueue
         try {
             Http::post($webhookUrl, [
                 'ip'         => $event->record->ip,
+                // null rather than the '' the column stores, so a receiver
+                // can test the field rather than compare it. This array is
+                // enumerated, so a new column never arrives here on its own.
+                //
+                // Strict comparison, not `?:`: a scope named '0' is falsy but
+                // is a perfectly valid declared name, and would otherwise be
+                // reported to receivers as an app-wide block.
+                'scope'      => $event->record->scope === BlockScope::GLOBAL ? null : $event->record->scope,
                 'reason'     => $event->record->reason,
                 'source'     => $event->record->source->value,
                 'source_env' => $event->record->source_env,

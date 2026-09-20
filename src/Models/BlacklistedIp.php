@@ -13,6 +13,7 @@ use Watchtower\Enums\BlockSource;
 /**
  * @property string $id
  * @property string $ip
+ * @property string $scope '' = global, otherwise a declared scope name
  * @property string|null $reason
  * @property string|null $source_env
  * @property BlockSource $source
@@ -30,6 +31,7 @@ class BlacklistedIp extends Model
 
     protected $fillable = [
         'ip',
+        'scope',
         'reason',
         'source_env',
         'source',

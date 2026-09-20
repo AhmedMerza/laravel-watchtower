@@ -34,6 +34,8 @@ class TestCase extends Orchestra
         FailureWindow::forget('warm');
         FailureWindow::forget('proxies');
         FailureWindow::forget('detector');
+        FailureWindow::forget('scope');
+        FailureWindow::forget('route_scope');
 
         Factory::guessFactoryNamesUsing(
             fn (string $modelName) => 'Watchtower\\Database\\Factories\\'.class_basename($modelName).'Factory'
@@ -56,8 +58,15 @@ class TestCase extends Orchestra
             'prefix'   => '',
         ]);
 
-        // Run Guard migration
-        foreach (File::allFiles(__DIR__.'/../database/migrations') as $migration) {
+        // Run Guard migrations, sorted by file name — which is how Laravel's
+        // migrator orders them, and therefore the only order that proves the
+        // package installs cleanly. allFiles() returns filesystem order, which
+        // hid a migration running before the one that creates its table.
+        $migrations = collect(File::allFiles(__DIR__.'/../database/migrations'))
+            ->sortBy(fn ($migration) => $migration->getFilename())
+            ->values();
+
+        foreach ($migrations as $migration) {
             (include $migration->getRealPath())->up();
         }
 

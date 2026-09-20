@@ -2,8 +2,11 @@
 
 declare(strict_types=1);
 
+use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
+use Watchtower\Enums\BlockSource;
+use Watchtower\Models\BlacklistedIp;
 use Watchtower\Services\BlacklistCache;
 
 beforeEach(function () {
@@ -92,4 +95,48 @@ it('does not duplicate records on repeated syncs', function () {
     $this->artisan('watchtower:sync');
 
     $this->assertDatabaseCount('blacklisted_ips', 1);
+});
+
+it('does not overwrite a local scoped block with a synced global one', function () {
+    config()->set('watchtower.scopes', ['auth']);
+
+    BlacklistedIp::create([
+        'ip'         => '1.2.3.4',
+        'scope'      => 'auth',
+        'source'     => BlockSource::Manual,
+        'source_env' => 'testing',
+        'reason'     => 'local scoped block',
+    ]);
+
+    Http::fake([
+        'master.example.com/watchtower/sync/blocks' => Http::response([
+            'data' => [
+                ['ip' => '1.2.3.4', 'reason' => 'synced', 'source_env' => 'production', 'expires_at' => null, 'blocked_by' => null, 'log_entry_id' => null],
+            ],
+        ], 200),
+    ]);
+
+    $this->artisan('watchtower:sync')->assertSuccessful();
+
+    // The pull path writes with updateOrCreate on (ip, scope). Without the
+    // scope in the match it would find the local `auth` row and overwrite it,
+    // turning a block on the login routes into an app-wide one — a scoped
+    // block silently becoming global is the worst thing scopes could do.
+    $scoped = BlacklistedIp::where('ip', '1.2.3.4')->where('scope', 'auth')->first();
+
+    expect($scoped)->not->toBeNull()
+        ->and($scoped->reason)->toBe('local scoped block')
+        ->and($scoped->source)->toBe(BlockSource::Manual);
+
+    $this->assertDatabaseHas('blacklisted_ips', ['ip' => '1.2.3.4', 'scope' => '', 'source' => 'sync']);
+});
+
+it('refuses a second global row for one address', function () {
+    BlacklistedIp::create(['ip' => '1.2.3.4', 'source' => BlockSource::Manual, 'source_env' => 'testing']);
+
+    // The unique index moved from (ip) to (ip, scope). It still has to stop
+    // two global rows for one address — which a NULLable scope would not,
+    // since every engine treats NULLs as distinct in a unique index.
+    expect(fn () => BlacklistedIp::create(['ip' => '1.2.3.4', 'source' => BlockSource::Manual, 'source_env' => 'testing']))
+        ->toThrow(QueryException::class);
 });

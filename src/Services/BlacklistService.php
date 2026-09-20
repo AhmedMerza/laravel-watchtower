@@ -4,12 +4,14 @@ declare(strict_types=1);
 
 namespace Watchtower\Services;
 
+use Illuminate\Support\Collection;
 use Watchtower\Enums\BlockSource;
 use Watchtower\Events\IpBlocked;
 use Watchtower\Exceptions\NeverAutoBlockException;
 use Watchtower\Exceptions\NeverBlockException;
 use Watchtower\Jobs\PushBlockToMaster;
 use Watchtower\Models\BlacklistedIp;
+use Watchtower\Support\BlockScope;
 use Watchtower\Support\IpRange;
 
 class BlacklistService
@@ -65,8 +67,22 @@ class BlacklistService
             throw new NeverAutoBlockException("{$this->normalizeIp($ip)} is in the never-auto-block list; automation cannot block it, but an admin can.");
         }
 
+        // Resolved before the write, so a name the config doesn't declare is
+        // refused rather than stored. A block scoped to a name no route
+        // carries enforces nothing while reporting itself as a block, which
+        // is the one failure mode scopes must not introduce.
+        $scope = BlockScope::normalize($options['scope'] ?? null);
+
         $record = BlacklistedIp::updateOrCreate(
-            ['ip' => $this->normalizeTarget($ip)],
+            // Both columns, because `(ip, scope)` is the unique index: one
+            // address can hold a global block and a scoped one at once.
+            //
+            // `scope` has to be the '' BlockScope::normalize() returns and
+            // never null. updateOrCreate builds a raw where() from these, and
+            // `where('scope', null)` compiles to `scope is null`, which
+            // matches nothing in a NOT NULL column — so every call would
+            // insert, and collide with the row already there.
+            ['ip' => $this->normalizeTarget($ip), 'scope' => $scope],
             [
                 'reason'       => $options['reason'] ?? null,
                 'source_env'   => $options['source_env'] ?? app()->environment(),
@@ -81,7 +97,13 @@ class BlacklistService
 
         event(new IpBlocked($record));
 
-        if (config('watchtower.sync.master_url')) {
+        // Scoped blocks stay on the node that made them. The sync payload has
+        // no scope field, so the master would store this as a global block
+        // and push an app-wide block to every satellite that nobody asked
+        // for — a scoped block silently becoming a global one is the worst
+        // thing this feature could do. `scope` joins the payload in #37,
+        // which changes the wire format anyway.
+        if ($record->scope === BlockScope::GLOBAL && config('watchtower.sync.master_url')) {
             PushBlockToMaster::dispatch($record)
                 ->onQueue(config('watchtower.notifications.queue', 'default'));
         }
@@ -99,13 +121,37 @@ class BlacklistService
      * entry block() wrote after a failed rebuild isn't in the index, so no
      * rebuild will ever forget it.
      */
-    public function unblock(string $ip): bool
+    public function unblock(string $ip, ?string $scope = null): bool
     {
         $targets = $this->targetsFor($ip);
-        $deleted = BlacklistedIp::whereIn('ip', $targets)->delete();
+        $query = BlacklistedIp::whereIn('ip', $targets);
+
+        if ($scope !== null) {
+            $scopes = [BlockScope::normalize($scope)];
+            $query->where('scope', $scopes[0]);
+        } else {
+            // No scope means every scope. "Unblock this address" has always
+            // meant the address can use the app again, and it has to keep
+            // meaning that: LogScope's Unblock button and
+            // DELETE /api/block/{ip} both say so, and leaving a scoped block
+            // behind would report the address as free while it still can't
+            // reach the routes it was blocked from.
+            //
+            // The global scope is in the list even when no row is left for
+            // it, because block() writes a cache entry directly when a
+            // rebuild fails and that entry outlives the row it came from.
+            $scopes = array_values(array_unique(array_merge(
+                [BlockScope::GLOBAL],
+                array_map('strval', (clone $query)->distinct()->pluck('scope')->all()),
+            )));
+        }
+
+        $deleted = $query->delete();
 
         foreach ($targets as $target) {
-            $this->cache->forget($target);
+            foreach ($scopes as $each) {
+                $this->cache->forget($target, $each);
+            }
         }
 
         $this->cache->rebuild();
@@ -114,13 +160,41 @@ class BlacklistService
     }
 
     /**
-     * The record blocking an IP or range: its own live row, else whichever
-     * wider range covers it. An expired row of its own is the last resort,
-     * so a lapsed block can still be reported.
+     * The record blocking an IP or range in one scope: its own live row, else
+     * whichever wider range covers it. An expired row of its own is the last
+     * resort, so a lapsed block can still be reported.
+     *
+     * Scopes never fall back to each other. A global block already stops the
+     * address everywhere, so asking whether a scope blocks it is only ever a
+     * question about that scope's own rows.
      */
-    public function find(string $ip): ?BlacklistedIp
+    public function find(string $ip, string $scope = BlockScope::GLOBAL): ?BlacklistedIp
     {
-        $own = BlacklistedIp::whereIn('ip', $this->targetsFor($ip))->get();
+        $own = BlacklistedIp::whereIn('ip', $this->targetsFor($ip))->where('scope', $scope)->get();
+
+        return $this->pick(
+            $own,
+            fn () => BlacklistedIp::active()
+                ->where('scope', $scope)
+                ->where('ip', 'like', '%/%')
+                ->get(),
+            $ip,
+        );
+    }
+
+    /**
+     * Choose the record blocking $ip from rows already fetched for one scope.
+     *
+     * $ranges is a callable because the covering-range scan reads every range
+     * in the table and is only needed when the address has no live row of its
+     * own. find() and status() share this so the two of them cannot drift on
+     * which row wins.
+     *
+     * @param  Collection<int, BlacklistedIp>  $own
+     * @param  callable(): Collection<int, BlacklistedIp>  $ranges
+     */
+    private function pick(Collection $own, callable $ranges, string $ip): ?BlacklistedIp
+    {
         $live = $own->filter(fn (BlacklistedIp $row) => ! $row->isExpired());
 
         // An explicit /128 and the /64 around it can both be live, and the
@@ -134,9 +208,7 @@ class BlacklistService
         $target = IpRange::canonical($ip);
 
         // Rows whose ip doesn't parse are skipped by covers().
-        $covering = $target === null ? null : BlacklistedIp::active()
-            ->where('ip', 'like', '%/%')
-            ->get()
+        $covering = $target === null ? null : $ranges()
             ->first(fn (BlacklistedIp $range) => IpRange::covers([$range->ip], $target));
 
         return $covering ?? $own->first();
@@ -150,24 +222,72 @@ class BlacklistService
      * blocking it answers instead. Use status() when the caller also wants
      * that row, so it isn't looked up twice.
      */
-    public function isBlocked(string $ip): bool
+    public function isBlocked(string $ip, string $scope = BlockScope::GLOBAL): bool
     {
-        return $this->decide($ip, fn () => $this->find($ip));
+        return $this->decide($ip, fn () => $this->find($ip, $scope), $scope);
     }
 
     /**
      * What the status endpoint needs — the record blocking $ip and whether
      * it counts — from one lookup rather than find() twice.
      *
-     * @return array{blocked: bool, record: BlacklistedIp|null}
+     * `blocked` means blocked app-wide, the question the global middleware
+     * answers. It must not go true for a scoped block: a caller that reads
+     * "blocked" and acts on it — LogScope's Unblock button is the one that
+     * bit us in #16 — would be acting on an address that can still reach
+     * everything except a handful of routes. Scoped blocks are reported
+     * separately, under `scopes`.
+     *
+     * @return array{blocked: bool, record: BlacklistedIp|null, scopes: array<string, BlacklistedIp>}
      */
     public function status(string $ip): array
     {
-        $record = $this->find($ip);
+        // Answered once up front rather than re-derived inside decide() for
+        // the global record and again for every scope — it re-canonicalises
+        // the address and rescans the whole never_block list each time, and
+        // the answer cannot depend on the scope.
+        if ($this->isNeverBlock($ip)) {
+            return ['blocked' => false, 'record' => $this->find($ip), 'scopes' => []];
+        }
+
+        // Two queries whatever the scopes, the same as before they existed:
+        // every row for this address, and — only if something needs it — the
+        // ranges that might cover it. Resolving each scope in PHP is what
+        // keeps a scope from costing a round trip.
+        $own = BlacklistedIp::whereIn('ip', $this->targetsFor($ip))->get()->groupBy('scope');
+
+        $allRanges = null;
+        $rangesFor = function (string $scope) use (&$allRanges) {
+            $allRanges ??= BlacklistedIp::active()
+                ->where('ip', 'like', '%/%')
+                ->get()
+                ->groupBy('scope');
+
+            return $allRanges->get($scope, new Collection);
+        };
+
+        $resolve = fn (string $scope) => $this->pick(
+            $own->get($scope, new Collection),
+            fn () => $rangesFor($scope),
+            $ip,
+        );
+
+        $record = $resolve(BlockScope::GLOBAL);
+
+        $scopes = [];
+
+        foreach (BlockScope::declared() as $scope) {
+            $scoped = $resolve($scope);
+
+            if ($scoped !== null && $this->decide($ip, fn () => $scoped, $scope)) {
+                $scopes[$scope] = $scoped;
+            }
+        }
 
         return [
             'blocked' => $this->decide($ip, fn () => $record),
             'record'  => $record,
+            'scopes'  => $scopes,
         ];
     }
 
@@ -177,10 +297,13 @@ class BlacklistService
      *
      * @param  callable(): ?BlacklistedIp  $record
      */
-    private function decide(string $ip, callable $record): bool
+    private function decide(string $ip, callable $record, string $scope = BlockScope::GLOBAL): bool
     {
         // The middleware lets these through whatever covers them, so
-        // reporting them as blocked would contradict what happens.
+        // reporting them as blocked would contradict what happens. This is
+        // checked for scoped blocks too: ScopedBlockMiddleware consults
+        // never_block before it reads the cache, exactly as the global one
+        // does.
         if ($this->isNeverBlock($ip)) {
             return false;
         }
@@ -191,7 +314,7 @@ class BlacklistService
             return $found !== null && ! $found->isExpired();
         }
 
-        return $this->cache->isBlocked($this->normalizeIp($ip));
+        return $this->cache->isBlocked($this->normalizeIp($ip), $scope);
     }
 
     /**

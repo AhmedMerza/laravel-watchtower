@@ -59,3 +59,31 @@ it('catches exceptions and does not re-throw', function () {
     // Should not throw — exceptions are caught and logged
     expect(fn () => $this->listener->handle($this->event))->not->toThrow(Exception::class);
 });
+
+it('sends null for the scope of an app-wide block, not the empty string the column stores', function () {
+    config()->set('watchtower.notifications.webhook_url', 'https://hooks.example.com/notify');
+    Http::fake(['hooks.example.com/notify' => Http::response([], 200)]);
+
+    $this->listener->handle($this->event);
+
+    Http::assertSent(fn ($request) => array_key_exists('scope', $request->data())
+        && $request->data()['scope'] === null);
+});
+
+it('sends the scope name for a scoped block', function () {
+    config()->set('watchtower.scopes', ['auth']);
+    config()->set('watchtower.notifications.webhook_url', 'https://hooks.example.com/notify');
+    Http::fake(['hooks.example.com/notify' => Http::response([], 200)]);
+
+    $scoped = BlacklistedIp::create([
+        'ip'         => '5.6.7.8',
+        'scope'      => 'auth',
+        'reason'     => 'test',
+        'source'     => BlockSource::Manual,
+        'source_env' => 'staging',
+    ]);
+
+    $this->listener->handle(new IpBlocked($scoped));
+
+    Http::assertSent(fn ($request) => $request->data()['scope'] === 'auth');
+});

@@ -9,6 +9,8 @@ use Illuminate\Support\Facades\Log;
 use Watchtower\Enums\BlockSource;
 use Watchtower\Exceptions\NeverAutoBlockException;
 use Watchtower\Exceptions\NeverBlockException;
+use Watchtower\Exceptions\UnknownScopeException;
+use Watchtower\Support\BlockScope;
 use Watchtower\Support\FailureWindow;
 use Watchtower\Support\HitWindow;
 
@@ -48,8 +50,12 @@ class AutoBlockService
      *                                   from, when there is one, so the
      *                                   shared-IP guard can tell a carrier
      *                                   gateway from one bad actor.
-     * @return bool whether the address is blocked now — the scanner-path
-     *              detector answers the request itself when it is.
+     * @return bool whether the address is blocked APP-WIDE now — the
+     *              scanner-path detector answers the request itself when it
+     *              is. A detector with a scope never returns true, because
+     *              this runs in the global middleware stack and a scoped
+     *              block must only be enforced by the route middleware
+     *              carrying its scope.
      */
     public function record(string $detector, string $ip, int|string|null $userId = null): bool
     {
@@ -93,11 +99,27 @@ class AutoBlockService
             return false;
         }
 
+        $scope = $this->resolveScope($settings, $detector);
+
+        if ($scope === null) {
+            return false;
+        }
+
         // Already blocked: don't count, and don't block again. A blocked
         // scanner keeps knocking, and re-blocking on every knock would
         // restart the duration each time and never let it lapse.
         if ($this->blacklist->isBlocked($ip)) {
             return true;
+        }
+
+        // Already blocked where this detector aims, so there is still nothing
+        // to count — but the answer is false, not true. record()'s callers
+        // run in the GLOBAL middleware stack and answer the request when this
+        // returns true, which for a scoped block would enforce it on every
+        // route in the app. The route middleware carrying the scope is what
+        // enforces a scoped block; nothing here may do it on its behalf.
+        if ($this->blockedInScope($ip, $scope)) {
+            return false;
         }
 
         $windowMinutes = max(1, (int) ($settings['window_minutes'] ?? 5));
@@ -122,11 +144,12 @@ class AutoBlockService
             return false;
         }
 
-        return $this->blockDetected(
+        $blocked = $this->blockDetected(
             $detector,
             $ip,
             $counted,
             $mode,
+            $scope,
             $hits,
             $threshold,
             $windowMinutes,
@@ -135,6 +158,11 @@ class AutoBlockService
             // this runs per request rather than per tick.
             $this->sharedIpUserThreshold(),
         );
+
+        // Only an app-wide block licenses the caller to answer the request.
+        // A scoped block was still made — it is simply not this stack's to
+        // enforce. See the scoped early return above.
+        return $blocked && $scope === BlockScope::GLOBAL;
     }
 
     /**
@@ -169,6 +197,7 @@ class AutoBlockService
         string $ip,
         string $counted,
         string $mode,
+        string $scope,
         int $hits,
         int $threshold,
         int $windowMinutes,
@@ -210,10 +239,59 @@ class AutoBlockService
             'user_ids'       => $users,
         ];
 
-        $notBlockedBecause = $this->holdBack($mode, count($users), $sharedIpThreshold);
+        return $this->blockOrReport(
+            $ip,
+            $reason,
+            $mode,
+            $scope,
+            count($users),
+            $sharedIpThreshold,
+            now()->addMinutes((int) config('watchtower.auto_block.block_duration_minutes', 60)),
+            $context,
+        );
+    }
+
+    /**
+     * Apply the guards, then block or report the near miss.
+     *
+     * Shared by both ends of the engine — the real-time detectors and the
+     * scheduled log rules — so the shared-IP downgrade, the never_* refusals
+     * and the would-have-blocked log cannot drift apart. Writing this twice
+     * is the duplication issue #38 is open about, one table over.
+     *
+     * @param  array<string, mixed>  $context
+     * @return bool whether the address ended up blocked
+     */
+    private function blockOrReport(
+        string $ip,
+        string $reason,
+        string $mode,
+        string $scope,
+        int $distinctUsers,
+        int $sharedIpThreshold,
+        \DateTimeInterface $expiresAt,
+        array $context,
+    ): bool {
+        $notBlockedBecause = $this->holdBack($mode, $distinctUsers, $sharedIpThreshold);
+
+        // A shared address on a scoped rule is the case scopes exist for.
+        // Warning and moving on protects the people behind that gateway and
+        // leaves the attacker among them free; a scoped block takes away the
+        // routes the evidence points at and leaves everyone else the rest of
+        // the app.
+        //
+        // ONLY this hold-back converts. `warn` mode is a dry run and has to
+        // stay one, or arming nothing would start blocking. never_auto_block
+        // is a refusal about an address, not a decision about reach, and it
+        // is enforced in BlacklistService::block() regardless.
+        $downgraded = $notBlockedBecause === 'shared IP' && $scope !== BlockScope::GLOBAL;
+
+        if ($downgraded) {
+            $notBlockedBecause = null;
+        }
 
         if ($notBlockedBecause !== null) {
-            $this->logWouldHaveBlocked($ip, $reason, $notBlockedBecause, count($users), $context);
+            $this->logWouldHaveBlocked($ip, $reason, $notBlockedBecause, $distinctUsers, $context);
 
             return false;
         }
@@ -222,10 +300,14 @@ class AutoBlockService
             $this->blacklist->block($ip, [
                 'reason'     => $reason,
                 'source'     => BlockSource::Auto,
-                'expires_at' => now()->addMinutes((int) config('watchtower.auto_block.block_duration_minutes', 60)),
+                'expires_at' => $expiresAt,
+                'scope'      => $scope,
             ]);
         } catch (NeverAutoBlockException) {
-            $this->logWouldHaveBlocked($ip, $reason, 'never_auto_block', count($users), $context);
+            // Caught before NeverBlockException, its parent: this one is a
+            // rule that fired on real traffic and was held back, which is
+            // worth the same visibility as any other near miss.
+            $this->logWouldHaveBlocked($ip, $reason, 'never_auto_block', $distinctUsers, $context);
 
             return false;
         } catch (NeverBlockException) {
@@ -235,7 +317,81 @@ class AutoBlockService
             return false;
         }
 
+        if ($downgraded) {
+            // Deliberately NOT a would-have-blocked line. `would_have_blocked`
+            // stays the canonical filter for things that did not happen, and
+            // this one did — an operator filtering on it must not find a real
+            // block hiding among the near misses.
+            Log::channel(config('watchtower.log_channel', 'stack'))
+                ->warning('Watchtower: shared address blocked in scope instead of app-wide', [
+                    'ip'                  => $ip,
+                    ...$context,
+                    'reason'              => $reason,
+                    'downgraded_to_scope' => $scope,
+                    'distinct_users'      => $distinctUsers,
+                ]);
+        }
+
         return true;
+    }
+
+    /**
+     * The scope a rule or detector blocks in, or null when it names one the
+     * config doesn't declare.
+     *
+     * An undeclared name blocks nothing, loudly. That matches how an invalid
+     * `mode` falls back to the side that doesn't act against users: treating
+     * a typo as the global scope would block far more than was asked for,
+     * and storing it as written would enforce nothing while reporting itself
+     * as a block.
+     *
+     * Throttled, because a detector reads this per signal rather than per
+     * tick, and a misconfigured one would otherwise write a line per request.
+     *
+     * @param  array<string, mixed>  $settings
+     */
+    private function resolveScope(array $settings, string $label): ?string
+    {
+        try {
+            return BlockScope::normalize($settings['scope'] ?? null);
+        } catch (UnknownScopeException $e) {
+            // One window for every rule and detector, not one each. The name
+            // becomes a file name, so it can't carry a label; and a second
+            // misconfigured scope staying quiet for a minute costs nothing,
+            // because the message below names the one it did report and both
+            // are the same fix.
+            if (! FailureWindow::isOpen('scope')) {
+                FailureWindow::open('scope');
+
+                Log::channel(config('watchtower.log_channel', 'stack'))
+                    ->warning('Watchtower: auto-block skipped, its scope is not declared', [
+                        'rule'  => $label,
+                        'scope' => $settings['scope'] ?? null,
+                        'error' => $e->getMessage(),
+                    ]);
+            }
+
+            return null;
+        }
+    }
+
+    /**
+     * Whether a scoped rule or detector has already blocked this address in
+     * its own scope.
+     *
+     * Shared by both ends of the engine, because both must skip an address
+     * they have already dealt with and they answer it differently otherwise.
+     * A scoped block leaves the address globally free, so `isBlocked($ip)`
+     * alone is always false for one — which let the scheduled path re-block
+     * the same offender on every tick, sliding `expires_at` forward so the
+     * block never lapsed and re-firing IpBlocked (and the webhook) each time.
+     *
+     * Always false for the global scope: that case is `isBlocked($ip)`, which
+     * every caller checks first.
+     */
+    private function blockedInScope(string $ip, string $scope): bool
+    {
+        return $scope !== BlockScope::GLOBAL && $this->blacklist->isBlocked($ip, $scope);
     }
 
     /**
@@ -276,7 +432,13 @@ class AutoBlockService
                 continue;
             }
 
-            $this->applyRule($rule, (int) $index, $mode, $durationMinutes, $sharedIpThreshold);
+            $scope = $this->resolveScope((array) $rule, "rule #{$index}");
+
+            if ($scope === null) {
+                continue;
+            }
+
+            $this->applyRule($rule, (int) $index, $mode, $scope, $durationMinutes, $sharedIpThreshold);
         }
     }
 
@@ -344,7 +506,7 @@ class AutoBlockService
             : 'warn';
     }
 
-    private function applyRule(array $rule, int $ruleIndex, string $mode, int $durationMinutes, int $sharedIpThreshold): void
+    private function applyRule(array $rule, int $ruleIndex, string $mode, string $scope, int $durationMinutes, int $sharedIpThreshold): void
     {
         $windowMinutes   = (int) ($rule['window_minutes'] ?? 5);
         $threshold       = (int) ($rule['count'] ?? 10);
@@ -375,7 +537,8 @@ class AutoBlockService
         // re-checked in the loop below, because blocking one IPv6 address
         // covers its whole prefix and can block a later offender mid-loop.
         $offenders = $query->pluck('ip_address')
-            ->reject(fn (string $ip): bool => $this->blacklist->isBlocked($ip))
+            ->reject(fn (string $ip): bool => $this->blacklist->isBlocked($ip)
+                || $this->blockedInScope($ip, $scope))
             ->values();
 
         if ($offenders->isEmpty()) {
@@ -394,7 +557,7 @@ class AutoBlockService
         );
 
         foreach ($offenders as $ip) {
-            if ($this->blacklist->isBlocked($ip)) {
+            if ($this->blacklist->isBlocked($ip) || $this->blockedInScope($ip, $scope)) {
                 continue;
             }
 
@@ -407,30 +570,7 @@ class AutoBlockService
                 'window_minutes' => $windowMinutes,
             ];
 
-            $notBlockedBecause = $this->holdBack($mode, $users, $sharedIpThreshold);
-
-            if ($notBlockedBecause !== null) {
-                $this->logWouldHaveBlocked($ip, $reason, $notBlockedBecause, $users, $context);
-
-                continue;
-            }
-
-            // mode === 'block'
-            try {
-                $this->blacklist->block($ip, [
-                    'reason'     => $reason,
-                    'source'     => BlockSource::Auto,
-                    'expires_at' => $expiresAt,
-                ]);
-            } catch (NeverAutoBlockException) {
-                // Caught before NeverBlockException, its parent: this one is
-                // a rule that fired on real traffic and was held back, which
-                // is worth the same visibility as any other near miss.
-                $this->logWouldHaveBlocked($ip, $reason, 'never_auto_block', $users, $context);
-            } catch (NeverBlockException) {
-                Log::channel(config('watchtower.log_channel', 'stack'))
-                    ->debug('Watchtower: auto-block skipped for whitelisted IP', ['ip' => $ip]);
-            }
+            $this->blockOrReport($ip, $reason, $mode, $scope, $users, $sharedIpThreshold, $expiresAt, $context);
         }
     }
 

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Watchtower\Console\Commands;
 
 use Illuminate\Console\Command;
+use Watchtower\Support\BlockScope;
 
 class InstallCommand extends Command
 {
@@ -59,6 +60,51 @@ class InstallCommand extends Command
             $this->line('   Set <info>WATCHTOWER_ROUTES_ENABLED=false</info> if you don\'t need the API.');
         }
 
+        $this->reportScopes();
+
         return self::SUCCESS;
+    }
+
+    /**
+     * Report each declared scope and whether any route actually carries it.
+     *
+     * A scoped block is inert until a route names its scope, and nothing at
+     * runtime can tell "the middleware isn't wired up yet" from "that scope
+     * name is a typo" — both just quietly enforce nothing. This is the one
+     * place both are visible, so it is where they get said out loud.
+     */
+    private function reportScopes(): void
+    {
+        $scopes = BlockScope::declared();
+        $covered = BlockScope::routeCounts();
+
+        // The mirror mistake, and the one nothing else catches: a route names
+        // a scope the config never declared, usually a typo. No block can be
+        // stored in it, so the middleware is inert on that route.
+        foreach (array_diff(array_keys($covered), $scopes) as $undeclared) {
+            $this->newLine();
+            $this->warn("⚠️  Routes name the scope '{$undeclared}', which config/watchtower.php doesn't declare.");
+            $this->line("   Nothing can be blocked in it. Add it to <info>'scopes'</info>, or fix the route's middleware.");
+        }
+
+        if ($scopes === []) {
+            return;
+        }
+
+        $this->newLine();
+        $this->line('Block scopes declared in <info>config/watchtower.php</info>:');
+
+        foreach ($scopes as $scope) {
+            $routes = $covered[$scope] ?? 0;
+
+            if ($routes > 0) {
+                $this->line("  <info>✓</info> {$scope} — on {$routes} route(s)");
+
+                continue;
+            }
+
+            $this->line("  <comment>⚠️  {$scope} — no route carries watchtower:{$scope}, so a block scoped to it does nothing</comment>");
+            $this->line("     <info>Route::middleware('watchtower:{$scope}')->group(fn () => /* your routes */);</info>");
+        }
     }
 }
