@@ -20,6 +20,7 @@ use Watchtower\Console\Commands\InstallCommand;
 use Watchtower\Console\Commands\SyncCommand;
 use Watchtower\Events\IpBlocked;
 use Watchtower\Http\Controllers\BlockController;
+use Watchtower\Http\Controllers\ManagementController;
 use Watchtower\Http\Controllers\SyncController;
 use Watchtower\Http\Middleware\Authorize;
 use Watchtower\Http\Middleware\BlockedIpMiddleware;
@@ -272,6 +273,24 @@ class WatchtowerServiceProvider extends PackageServiceProvider
             Route::get('/api/status/{ip}', [BlockController::class, 'status'])->where('ip', '.*')->name('status');
             Route::get('/api/blocks', [BlockController::class, 'index'])->name('blocks');
         });
+
+        // The management page, on the same prefix and behind the same
+        // authorization as the API above — in both modes. LogScope's own UI
+        // acts on one address at a time from a log entry and has no list of
+        // what is currently blocked, so mounting this only in standalone mode
+        // would leave a LogScope install with no way to see the blocklist.
+        if (config('watchtower.ui.enabled', true)) {
+            Route::group([
+                'prefix'     => $prefix,
+                'middleware' => $middleware,
+                'domain'     => $domain,
+                'as'         => 'watchtower.ui.',
+            ], function () {
+                Route::get('/', [ManagementController::class, 'index'])->name('index');
+                Route::post('/block', [ManagementController::class, 'block'])->name('block');
+                Route::post('/unblock', [ManagementController::class, 'unblock'])->name('unblock');
+            });
+        }
     }
 
     /**

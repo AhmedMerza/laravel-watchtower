@@ -56,4 +56,45 @@ class BlacklistedIp extends Model
             $q->whereNull('expires_at')->orWhere('expires_at', '>', now());
         });
     }
+
+    /**
+     * Rows whose expiry has passed. The complement of active(), with no gap
+     * between them: active() keeps `expires_at > now`, so this takes the rest.
+     *
+     * These exist only until `watchtower:cleanup` next runs, which is exactly
+     * why the management page can list them — "it expired an hour ago" and
+     * "it was never blocked" look identical once the row is gone.
+     */
+    public function scopeExpired(Builder $query): Builder
+    {
+        return $query->whereNotNull('expires_at')->where('expires_at', '<=', now());
+    }
+
+    /**
+     * The management list's filters.
+     *
+     * Kept on the model rather than in the controller so that exposing the
+     * same filters on `GET /api/blocks` later is a controller change and not
+     * a second copy of these rules — the two-places-that-diverge problem
+     * issue #38 is already open about.
+     *
+     * An unrecognised `$state` lists active blocks, because a hand-edited
+     * query string shouldn't be an error page on the tool you reach for when
+     * something is wrong.
+     *
+     * @param  string|null  $source  a BlockSource value, or null for every source
+     * @param  string  $state  'active', 'expired' or 'all'
+     */
+    public function scopeFilter(Builder $query, ?string $source = null, string $state = 'active'): Builder
+    {
+        if ($source !== null) {
+            $query->where('source', $source);
+        }
+
+        return match ($state) {
+            'expired' => $this->scopeExpired($query),
+            'all'     => $query,
+            default   => $this->scopeActive($query),
+        };
+    }
 }

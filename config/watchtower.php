@@ -45,6 +45,25 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Management Page
+    |--------------------------------------------------------------------------
+    |
+    | A server-rendered page at the route prefix above — list, block and
+    | unblock — behind the same authorization as the API. It needs no build
+    | step and loads nothing from the network: the stylesheet is inline and
+    | there is no JavaScript.
+    |
+    | Set this to false to keep the JSON API and drop the page. `routes.enabled
+    | => false` turns off both, and the whole package off.
+    |
+    */
+
+    'ui' => [
+        'enabled' => env('WATCHTOWER_UI_ENABLED', true),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
     | Cache
     |--------------------------------------------------------------------------
     |
