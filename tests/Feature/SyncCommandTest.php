@@ -4,8 +4,10 @@ declare(strict_types=1);
 
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Http;
 use Watchtower\Enums\BlockSource;
+use Watchtower\Events\IpBlocked;
 use Watchtower\Models\BlacklistedIp;
 use Watchtower\Services\BlacklistCache;
 
@@ -139,4 +141,139 @@ it('refuses a second global row for one address', function () {
     // since every engine treats NULLs as distinct in a unique index.
     expect(fn () => BlacklistedIp::create(['ip' => '1.2.3.4', 'source' => BlockSource::Manual, 'source_env' => 'testing']))
         ->toThrow(QueryException::class);
+});
+
+it('never writes a block for an address this environment whitelists', function () {
+    // The satellite's own never_block list, not the master's. Before #38 the
+    // pull path went straight to updateOrCreate() and never consulted it, so
+    // a whitelisted address got a row and a cache entry here — while
+    // config/watchtower.php promised never_block covers a block arriving "by
+    // any means — UI, auto-block, or sync".
+    config()->set('watchtower.never_block', ['9.9.9.9']);
+
+    Http::fake([
+        'master.example.com/watchtower/sync/blocks' => Http::response([
+            'data' => [
+                ['ip' => '9.9.9.9', 'reason' => 'blocked on the master', 'source_env' => 'production', 'expires_at' => null, 'blocked_by' => null, 'log_entry_id' => null],
+                ['ip' => '1.2.3.4', 'reason' => 'synced', 'source_env' => 'production', 'expires_at' => null, 'blocked_by' => null, 'log_entry_id' => null],
+            ],
+        ], 200),
+    ]);
+
+    $this->artisan('watchtower:sync')
+        ->assertSuccessful()
+        ->expectsOutputToContain('1 refused by never_block');
+
+    $this->assertDatabaseMissing('blacklisted_ips', ['ip' => '9.9.9.9']);
+    $this->assertDatabaseHas('blacklisted_ips', ['ip' => '1.2.3.4', 'source' => 'sync']);
+
+    expect((new BlacklistCache)->isBlocked('9.9.9.9'))->toBeFalse();
+});
+
+it('does not let a synced record downgrade a local manual block', function () {
+    BlacklistedIp::create([
+        'ip'         => '1.2.3.4',
+        'reason'     => 'blocked here by hand',
+        'source'     => BlockSource::Manual,
+        'source_env' => 'staging',
+    ]);
+
+    Http::fake([
+        'master.example.com/watchtower/sync/blocks' => Http::response([
+            'data' => [
+                ['ip' => '1.2.3.4', 'reason' => 'from the master', 'source_env' => 'production', 'expires_at' => null, 'blocked_by' => null, 'log_entry_id' => null],
+            ],
+        ], 200),
+    ]);
+
+    $this->artisan('watchtower:sync')
+        ->assertSuccessful()
+        ->expectsOutputToContain('1 skipped');
+
+    $this->assertDatabaseHas('blacklisted_ips', [
+        'ip'     => '1.2.3.4',
+        'source' => 'manual',
+        'reason' => 'blocked here by hand',
+    ]);
+});
+
+it('announces nothing for the blocks it pulls', function () {
+    Event::fake([IpBlocked::class]);
+
+    Http::fake([
+        'master.example.com/watchtower/sync/blocks' => Http::response([
+            'data' => [
+                ['ip' => '1.2.3.4', 'reason' => 'synced', 'source_env' => 'production', 'expires_at' => null, 'blocked_by' => null, 'log_entry_id' => null],
+            ],
+        ], 200),
+    ]);
+
+    $this->artisan('watchtower:sync')->assertSuccessful();
+
+    // Each block is announced once, by the environment that received it —
+    // the webhook contract in the README. A satellite firing IpBlocked for
+    // what it pulls would post its whole inherited blocklist on first sync.
+    Event::assertNotDispatched(IpBlocked::class);
+});
+
+it('rebuilds the cache once for the run, not once per record', function () {
+    $cache = new class extends BlacklistCache
+    {
+        public int $rebuilds = 0;
+
+        public int $writes = 0;
+
+        public function rebuild(): bool
+        {
+            $this->rebuilds++;
+
+            return parent::rebuild();
+        }
+
+        public function write(BlacklistedIp $block): void
+        {
+            $this->writes++;
+
+            parent::write($block);
+        }
+    };
+
+    $this->app->instance(BlacklistCache::class, $cache);
+
+    // Ranges, because BlacklistCache::write() pays for a full rebuild on one
+    // — a per-record write here would be a rebuild per range, on a list that
+    // is the master's entire blocklist.
+    Http::fake([
+        'master.example.com/watchtower/sync/blocks' => Http::response([
+            'data' => [
+                ['ip' => '10.0.0.0/8', 'reason' => 'synced', 'source_env' => 'production', 'expires_at' => null, 'blocked_by' => null, 'log_entry_id' => null],
+                ['ip' => '172.16.0.0/12', 'reason' => 'synced', 'source_env' => 'production', 'expires_at' => null, 'blocked_by' => null, 'log_entry_id' => null],
+                ['ip' => '1.2.3.4', 'reason' => 'synced', 'source_env' => 'production', 'expires_at' => null, 'blocked_by' => null, 'log_entry_id' => null],
+            ],
+        ], 200),
+    ]);
+
+    $this->artisan('watchtower:sync')->assertSuccessful();
+
+    expect($cache->rebuilds)->toBe(1)
+        ->and($cache->writes)->toBe(0);
+});
+
+it('does not copy the master\'s log_entry_id into the local row', function () {
+    Http::fake([
+        'master.example.com/watchtower/sync/blocks' => Http::response([
+            'data' => [
+                // A real value, because every other fixture here sends null —
+                // which is exactly how this could regress unnoticed.
+                ['ip' => '1.2.3.4', 'reason' => 'synced', 'source_env' => 'production', 'expires_at' => null, 'blocked_by' => null, 'log_entry_id' => '01JD8Z1Q0000000000000000AA'],
+            ],
+        ], 200),
+    ]);
+
+    $this->artisan('watchtower:sync')->assertSuccessful();
+
+    // It is a ULID into *this* node's watchtower_logs, so the master's value
+    // names a request the satellite never saw — and the management page links
+    // a block to it.
+    $this->assertDatabaseHas('blacklisted_ips', ['ip' => '1.2.3.4', 'log_entry_id' => null]);
 });

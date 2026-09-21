@@ -3,11 +3,14 @@
 declare(strict_types=1);
 
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Route;
 use Watchtower\Enums\BlockSource;
+use Watchtower\Events\IpBlocked;
 use Watchtower\Jobs\PushBlockToMaster;
 use Watchtower\Models\BlacklistedIp;
+use Watchtower\Services\BlacklistCache;
 use Watchtower\Services\BlacklistService;
 use Watchtower\Support\SyncSignature;
 
@@ -198,6 +201,45 @@ it('does not let an incoming push downgrade a local manual block', function () {
         'source' => 'manual',
         'reason' => 'blocked here by hand',
     ]);
+});
+
+it('blocks the address in the cache, not just in the table', function () {
+    postSigned($this, json_encode(['ip' => '5.6.7.8', 'source_env' => 'staging']))->assertOk();
+
+    // The row goes, so the cache has to answer on its own. Without this the
+    // assertion below proves nothing: isBlocked() warms itself from the DB
+    // when it finds no ranges key, so it would report the address blocked
+    // whether or not the push ever wrote a cache entry. A key written by
+    // put() survives that warm, being deliberately outside the rebuild index.
+    BlacklistedIp::where('ip', '5.6.7.8')->delete();
+
+    // BlockedIpMiddleware reads the cache and never the DB, so a push that
+    // wrote the row and missed the cache entry would leave the address
+    // reaching the app while every other assertion here still passed.
+    expect((new BlacklistCache)->isBlocked('5.6.7.8'))->toBeTrue();
+});
+
+it('announces a block a satellite pushes here', function () {
+    Event::fake([IpBlocked::class]);
+
+    postSigned($this, json_encode(['ip' => '5.6.7.8', 'source_env' => 'staging']))->assertOk();
+
+    // The other half of the rule watchtower:sync relies on: a block is
+    // announced once, by the environment that received it. This is that
+    // environment, so the webhook fires here and nowhere else.
+    Event::assertDispatched(IpBlocked::class, fn ($e) => $e->record->ip === '5.6.7.8');
+});
+
+it('announces nothing when the push is refused as a downgrade', function () {
+    Event::fake([IpBlocked::class]);
+
+    BlacklistedIp::create(['ip' => '5.6.7.8', 'source' => BlockSource::Manual, 'source_env' => 'production']);
+
+    postSigned($this, json_encode(['ip' => '5.6.7.8', 'source_env' => 'staging']))
+        ->assertOk()
+        ->assertJsonPath('applied', false);
+
+    Event::assertNotDispatched(IpBlocked::class);
 });
 
 it('refuses a pushed IP that is in the master never-block list', function () {

@@ -7,10 +7,9 @@ namespace Watchtower\Console\Commands;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
-use Watchtower\Enums\BlockSource;
-use Watchtower\Models\BlacklistedIp;
+use Watchtower\Exceptions\NeverBlockException;
 use Watchtower\Services\BlacklistCache;
-use Watchtower\Support\BlockScope;
+use Watchtower\Services\BlacklistService;
 use Watchtower\Support\SyncSignature;
 
 class SyncCommand extends Command
@@ -19,8 +18,10 @@ class SyncCommand extends Command
 
     protected $description = 'Pull the blacklist from the master environment and rebuild the local Redis cache';
 
-    public function __construct(private readonly BlacklistCache $cache)
-    {
+    public function __construct(
+        private readonly BlacklistCache $cache,
+        private readonly BlacklistService $service,
+    ) {
         parent::__construct();
     }
 
@@ -57,40 +58,45 @@ class SyncCommand extends Command
             $blocks = $response->json('data', []);
             $written = [];
             $skipped = 0;
+            $whitelisted = 0;
 
             foreach ($blocks as $block) {
-                // Never downgrade a manual or auto block with a sync record —
-                // only insert if the IP isn't already locally blocked.
-                //
-                // Scoped on both queries below. The master only serves global
-                // blocks, so this row is one; without the filter it could
-                // match a LOCAL scoped block for the same address and either
-                // skip the sync or, worse, overwrite that scoped row and turn
-                // it into an app-wide block.
-                $existing = BlacklistedIp::where('ip', $block['ip'])
-                    ->where('scope', BlockScope::GLOBAL)
-                    ->first();
+                try {
+                    // The never-downgrade rule, never_block and the write all
+                    // live in applySync(), shared with the push direction in
+                    // SyncController — they were written out here as well,
+                    // and the two copies had drifted (#38).
+                    //
+                    // deferCache because this run rebuilds once at the end
+                    // rather than per record, and announce: false because a
+                    // pulled block was already announced by the environment
+                    // that received it. See the webhook contract in the
+                    // README.
+                    $result = $this->service->applySync($block['ip'], [
+                        'reason'     => $block['reason'] ?? null,
+                        'source_env' => $block['source_env'] ?? 'master',
+                        'expires_at' => $block['expires_at'] ?? null,
+                        'blocked_by' => $block['blocked_by'] ?? null,
+                    ], deferCache: true, announce: false);
+                } catch (NeverBlockException) {
+                    // The master can block an address this environment has
+                    // whitelisted; it does not get to write it here.
+                    $whitelisted++;
 
-                if ($existing && $existing->source !== BlockSource::Sync) {
+                    continue;
+                }
+
+                if (! $result['applied']) {
                     $skipped++;
 
                     continue;
                 }
 
-                $written[] = BlacklistedIp::updateOrCreate(
-                    ['ip' => $block['ip'], 'scope' => BlockScope::GLOBAL],
-                    [
-                        'reason'       => $block['reason'] ?? null,
-                        'source_env'   => $block['source_env'] ?? 'master',
-                        'source'       => BlockSource::Sync,
-                        'expires_at'   => $block['expires_at'] ?? null,
-                        'blocked_by'   => $block['blocked_by'] ?? null,
-                        'log_entry_id' => $block['log_entry_id'] ?? null,
-                    ]
-                );
+                $written[] = $result['record'];
             }
 
             $synced = count($written);
+            $refused = $whitelisted === 0 ? '' : "; {$whitelisted} refused by never_block";
 
             // rebuild() logs and swallows its own DB failure, so ask it. The
             // middleware reads only the cache, so write what was just synced
@@ -101,12 +107,12 @@ class SyncCommand extends Command
                     $this->cache->put($record);
                 }
 
-                $this->error("Synced {$synced} IPs from master ({$skipped} skipped) and wrote them to the cache directly, but the cache rebuild failed — its DB read error is on the watchtower log channel.");
+                $this->error("Synced {$synced} IPs from master ({$skipped} skipped{$refused}) and wrote them to the cache directly, but the cache rebuild failed — its DB read error is on the watchtower log channel.");
 
                 return self::FAILURE;
             }
 
-            $this->info("Synced {$synced} IPs from master ({$skipped} skipped — local manual/auto blocks preserved). Redis cache rebuilt.");
+            $this->info("Synced {$synced} IPs from master ({$skipped} skipped — local manual/auto blocks preserved{$refused}). Redis cache rebuilt.");
 
             return self::SUCCESS;
 

@@ -7,7 +7,6 @@ namespace Watchtower\Http\Controllers;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
-use Watchtower\Enums\BlockSource;
 use Watchtower\Exceptions\NeverBlockException;
 use Watchtower\Models\BlacklistedIp;
 use Watchtower\Rules\BlockTarget;
@@ -56,32 +55,14 @@ class SyncController extends Controller
             'blocked_by' => ['nullable', 'string', 'max:255'],
         ]);
 
-        $ip = $this->service->normalizeTarget($validated['ip']);
-
-        // Scoped to the global row, because that is the only row this can
-        // ever write: the payload has no scope field, so block() below
-        // stores a global block. Matching any row would let an unrelated
-        // LOCAL scoped block for the same address — which is never a Sync
-        // block — trip the never-downgrade guard below and silently refuse a
-        // satellite's legitimate app-wide block. The pull path in
-        // SyncCommand scopes the same lookup for the same reason.
-        $existing = BlacklistedIp::where('ip', $ip)
-            ->where('scope', BlockScope::GLOBAL)
-            ->first();
-
-        // Same rule watchtower:sync applies in the other direction: an
-        // incoming sync record never downgrades a manual or auto block made
-        // here. It also makes a master whose own master_url points at itself
-        // a no-op rather than a source rewrite.
-        if ($existing && $existing->source !== BlockSource::Sync) {
-            return response()->json(['data' => $existing, 'applied' => false]);
-        }
-
         try {
-            $record = $this->service->block($validated['ip'], [
+            // The never-downgrade rule, the never_block check and the write
+            // are all applySync()'s, which watchtower:sync uses for the pull
+            // direction. This path and that one each carried their own copy,
+            // and the copies had drifted (#38).
+            ['applied' => $applied, 'record' => $record] = $this->service->applySync($validated['ip'], [
                 'reason'     => $validated['reason'] ?? null,
                 'source_env' => $validated['source_env'] ?? 'unknown',
-                'source'     => BlockSource::Sync,
                 'expires_at' => isset($validated['expires_at']) ? now()->parse($validated['expires_at']) : null,
                 'blocked_by' => $validated['blocked_by'] ?? null,
             ]);
@@ -90,6 +71,6 @@ class SyncController extends Controller
             return response()->json(['error' => $e->getMessage()], 422);
         }
 
-        return response()->json(['data' => $record, 'applied' => true]);
+        return response()->json(['data' => $record, 'applied' => $applied]);
     }
 }

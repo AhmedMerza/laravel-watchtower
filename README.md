@@ -332,6 +332,18 @@ Schedule::command('watchtower:sync')->everyFiveMinutes();
 
 Block on staging → staging protected instantly → master updated asynchronously → production/alpha pull it within 5 minutes.
 
+Both directions apply the same two rules, from one implementation:
+
+- **A synced block never downgrades a local one.** An address already blocked
+  here by hand or by a rule keeps that block; the incoming record is counted
+  as skipped and dropped. It is also what stops a master whose own
+  `WATCHTOWER_MASTER_URL` points at itself from rewriting its own blocks.
+- **`never_block` wins, wherever the block came from.** An address this
+  environment whitelists is never written, whether a satellite pushed it here
+  or this satellite pulled it from the master — `watchtower:sync` reports
+  those as `refused by never_block`. `never_auto_block` is a different case
+  and does *not* survive sync — see the caveat under [Auto-Block](#-auto-block).
+
 ---
 
 ## 🕵️ Attack-Tool User-Agents
@@ -520,7 +532,7 @@ WATCHTOWER_NEVER_AUTO_BLOCK_IPS=203.0.113.0/24,2001:db8:2::/48
 
 `never_auto_block` binds automation only — **an admin can still block a listed address by hand**, through the UI or the API. That is the whole difference from `never_block`, which nothing can override. Use `never_auto_block` for "a rule would be right about this traffic and wrong about the people behind it", and `never_block` for "never, under any circumstances".
 
-> ⚠️ **It does not survive sync.** The list is applied where the automated decision is made. A block that a *satellite* decided arrives here as a synced block, not an automated one, and this node's `never_auto_block` is not consulted — the sync payload doesn't carry where the block came from, so the receiving node can't tell an admin's block from a rule's. `never_block` is still enforced on arrival and is the list to use if the address must survive a sync push. Tracked in [#56](https://github.com/AhmedMerza/laravel-watchtower/issues/56).
+> ⚠️ **It does not survive sync.** The list is applied where the automated decision is made. A block that a *satellite* decided arrives here as a synced block, not an automated one, and this node's `never_auto_block` is not consulted — the sync payload doesn't carry where the block came from, so the receiving node can't tell an admin's block from a rule's. `never_block` is enforced on every block a sync applies, in both directions, and is the list to use when an address must survive one. Tracked in [#56](https://github.com/AhmedMerza/laravel-watchtower/issues/56).
 
 ### Escalating durations
 

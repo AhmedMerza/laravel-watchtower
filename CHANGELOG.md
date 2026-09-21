@@ -2,6 +2,15 @@
 
 All notable changes to `laravel-watchtower` will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- **`never_block` now covers a block arriving over sync in both directions, which is what the config file has always promised.** "An incoming sync record never downgrades a local manual or auto block" was implemented twice — once on the push-received path and once in `watchtower:sync` — and the two copies had already drifted. The pull path wrote with a raw `updateOrCreate()` that never went near `BlacklistService`, so an address in a *satellite's* `WATCHTOWER_NEVER_BLOCK_IPS` got a row and a cache entry there whenever the master blocked it, while `config/watchtower.php` described that list as covering blocks "by any means — UI, auto-block, or sync". **No request was ever wrongly blocked** — `BlockedIpMiddleware` re-checks `never_block` ahead of the cache, so the row was inert — which is exactly why it went unnoticed: what it cost was a misleading row in the blocklist, a wasted cache entry, and a documented guarantee one path didn't make. Both directions now go through a single `BlacklistService::applySync()`, so the guard, the whitelist check, the event and the cache strategy are decided once; `watchtower:sync` counts what it turns away as `refused by never_block`, and still rebuilds the cache **once per run rather than once per record**, which is what a per-record write would have cost on a master's whole blocklist. ([#38](https://github.com/AhmedMerza/laravel-watchtower/issues/38))
+- **The blocks a satellite pulls no longer carry the master's `log_entry_id`.** It is a ULID into *this* node's `watchtower_logs`, so the copied value named a request the satellite had never seen — a link, in the management page, to an entry that isn't there. The push direction never sent it; now neither does the pull. ([#38](https://github.com/AhmedMerza/laravel-watchtower/issues/38))
+
+**Unchanged, and now tested on both halves:** `IpBlocked` — and with it the block webhook — still fires where a block is *received* and not where it is *replicated*, so each block is announced once, by the environment that received it, rather than again by every satellite that later pulls it. A pushed block applied on the master fires it; a block `watchtower:sync` pulls does not. Nothing to do on upgrade.
+
 ## [0.5.0] - 2026-09-21
 
 ### Added
