@@ -432,3 +432,115 @@ describe('ranges and IPv6 prefixes', function () {
         expect($this->service->find('203.0.113.9')?->reason)->toBe('its own');
     });
 });
+
+it('keeps a local manual block rather than letting a synced record downgrade it', function () {
+    Event::fake();
+    Queue::fake();
+
+    BlacklistedIp::create([
+        'ip'         => '1.2.3.4',
+        'reason'     => 'blocked here by hand',
+        'source'     => BlockSource::Manual,
+        'source_env' => 'production',
+    ]);
+
+    $result = $this->service->applySync('1.2.3.4', ['reason' => 'from a satellite', 'source_env' => 'staging']);
+
+    // The rule lived in SyncController and again in SyncCommand before #38.
+    // Both now call this, so there is one place for it to be wrong.
+    expect($result['applied'])->toBeFalse()
+        ->and($result['record']->source)->toBe(BlockSource::Manual)
+        ->and($result['record']->reason)->toBe('blocked here by hand');
+
+    Event::assertNotDispatched(IpBlocked::class);
+    $this->assertDatabaseCount('blacklisted_ips', 1);
+});
+
+it('updates a row that is itself a synced block', function () {
+    Event::fake();
+    Queue::fake();
+
+    BlacklistedIp::create([
+        'ip'         => '1.2.3.4',
+        'reason'     => 'an older sync',
+        'source'     => BlockSource::Sync,
+        'source_env' => 'production',
+    ]);
+
+    $result = $this->service->applySync('1.2.3.4', ['reason' => 'a newer sync', 'source_env' => 'production']);
+
+    expect($result['applied'])->toBeTrue()
+        ->and($result['record']->reason)->toBe('a newer sync');
+
+    $this->assertDatabaseCount('blacklisted_ips', 1);
+});
+
+it('refuses to apply a synced block for a never-block address', function () {
+    Event::fake();
+    Queue::fake();
+    config()->set('watchtower.never_block', ['10.0.0.0/8']);
+
+    expect(fn () => $this->service->applySync('10.0.0.1', ['source_env' => 'production']))
+        ->toThrow(NeverBlockException::class);
+
+    // The row is what matters, not just the refusal: the pull path used to
+    // write one, and config/watchtower.php promises never_block covers a
+    // block arriving "by any means — UI, auto-block, or sync".
+    $this->assertDatabaseCount('blacklisted_ips', 0);
+});
+
+it('refuses a never-block address even when it already holds a row', function () {
+    Event::fake();
+    Queue::fake();
+
+    // Whitelisted after the block was made, which is the order that actually
+    // happens. never_block is checked ahead of the downgrade guard so the
+    // answer doesn't depend on what is in the table.
+    BlacklistedIp::create(['ip' => '10.0.0.1', 'source' => BlockSource::Sync, 'source_env' => 'production']);
+    config()->set('watchtower.never_block', ['10.0.0.1']);
+
+    expect(fn () => $this->service->applySync('10.0.0.1', ['source_env' => 'production']))
+        ->toThrow(NeverBlockException::class);
+
+    $this->assertDatabaseHas('blacklisted_ips', ['ip' => '10.0.0.1', 'reason' => null]);
+});
+
+it('does not push a synced block onward to the master', function () {
+    Event::fake();
+    Queue::fake();
+    config()->set('watchtower.sync.master_url', 'https://master.example.com');
+
+    $this->service->applySync('1.2.3.4', ['source_env' => 'staging']);
+
+    // A block replicated from elsewhere is not this node's to report.
+    // PushBlockToMaster drops a Sync record anyway, so dispatching one only
+    // ever queued a job that returned immediately.
+    Queue::assertNotPushed(PushBlockToMaster::class);
+});
+
+it('defers the cache write and stays silent when the caller asks', function () {
+    Event::fake();
+    Queue::fake();
+
+    // What watchtower:sync passes: it rebuilds once for the whole run, and a
+    // pulled block was already announced by the environment that received it.
+    $this->cache->shouldReceive('write')->never();
+    $this->cache->shouldReceive('put')->never();
+
+    $result = $this->service->applySync('1.2.3.4', ['source_env' => 'production'], deferCache: true, announce: false);
+
+    expect($result['applied'])->toBeTrue();
+    Event::assertNotDispatched(IpBlocked::class);
+});
+
+it('writes the cache entry and announces by default', function () {
+    Event::fake();
+    Queue::fake();
+
+    // What SyncController::receive() passes — a single block arriving as news.
+    $this->cache->shouldReceive('write')->once();
+
+    $this->service->applySync('1.2.3.4', ['source_env' => 'staging']);
+
+    Event::assertDispatched(IpBlocked::class, fn ($e) => $e->record->ip === '1.2.3.4');
+});

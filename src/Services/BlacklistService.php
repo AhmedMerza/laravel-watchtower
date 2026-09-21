@@ -42,9 +42,7 @@ class BlacklistService
         // Checked before widening: never_block protects the address asked
         // for. The rest of its /64 is still blocked, and the middleware
         // lets the whitelisted address through regardless.
-        if ($this->isNeverBlock($ip)) {
-            throw new NeverBlockException("{$this->normalizeIp($ip)} is in the never-block whitelist and cannot be blocked.");
-        }
+        $this->assertBlockable($ip);
 
         // never_auto_block binds automation only, so it is checked against
         // the source rather than the address alone: the same call an admin
@@ -109,6 +107,90 @@ class BlacklistService
         }
 
         return $record;
+    }
+
+    /**
+     * Apply a block that was decided on another environment.
+     *
+     * The one implementation of the sync write, used by both directions:
+     * SyncController::receive() — a satellite reporting a block it made — and
+     * watchtower:sync, pulling the master's list. Each carried its own copy
+     * of the rule below, and the copies had already drifted: the pull path
+     * went straight to updateOrCreate() and so never consulted never_block,
+     * while config/watchtower.php promises that list covers blocks "by any
+     * means — UI, auto-block, or sync" (#38).
+     *
+     * This is not block() because four things about a block that arrived from
+     * somewhere else are decided differently:
+     *
+     * - never_auto_block is not consulted. The payload doesn't say whether a
+     *   rule or an admin made the block, so the receiving node can't tell one
+     *   from the other. never_block still applies, and is the list to use
+     *   when an address must survive a sync. See the README caveat (#56).
+     * - The scope is always global. The wire format has no scope field, so
+     *   there is nothing else this could write; `scope` joins it in #37.
+     * - An incoming record never downgrades a local manual or auto block.
+     *   That is also what makes a master whose own master_url points at
+     *   itself a no-op rather than a source rewrite.
+     * - Nothing is pushed onward. A block replicated from elsewhere is not
+     *   this node's to report — PushBlockToMaster already drops a Sync record
+     *   for that reason, so this only saves queueing a job that returns.
+     *
+     * log_entry_id is left out for a similar reason: it is a ULID into *this*
+     * node's watchtower_logs, and the master's value names a request the
+     * satellite never saw. The pull path used to copy it in, where it
+     * resolved to nothing.
+     *
+     * @param  array{reason?: string|null, source_env?: string|null, expires_at?: mixed, blocked_by?: string|null}  $attributes
+     * @param  bool  $deferCache  Skip this record's cache write, for a caller that rebuilds once for a whole run. watchtower:sync pulls the entire list, and write() pays for a full rebuild on every range in it. A caller that defers owns the rebuild.
+     * @param  bool  $announce  Whether to fire IpBlocked, and with it the webhook. True on the push path and false on the pull, which is what keeps a block announced once — by the environment that received it, not again by every satellite that later replicates it. That contract is documented under "Webhook Notification"; without it a satellite's first pull would post its whole inherited blocklist.
+     * @return array{applied: bool, record: BlacklistedIp} applied is false when a local manual or auto block was kept, and record is that local row
+     *
+     * @throws NeverBlockException when the never-block whitelist covers the address
+     */
+    public function applySync(string $ip, array $attributes = [], bool $deferCache = false, bool $announce = true): array
+    {
+        // Ahead of the downgrade guard, so the answer can't depend on what
+        // happens to be in the table: a never_block address is one this node
+        // refuses to block, whether or not it already holds a row for it.
+        $this->assertBlockable($ip);
+
+        $target = $this->normalizeTarget($ip);
+
+        // Scoped to the global row, the only row this can write. Matching any
+        // row would let an unrelated LOCAL scoped block for the same address
+        // — which is never a Sync block — trip the guard below and silently
+        // refuse a legitimate app-wide block; and on the write it would find
+        // that scoped row and turn a block on a handful of routes into an
+        // app-wide one.
+        $existing = BlacklistedIp::where('ip', $target)
+            ->where('scope', BlockScope::GLOBAL)
+            ->first();
+
+        if ($existing !== null && $existing->source !== BlockSource::Sync) {
+            return ['applied' => false, 'record' => $existing];
+        }
+
+        $record = BlacklistedIp::updateOrCreate(
+            ['ip' => $target, 'scope' => BlockScope::GLOBAL],
+            [
+                'reason'     => $attributes['reason'] ?? null,
+                'source_env' => $attributes['source_env'] ?? 'unknown',
+                'source'     => BlockSource::Sync,
+                'expires_at' => $attributes['expires_at'] ?? null,
+                'blocked_by' => $attributes['blocked_by'] ?? null,
+            ]
+        );
+
+        if (! $deferCache) {
+            $this->cache->write($record);
+        }
+
+        if ($announce) {
+            event(new IpBlocked($record));
+        }
+
+        return ['applied' => true, 'record' => $record];
     }
 
     /**
@@ -373,6 +455,22 @@ class BlacklistService
     private function targetsFor(string $ip): array
     {
         return array_values(array_unique([$this->normalizeTarget($ip), $this->normalizeIp($ip)]));
+    }
+
+    /**
+     * Refuse an address the never-block whitelist covers.
+     *
+     * Shared by block() and applySync() so the two write paths can't come to
+     * different conclusions — or report the same refusal in different words,
+     * since the master returns this message to the satellite that asked.
+     *
+     * @throws NeverBlockException
+     */
+    private function assertBlockable(string $ip): void
+    {
+        if ($this->isNeverBlock($ip)) {
+            throw new NeverBlockException("{$this->normalizeIp($ip)} is in the never-block whitelist and cannot be blocked.");
+        }
     }
 
     private function isNeverBlock(string $ip): bool

@@ -3,9 +3,11 @@
 declare(strict_types=1);
 
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Route;
 use Watchtower\Enums\BlockSource;
+use Watchtower\Events\IpBlocked;
 use Watchtower\Jobs\PushBlockToMaster;
 use Watchtower\Models\BlacklistedIp;
 use Watchtower\Services\BlacklistService;
@@ -198,6 +200,29 @@ it('does not let an incoming push downgrade a local manual block', function () {
         'source' => 'manual',
         'reason' => 'blocked here by hand',
     ]);
+});
+
+it('announces a block a satellite pushes here', function () {
+    Event::fake([IpBlocked::class]);
+
+    postSigned($this, json_encode(['ip' => '5.6.7.8', 'source_env' => 'staging']))->assertOk();
+
+    // The other half of the rule watchtower:sync relies on: a block is
+    // announced once, by the environment that received it. This is that
+    // environment, so the webhook fires here and nowhere else.
+    Event::assertDispatched(IpBlocked::class, fn ($e) => $e->record->ip === '5.6.7.8');
+});
+
+it('announces nothing when the push is refused as a downgrade', function () {
+    Event::fake([IpBlocked::class]);
+
+    BlacklistedIp::create(['ip' => '5.6.7.8', 'source' => BlockSource::Manual, 'source_env' => 'production']);
+
+    postSigned($this, json_encode(['ip' => '5.6.7.8', 'source_env' => 'staging']))
+        ->assertOk()
+        ->assertJsonPath('applied', false);
+
+    Event::assertNotDispatched(IpBlocked::class);
 });
 
 it('refuses a pushed IP that is in the master never-block list', function () {
