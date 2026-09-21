@@ -28,6 +28,7 @@ class AutoBlockService
     public function __construct(
         private readonly BlacklistService $blacklist,
         private readonly HitWindow $hits,
+        private readonly OffenceLedger $offences,
     ) {}
 
     /**
@@ -246,7 +247,7 @@ class AutoBlockService
             $scope,
             count($users),
             $sharedIpThreshold,
-            now()->addMinutes((int) config('watchtower.auto_block.block_duration_minutes', 60)),
+            (int) config('watchtower.auto_block.block_duration_minutes', 60),
             $context,
         );
     }
@@ -269,7 +270,7 @@ class AutoBlockService
         string $scope,
         int $distinctUsers,
         int $sharedIpThreshold,
-        \DateTimeInterface $expiresAt,
+        int $durationMinutes,
         array $context,
     ): bool {
         $notBlockedBecause = $this->holdBack($mode, $distinctUsers, $sharedIpThreshold);
@@ -295,6 +296,15 @@ class AutoBlockService
 
             return false;
         }
+
+        // Only past every hold-back, and never before: a warn-mode dry run
+        // and an address held back for being shared are not offences, and
+        // moving either up the ladder would lengthen a future block on the
+        // strength of ones that never happened. The shared-IP downgrade
+        // converted above is a real block, so it counts like any other.
+        $expiresAt = now()->addMinutes(
+            $this->escalatedMinutes($ip, $scope, $durationMinutes),
+        );
 
         try {
             $this->blacklist->block($ip, [
@@ -412,6 +422,49 @@ class AutoBlockService
             $sharedIpThreshold > 0 && $distinctUsers >= $sharedIpThreshold => 'shared IP',
             default => null,
         };
+    }
+
+    /**
+     * How long this block should last, once the offence ledger has had its
+     * say — the flat duration for a first offence, a longer rung for an
+     * address that keeps coming back.
+     *
+     * Normalized first, because a block widens a single IPv6 address to its
+     * prefix: a ledger keyed on the bare address would hand an attacker a
+     * fresh ladder on every hop inside the /64 the block already covers,
+     * which is the same reasoning detect() gives for its hit counter.
+     *
+     * Escalation improves a block; it is never a precondition for one. A
+     * ledger that can't be read must not cost the block itself, so any
+     * failure falls back to the flat duration and the address is still
+     * blocked — and the log line is throttled, because a database that is
+     * refusing writes will refuse one per offender for a whole tick.
+     *
+     * An address the never_* lists refuse still records an offence, since
+     * block() below is what throws. That costs one row, which decay prunes,
+     * and nothing ever reads it: an address that is always refused never
+     * gets a block for the ladder to lengthen.
+     */
+    private function escalatedMinutes(string $ip, string $scope, int $durationMinutes): int
+    {
+        try {
+            return $this->offences->durationFor(
+                $this->blacklist->normalizeTarget($ip),
+                $scope,
+                $durationMinutes,
+            );
+        } catch (\Throwable $e) {
+            if (! FailureWindow::isOpen('escalation-ledger')) {
+                FailureWindow::open('escalation-ledger');
+
+                Log::channel(config('watchtower.log_channel', 'stack'))
+                    ->error('Watchtower: the offence ledger failed, so this block fell back to the flat duration', [
+                        'error' => $e->getMessage(),
+                    ]);
+            }
+
+            return $durationMinutes;
+        }
     }
 
     public function run(): void
@@ -547,7 +600,6 @@ class AutoBlockService
 
         $distinctUsers = $this->distinctUsersPerIp($logsTable, $offenders->all(), $windowStart);
 
-        $expiresAt = now()->addMinutes($durationMinutes);
         $reason = sprintf(
             'Auto-blocked: %s%s exceeded %d hits in %d min',
             $level ? "level={$level} " : '',
@@ -570,7 +622,7 @@ class AutoBlockService
                 'window_minutes' => $windowMinutes,
             ];
 
-            $this->blockOrReport($ip, $reason, $mode, $scope, $users, $sharedIpThreshold, $expiresAt, $context);
+            $this->blockOrReport($ip, $reason, $mode, $scope, $users, $sharedIpThreshold, $durationMinutes, $context);
         }
     }
 

@@ -357,6 +357,8 @@ WATCHTOWER_AUTO_BLOCK_ENABLED=true
 WATCHTOWER_AUTO_BLOCK_MODE=warn    # warn (default) | block | disabled
 WATCHTOWER_AUTO_BLOCK_DURATION=60  # minutes
 WATCHTOWER_SHARED_IP_USER_THRESHOLD=3
+WATCHTOWER_ESCALATION=false              # longer blocks for repeat offenders
+WATCHTOWER_ESCALATION_DECAY_DAYS=30
 WATCHTOWER_NEVER_AUTO_BLOCK_IPS=203.0.113.0/24
 
 # Detectors — all off by default, turn on one at a time
@@ -455,6 +457,39 @@ WATCHTOWER_NEVER_AUTO_BLOCK_IPS=203.0.113.0/24,2001:db8:2::/48
 `never_auto_block` binds automation only — **an admin can still block a listed address by hand**, through the UI or the API. That is the whole difference from `never_block`, which nothing can override. Use `never_auto_block` for "a rule would be right about this traffic and wrong about the people behind it", and `never_block` for "never, under any circumstances".
 
 > ⚠️ **It does not survive sync.** The list is applied where the automated decision is made. A block that a *satellite* decided arrives here as a synced block, not an automated one, and this node's `never_auto_block` is not consulted — the sync payload doesn't carry where the block came from, so the receiving node can't tell an admin's block from a rule's. `never_block` is still enforced on arrival and is the list to use if the address must survive a sync push. Tracked in [#56](https://github.com/AhmedMerza/laravel-watchtower/issues/56).
+
+### Escalating durations
+
+An hour is a pause, not a deterrent, for someone who comes back. Turn this on and an address that earns a **second** auto-block gets a longer one, and a third longer again.
+
+```env
+WATCHTOWER_ESCALATION=true
+WATCHTOWER_ESCALATION_DECAY_DAYS=30
+```
+
+```php
+'escalation' => [
+    'enabled'          => env('WATCHTOWER_ESCALATION', false),
+    'repeat_durations' => [360, 1440, 10080],   // minutes
+    'decay_days'       => env('WATCHTOWER_ESCALATION_DECAY_DAYS', 30),
+],
+```
+
+The **first** auto-block always lasts `block_duration_minutes`. `repeat_durations` is the 2nd, 3rd, 4th… and its last value repeats from then on, so the defaults above read: **1 hour → 6 hours → 1 day → 1 week** for every offence after that. Keeping the first block out of the list is what stops two settings claiming the same number — switching escalation on can lengthen a block, never shorten one.
+
+**The count decays.** An address that goes quiet for `decay_days` starts again at the bottom, so an address reassigned to somebody else isn't serving the last tenant's sentence. `watchtower:cleanup` forgets those ledgers on its next run.
+
+**What doesn't escalate:**
+
+| | Why |
+|---|---|
+| A `warn`-mode near miss | A dry run has to stay one. Arming a rule later would otherwise hand out six-hour blocks on the strength of blocks that never happened. |
+| An address held back for being shared | It wasn't blocked, so it didn't offend. A shared address downgraded to a **scoped** block *was* blocked, and does count. |
+| Manual blocks, and blocks arriving over sync | Both carry the duration their caller asked for. Only the auto-block engine consults the ladder. |
+
+The count lives in the `ip_offences` table, one row per address per scope, so it survives `cache:clear` — and each scope keeps its own ladder. Two offences on your login routes don't decide how long an app-wide block lasts.
+
+> Counts are **per environment**. Sync carries blocks, not ledgers, so a satellite that has seen one offence won't inherit the master's count. That is deliberate: the offence happened where it happened.
 
 ### Log rules
 
@@ -579,6 +614,7 @@ php artisan watchtower:install
 php artisan watchtower:sync
 
 # Delete expired temporary blocks and rebuild the cache
+# Also forgets offence ledgers that have decayed (see Escalating durations)
 # Runs automatically every day — set WATCHTOWER_CLEANUP_ENABLED=false to manage manually
 # Permanent blocks (no expiry) are never touched
 php artisan watchtower:cleanup

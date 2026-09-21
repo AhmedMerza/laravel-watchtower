@@ -7,6 +7,7 @@ namespace Watchtower\Console\Commands;
 use Illuminate\Console\Command;
 use Watchtower\Models\BlacklistedIp;
 use Watchtower\Services\BlacklistCache;
+use Watchtower\Services\OffenceLedger;
 
 class CleanupCommand extends Command
 {
@@ -14,13 +15,24 @@ class CleanupCommand extends Command
 
     protected $description = 'Delete expired temporary blocks from the database and rebuild the Redis cache';
 
-    public function __construct(private readonly BlacklistCache $cache)
-    {
+    public function __construct(
+        private readonly BlacklistCache $cache,
+        private readonly OffenceLedger $offences,
+    ) {
         parent::__construct();
     }
 
     public function handle(): int
     {
+        // Before the blocks, so that a failed cache rebuild below — which
+        // returns early — doesn't leave spent ledger rows accumulating for
+        // as long as the cache stays broken. Nothing here touches the cache.
+        $pruned = $this->offences->prune();
+
+        if ($pruned > 0) {
+            $this->info("Forgot {$pruned} decayed offence ledger(s).");
+        }
+
         $deleted = BlacklistedIp::whereNotNull('expires_at')
             ->where('expires_at', '<', now())
             ->delete();

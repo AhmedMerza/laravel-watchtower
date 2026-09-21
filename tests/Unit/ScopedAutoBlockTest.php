@@ -11,6 +11,7 @@ use Watchtower\Events\IpBlocked;
 use Watchtower\Services\AutoBlockService;
 use Watchtower\Services\BlacklistCache;
 use Watchtower\Services\BlacklistService;
+use Watchtower\Services\OffenceLedger;
 use Watchtower\Support\BlockScope;
 use Watchtower\Support\HitWindow;
 
@@ -33,7 +34,7 @@ beforeEach(function () {
 
     $this->cache = new BlacklistCache;
     $this->blacklist = new BlacklistService($this->cache);
-    $this->service = new AutoBlockService($this->blacklist, new HitWindow);
+    $this->service = new AutoBlockService($this->blacklist, new HitWindow, new OffenceLedger);
 });
 
 function scopedRule(?string $scope, string $mode = 'block'): void
