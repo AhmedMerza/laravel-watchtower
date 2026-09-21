@@ -339,3 +339,169 @@ it('streams an address whose history spans many keyset pages', function () {
         ->and($result['offenders'][0]['blocks'])->toBe(1)
         ->and($used)->toBeLessThan(4 * 1024 * 1024);
 });
+
+/*
+|--------------------------------------------------------------------------
+| Engine parity — the cases where the simulation used to disagree with the
+| live AutoBlockService about what would actually have happened.
+|--------------------------------------------------------------------------
+*/
+
+it('reports a scoped rule as a scoped block, not as a warning, when the shared-IP guard trips', function () {
+    // AutoBlockService::blockOrReport() converts a shared-IP hold-back into a
+    // real scoped block for any non-global rule — that is what scopes are
+    // for. Reporting it as "would have been a warning" is exactly backwards.
+    config()->set('watchtower.scopes', ['auth']);
+
+    burst('10.0.0.1', 10, 30);
+
+    foreach ([1, 2, 3] as $i => $userId) {
+        logEntry('10.0.0.1', [
+            'user_id'     => $userId,
+            'occurred_at' => now()->copy()->subMinutes(30)->addSeconds($i),
+        ]);
+    }
+
+    $offender = ($this->run)([
+        'count'          => 10,
+        'window_minutes' => 5,
+        'scope'          => 'auth',
+    ], sharedIp: 3)['offenders'][0];
+
+    expect($offender['held_back_by_shared_ip_guard'])->toBeFalse()
+        ->and($offender['downgraded_to_scope'])->toBe('auth');
+});
+
+it('still holds a global rule back when the shared-IP guard trips', function () {
+    burst('10.0.0.1', 10, 30);
+
+    foreach ([1, 2, 3] as $i => $userId) {
+        logEntry('10.0.0.1', [
+            'user_id'     => $userId,
+            'occurred_at' => now()->copy()->subMinutes(30)->addSeconds($i),
+        ]);
+    }
+
+    $offender = ($this->run)(['count' => 10, 'window_minutes' => 5], sharedIp: 3)['offenders'][0];
+
+    expect($offender['held_back_by_shared_ip_guard'])->toBeTrue()
+        ->and($offender['downgraded_to_scope'])->toBeNull();
+});
+
+it('simulates nothing for a rule whose scope no route declares', function () {
+    // AutoBlockService::run() skips such a rule outright, so a report of
+    // what it "would have caught" describes a rule that never runs.
+    config()->set('watchtower.scopes', ['auth']);
+
+    burst('10.0.0.1', 20, 30);
+
+    $result = ($this->run)([
+        'count'          => 5,
+        'window_minutes' => 5,
+        'scope'          => 'nonsense',
+    ]);
+
+    expect($result['scope_declared'])->toBeFalse()
+        ->and($result['offenders'])->toBe([]);
+});
+
+it('catches a burst that straddles the start of the period', function () {
+    // The window is wall-clock and knows nothing about --days. Two matching
+    // rows just before the cutoff and one just after IS a 3-in-5-minutes
+    // crossing, and the engine would have blocked it. Reading only from the
+    // cutoff would drop the first two and miss the block — under-reporting,
+    // the one direction this is not allowed to err in.
+    $from = now()->copy()->subDays(7);
+
+    logEntry('10.0.0.1', ['occurred_at' => $from->copy()->subMinutes(2)]);
+    logEntry('10.0.0.1', ['occurred_at' => $from->copy()->subMinutes(1)]);
+    logEntry('10.0.0.1', ['occurred_at' => $from->copy()->addMinutes(1)]);
+
+    $result = ($this->run)(['count' => 3, 'window_minutes' => 5], days: 7);
+
+    expect($result['offenders'])->toHaveCount(1)
+        ->and($result['offenders'][0]['blocks'])->toBe(1);
+});
+
+it('does not report a crossing that happened entirely before the period', function () {
+    // Read, so the boundary case above works — but not reported, because it
+    // belongs to the week the operator did not ask about.
+    $from = now()->copy()->subDays(7);
+
+    foreach ([5, 4, 3] as $minutes) {
+        logEntry('10.0.0.1', ['occurred_at' => $from->copy()->subMinutes($minutes)]);
+    }
+
+    expect(($this->run)(['count' => 3, 'window_minutes' => 5], days: 7)['offenders'])->toBe([]);
+});
+
+it('leaves out an address the never_block list protects', function () {
+    config()->set('watchtower.never_block', ['10.0.0.1']);
+
+    burst('10.0.0.1', 20, 30);
+    burst('10.0.0.2', 20, 30);
+
+    $result = ($this->run)(['count' => 5, 'window_minutes' => 5]);
+
+    expect(array_column($result['offenders'], 'ip'))->toBe(['10.0.0.2'])
+        ->and($result['never_blocked'])->toBe(['10.0.0.1']);
+});
+
+it('leaves out an address the never_auto_block list protects', function () {
+    // Automation cannot block it, and a rule is automation.
+    config()->set('watchtower.never_auto_block', ['10.0.0.1']);
+
+    burst('10.0.0.1', 20, 30);
+
+    $result = ($this->run)(['count' => 5, 'window_minutes' => 5]);
+
+    expect($result['offenders'])->toBe([])
+        ->and($result['never_blocked'])->toBe(['10.0.0.1']);
+});
+
+it('treats a level of "0" as no filter, exactly as the engine does', function () {
+    // AutoBlockService gates on `if ($level)`, under which "0" is falsy.
+    burst('10.0.0.1', 10, 30, ['level' => 'error']);
+
+    $result = ($this->run)(['level' => '0', 'count' => 5, 'window_minutes' => 5]);
+
+    expect($result['level'])->toBeNull()
+        ->and($result['offenders'])->toHaveCount(1);
+});
+
+it('keeps counting through a block when the window is longer than the block', function () {
+    // The buffer is deliberately not cleared when a block fires: the engine
+    // re-reads a wall-clock window every tick, it does not start counting
+    // afresh. With window(30) > duration(5) that difference is observable —
+    // clearing would need 4 fresh rows after every block and would
+    // under-report.
+    foreach ([60, 52, 44, 36, 28, 20, 12, 4] as $minutesAgo) {
+        logEntry('10.0.0.1', ['occurred_at' => now()->copy()->subMinutes($minutesAgo)]);
+    }
+
+    $result = ($this->run)(['count' => 4, 'window_minutes' => 30], duration: 5);
+
+    // Rows at 28, 20, 12 and 4 minutes ago each re-cross a 30-minute window
+    // that still holds its three predecessors, so the block re-arms every
+    // time the 5-minute one lapses.
+    expect($result['offenders'][0]['blocks'])->toBe(5);
+});
+
+/**
+ * Pins the OUTPUT contract, not the tie-break that implements it.
+ *
+ * Deleting `strcmp` from the usort leaves this green: SQLite hands back
+ * GROUP BY results in key order and PHP's sort is stable, so the addresses
+ * arrive sorted before usort sees them. The explicit tie-break is therefore
+ * belt-and-braces over an ordering no standard promises — MySQL and Postgres
+ * are free to return groups in any order at all, and this test would be the
+ * thing that noticed on those drivers. Kept deliberately, and labelled so
+ * nobody reads it as proving the tie-break itself.
+ */
+it('orders two equally busy addresses by address, so --json diffs cleanly', function () {
+    burst('10.0.0.9', 10, 30);
+    burst('10.0.0.2', 10, 30);
+
+    expect(array_column(($this->run)(['count' => 10, 'window_minutes' => 5])['offenders'], 'ip'))
+        ->toBe(['10.0.0.2', '10.0.0.9']);
+});

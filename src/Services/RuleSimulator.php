@@ -8,6 +8,8 @@ use Carbon\CarbonInterface;
 use Illuminate\Database\Query\Builder;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
+use Watchtower\Support\BlockScope;
+use Watchtower\Support\NeverBlockList;
 
 /**
  * Replays the configured auto-block rules over log history, and answers the
@@ -79,6 +81,8 @@ final class RuleSimulator
      *     threshold: int,
      *     window_minutes: int,
      *     scope: string|null,
+     *     scope_declared: bool,
+     *     never_blocked: list<string>,
      *     offenders: list<array{
      *         ip: string,
      *         blocks: int,
@@ -87,7 +91,8 @@ final class RuleSimulator
      *         distinct_users: int,
      *         users_at_first_block: int,
      *         authenticated_rows_not_matching: int,
-     *         held_back_by_shared_ip_guard: bool
+     *         held_back_by_shared_ip_guard: bool,
+     *         downgraded_to_scope: string|null
      *     }>
      * }
      */
@@ -110,16 +115,63 @@ final class RuleSimulator
         $threshold = max(1, (int) ($rule['count'] ?? 10));
         $level = $this->stringOrNull($rule['level'] ?? null);
         $messageContains = $this->stringOrNull($rule['message_contains'] ?? null);
+        $scope = $this->stringOrNull($rule['scope'] ?? null);
+
+        // A scope no route declares makes AutoBlockService::run() skip the
+        // rule outright — resolveScope() throws and the loop `continue`s. So
+        // the honest simulation of such a rule is "this never runs", not a
+        // report of everything it would have caught if it did.
+        $scopeDeclared = $scope === null || BlockScope::isDeclared($scope);
+
+        $shape = [
+            'rule_index'       => $ruleIndex,
+            'mode'             => $mode,
+            'level'            => $level,
+            'message_contains' => $messageContains,
+            'threshold'        => $threshold,
+            'window_minutes'   => $windowMinutes,
+            'scope'            => $scope,
+            'scope_declared'   => $scopeDeclared,
+            'never_blocked'    => [],
+            'offenders'        => [],
+        ];
+
+        if (! $scopeDeclared) {
+            return $shape;
+        }
+
+        // Read from BEFORE the requested period, by one window, and report
+        // only crossings inside it. A rule's window is wall-clock and does
+        // not know about `--days`: an address with two matching rows just
+        // before the cutoff and a third just after HAS crossed a 3-in-5-min
+        // threshold, and the engine would have blocked it. Bounding the read
+        // at `$from` would drop the first two and miss the block entirely —
+        // under-reporting, which is the one direction this is not allowed to
+        // err in.
+        $readFrom = $from->copy()->subMinutes($windowMinutes);
 
         $offenders = [];
+        $neverBlocked = [];
 
-        foreach ($this->candidates($table, $level, $messageContains, $from, $to, $threshold) as $ip) {
+        foreach ($this->candidates($table, $level, $messageContains, $readFrom, $to, $threshold) as $ip) {
             $blockedAt = $this->replay(
-                $table, $level, $messageContains, $ip, $from, $to,
-                $windowMinutes, $threshold, $durationMinutes,
+                $table, $level, $messageContains, $ip, $readFrom, $to,
+                $windowMinutes, $threshold, $durationMinutes, $from,
             );
 
             if ($blockedAt === []) {
+                continue;
+            }
+
+            // The engine would have refused this one whatever the rule said:
+            // BlacklistService::block() throws for either allow-list and
+            // blockOrReport() catches it. Reporting it as a would-be block
+            // would point the operator at an address that is already safe —
+            // and these are exactly the addresses (their own office, a
+            // partner) they most need an accurate answer about.
+            if (NeverBlockList::refusesAutoBlock($ip)) {
+                $neverBlocked[] = $ip;
+
                 continue;
             }
 
@@ -127,6 +179,14 @@ final class RuleSimulator
             $usersAtFirstBlock = $this->distinctUsers(
                 $table, $ip, $first->copy()->subMinutes($windowMinutes), $first,
             );
+
+            // Mirrors blockOrReport()'s `$downgraded`: the shared-IP guard
+            // only turns a match into a warning for a GLOBAL rule. On a
+            // scoped rule a shared address is the case scopes exist for, so
+            // the engine blocks it in scope instead — saying "warning, not
+            // block" there would be precisely backwards.
+            $guardCrossed = $sharedIpThreshold > 0 && $usersAtFirstBlock >= $sharedIpThreshold;
+            $isGlobal = $scope === null;
 
             $offenders[] = [
                 'ip'                   => $ip,
@@ -147,26 +207,21 @@ final class RuleSimulator
                 // at the moment of the first block, not the period-wide
                 // figure — the period-wide count is an upper bound and would
                 // predict downgrades that never happen.
-                'held_back_by_shared_ip_guard' => $sharedIpThreshold > 0
-                    && $usersAtFirstBlock >= $sharedIpThreshold,
+                'held_back_by_shared_ip_guard' => $guardCrossed && $isGlobal,
+                'downgraded_to_scope'          => $guardCrossed && ! $isGlobal ? $scope : null,
             ];
         }
 
         // Busiest first: the report is read top-down and the address with the
         // most would-be blocks is the one the operator is deciding about.
+        // The address tie-break keeps two equally-busy addresses in a stable
+        // order, so `--json` diffs cleanly run to run.
         usort($offenders, static fn (array $a, array $b): int => $b['blocks'] <=> $a['blocks']
             ?: strcmp($a['ip'], $b['ip']));
 
-        return [
-            'rule_index'       => $ruleIndex,
-            'mode'             => $mode,
-            'level'            => $level,
-            'message_contains' => $messageContains,
-            'threshold'        => $threshold,
-            'window_minutes'   => $windowMinutes,
-            'scope'            => $this->stringOrNull($rule['scope'] ?? null),
-            'offenders'        => $offenders,
-        ];
+        sort($neverBlocked);
+
+        return [...$shape, 'never_blocked' => $neverBlocked, 'offenders' => $offenders];
     }
 
     /**
@@ -216,6 +271,11 @@ final class RuleSimulator
      * after a block. Clearing here would under-report any rule whose window
      * is longer than the block duration.
      *
+     * `$reportFrom` is where the REQUESTED period starts. Rows before it are
+     * read and counted — they are what makes a crossing at the boundary
+     * visible at all — but a crossing before it belongs to the week the
+     * operator didn't ask about, so it is not reported.
+     *
      * @return list<CarbonInterface>
      */
     private function replay(
@@ -228,23 +288,29 @@ final class RuleSimulator
         int $windowMinutes,
         int $threshold,
         int $durationMinutes,
+        CarbonInterface $reportFrom,
     ): array {
         $windowSeconds = $windowMinutes * 60;
         $durationSeconds = $durationMinutes * 60;
+        $reportFromAt = $reportFrom->getTimestamp();
 
-        /** @var list<int> $recent */
-        $recent = [];
+        // A true fixed-size circular buffer rather than an array plus
+        // array_shift(): shift reindexes the whole array on every row, which
+        // is O(threshold) per row and turns a rule with a high `count` into
+        // real CPU on a busy address. Writing at `$seen % $threshold` and
+        // reading the oldest from the same index after the increment is O(1)
+        // and allocates exactly once.
+        $recent = array_fill(0, $threshold, 0);
+        $seen = 0;
+
         $blockedUntil = null;
         $blockedAt = [];
 
         foreach ($this->stream($table, $level, $messageContains, $ip, $from, $to) as $occurredAt) {
             $at = $occurredAt->getTimestamp();
 
-            $recent[] = $at;
-
-            if (count($recent) > $threshold) {
-                array_shift($recent);
-            }
+            $recent[$seen % $threshold] = $at;
+            $seen++;
 
             // Still serving the block the previous crossing earned. The
             // engine skips an address it has already blocked, so a burst
@@ -253,9 +319,24 @@ final class RuleSimulator
                 continue;
             }
 
-            if (count($recent) === $threshold && ($at - $recent[0]) <= $windowSeconds) {
+            if ($seen < $threshold) {
+                continue;
+            }
+
+            // After the increment, the oldest of the last $threshold rows
+            // sits at exactly this index.
+            if (($at - $recent[$seen % $threshold]) > $windowSeconds) {
+                continue;
+            }
+
+            $blockedUntil = $at + $durationSeconds;
+
+            // The crossing is real either way — it is what sets the block
+            // clock above, so a pre-period burst still suppresses a
+            // duplicate report just inside the period, exactly as the
+            // engine's own live block would have.
+            if ($at >= $reportFromAt) {
                 $blockedAt[] = $occurredAt;
-                $blockedUntil = $at + $durationSeconds;
             }
         }
 
@@ -383,9 +464,22 @@ final class RuleSimulator
         return $query;
     }
 
+    /**
+     * A rule's optional string setting, or null when it isn't one.
+     *
+     * The emptiness test is PHP truthiness, not `!== ''`, because
+     * `AutoBlockService::applyRule()` gates its two clauses on `if ($level)`
+     * and `if ($messageContains)`. Under that, the string `"0"` is falsy and
+     * the filter is simply unset — so a `!== ''` test here would apply a
+     * filter the engine ignores, and the simulation would report a different
+     * offender set from the one the rule actually produces. Nobody writes
+     * `level: "0"`, but the claim this class makes is parity, and parity
+     * that holds "except for one input" is the kind that gets found later by
+     * someone trusting the report.
+     */
     private function stringOrNull(mixed $value): ?string
     {
-        return is_string($value) && $value !== '' ? $value : null;
+        return is_string($value) && $value !== '' && $value !== '0' ? $value : null;
     }
 
     /** The log table, resolved the way AutoBlockService resolves it. */

@@ -13,6 +13,7 @@ use Watchtower\Jobs\PushBlockToMaster;
 use Watchtower\Models\BlacklistedIp;
 use Watchtower\Support\BlockScope;
 use Watchtower\Support\IpRange;
+use Watchtower\Support\NeverBlockList;
 
 class BlacklistService
 {
@@ -473,17 +474,19 @@ class BlacklistService
         }
     }
 
+    /**
+     * Both delegate to NeverBlockList, which is also what RuleSimulator asks
+     * so that a backtest and a real block agree about who is protected. The
+     * two-list distinction is kept here, not folded into the helper, because
+     * each throws its own exception and callers act on which one they got.
+     */
     private function isNeverBlock(string $ip): bool
     {
-        $target = IpRange::canonical($ip);
-
-        return $target !== null && IpRange::covers((array) config('watchtower.never_block', []), $target);
+        return NeverBlockList::neverBlock($ip);
     }
 
     private function isNeverAutoBlock(string $ip): bool
     {
-        $target = IpRange::canonical($ip);
-
-        return $target !== null && IpRange::covers((array) config('watchtower.never_auto_block', []), $target);
+        return NeverBlockList::neverAutoBlock($ip);
     }
 }

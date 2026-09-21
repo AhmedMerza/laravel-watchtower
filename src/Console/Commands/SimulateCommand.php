@@ -6,6 +6,7 @@ namespace Watchtower\Console\Commands;
 
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Schema;
+use Watchtower\Services\AutoBlockService;
 use Watchtower\Services\RuleSimulator;
 
 /**
@@ -28,6 +29,9 @@ class SimulateCommand extends Command
     /** Addresses printed per rule before the table is truncated. */
     private const MAX_ROWS = 25;
 
+    /** Ten years. Past this, --days is a typo rather than a look-back. */
+    private const MAX_DAYS = 3650;
+
     protected $signature = 'watchtower:simulate
                             {--days=7 : How far back to replay}
                             {--rule= : Replay only this rule index}
@@ -45,7 +49,7 @@ class SimulateCommand extends Command
         $days = $this->days();
 
         if ($days === null) {
-            $this->error('--days must be a whole number of days, at least 1.');
+            $this->error('--days must be a whole number of days, from 1 to '.self::MAX_DAYS.'.');
 
             return self::FAILURE;
         }
@@ -87,7 +91,14 @@ class SimulateCommand extends Command
         $from = $to->copy()->subDays($days);
         $duration = (int) config('watchtower.auto_block.block_duration_minutes', 60);
         $sharedIpThreshold = $this->sharedIpThreshold();
-        $globalMode = $this->mode(config('watchtower.auto_block.mode', 'warn'));
+        // `?? 'warn'` is load-bearing, not belt-and-braces. config()'s default
+        // only applies when the KEY IS ABSENT, and `WATCHTOWER_AUTO_BLOCK_MODE=null`
+        // in .env gives the key a literal PHP null — so config() returns null,
+        // mode() passes null through, and a rule without its own mode would
+        // hand null to a `string $mode` parameter under strict_types and
+        // crash the command. AutoBlockService::normaliseMode() has always
+        // been total for the same reason.
+        $globalMode = $this->mode(config('watchtower.auto_block.mode', 'warn')) ?? 'warn';
 
         $results = [];
 
@@ -140,11 +151,27 @@ class SimulateCommand extends Command
             $this->newLine();
             $this->line($this->heading($result));
 
+            // The engine skips a rule whose scope no route declares, so the
+            // truthful report is that it never runs — not a list of what it
+            // would have caught if it did.
+            if ($result['scope_declared'] === false) {
+                $this->warn(sprintf(
+                    "  Scope '%s' is not declared in watchtower.scopes, so the engine skips this rule entirely. Nothing was simulated.",
+                    $result['scope'],
+                ));
+
+                continue;
+            }
+
             /** @var list<array<string, mixed>> $offenders */
             $offenders = $result['offenders'];
 
+            /** @var list<string> $neverBlocked */
+            $neverBlocked = $result['never_blocked'];
+
             if ($offenders === []) {
                 $this->line('  Nothing would have been blocked.');
+                $this->reportNeverBlocked($neverBlocked);
 
                 continue;
             }
@@ -166,7 +193,7 @@ class SimulateCommand extends Command
                     self::minutePrecision($o['last_block_at']),
                     $o['distinct_users'],
                     $o['authenticated_rows_not_matching'],
-                    $o['held_back_by_shared_ip_guard'] ? 'held back' : '—',
+                    self::guardCell($o),
                 ], array_slice($offenders, 0, self::MAX_ROWS)),
             );
 
@@ -178,7 +205,53 @@ class SimulateCommand extends Command
             }
 
             $this->caveats($offenders, $sharedIpThreshold);
+            $this->reportNeverBlocked($neverBlocked);
         }
+    }
+
+    /**
+     * What the shared-IP guard would have done to this address.
+     *
+     * Three outcomes, not two. On a GLOBAL rule the guard holds the block
+     * back and the address is only warned about. On a SCOPED rule it does
+     * the opposite of holding back — `AutoBlockService::blockOrReport()`
+     * converts the hold-back into a real block narrowed to that scope, which
+     * is the entire reason scopes exist. Printing "held back" for both would
+     * tell an operator their scoped rule does nothing, when it is the one
+     * configuration that protects everyone else behind the gateway.
+     *
+     * @param  array<string, mixed>  $offender
+     */
+    private static function guardCell(array $offender): string
+    {
+        if ($offender['downgraded_to_scope'] !== null) {
+            return 'scoped: '.$offender['downgraded_to_scope'];
+        }
+
+        return $offender['held_back_by_shared_ip_guard'] ? 'held back' : '—';
+    }
+
+    /**
+     * Addresses a rule matched that the allow-lists protect anyway.
+     *
+     * Worth its own line rather than a table row: these are not near misses,
+     * they are addresses the engine refuses outright, and an operator
+     * scanning the table for "who would I have blocked" should not have to
+     * notice a flag to find out the answer is "not them".
+     *
+     * @param  list<string>  $ips
+     */
+    private function reportNeverBlocked(array $ips): void
+    {
+        if ($ips === []) {
+            return;
+        }
+
+        $this->line(sprintf(
+            '  %d address(es) crossed this rule but are covered by never_block / never_auto_block, so the engine would have refused to block them: %s',
+            count($ips),
+            implode(', ', array_slice($ips, 0, 5)).(count($ips) > 5 ? ', …' : ''),
+        ));
     }
 
     /**
@@ -210,6 +283,18 @@ class SimulateCommand extends Command
                 '  %d would have been held back by the shared-IP guard (>= %d signed-in users), so they would have been warnings, not blocks.',
                 $heldBack,
                 $sharedIpThreshold,
+            ));
+        }
+
+        $downgraded = count(array_filter(
+            $offenders,
+            static fn (array $o): bool => $o['downgraded_to_scope'] !== null,
+        ));
+
+        if ($downgraded > 0) {
+            $this->line(sprintf(
+                '  %d crossed the shared-IP threshold on a scoped rule, so the engine would have blocked them in scope rather than app-wide — the people behind those addresses keep the rest of the app.',
+                $downgraded,
             ));
         }
     }
@@ -268,15 +353,27 @@ class SimulateCommand extends Command
         return [(int) $only => $rules[(int) $only]];
     }
 
+    /**
+     * The look-back period, or null when it isn't a usable number of days.
+     *
+     * Capped as well as floored. Carbon does not complain about
+     * `subDays(999999999)` — it returns a date in the year -2735881 — so an
+     * absurd value produces a lower bound that every row is after, which
+     * quietly turns the narrowing aggregate into a whole-table scan. That is
+     * precisely the cost this command is built to avoid, so the ceiling is
+     * part of the guarantee rather than mere input hygiene.
+     */
     private function days(): ?int
     {
         $days = $this->option('days');
 
-        if (! is_string($days) || ! ctype_digit($days) || (int) $days < 1) {
+        if (! is_string($days) || ! ctype_digit($days)) {
             return null;
         }
 
-        return (int) $days;
+        $days = (int) $days;
+
+        return $days >= 1 && $days <= self::MAX_DAYS ? $days : null;
     }
 
     /**
@@ -289,13 +386,14 @@ class SimulateCommand extends Command
      */
     private function sharedIpThreshold(): int
     {
-        $configured = config('watchtower.auto_block.shared_ip_user_threshold', 3);
+        $default = AutoBlockService::DEFAULT_SHARED_IP_USER_THRESHOLD;
+        $configured = config('watchtower.auto_block.shared_ip_user_threshold', $default);
 
         if (is_int($configured) && $configured >= 0) {
             return $configured;
         }
 
-        return is_string($configured) && ctype_digit(trim($configured)) ? (int) trim($configured) : 3;
+        return is_string($configured) && ctype_digit(trim($configured)) ? (int) trim($configured) : $default;
     }
 
     /**
@@ -309,6 +407,9 @@ class SimulateCommand extends Command
             return null;
         }
 
-        return is_string($mode) && in_array($mode, ['block', 'warn', 'disabled'], true) ? $mode : 'warn';
+        // AutoBlockService::VALID_MODES rather than a literal: a mode added
+        // there and not here would be relabelled 'warn' in the report, which
+        // is the report quietly describing an engine that no longer exists.
+        return is_string($mode) && in_array($mode, AutoBlockService::VALID_MODES, true) ? $mode : 'warn';
     }
 }

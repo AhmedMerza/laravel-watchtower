@@ -232,3 +232,70 @@ it('honours a custom logscope table name', function () {
         ->assertSuccessful()
         ->expectsOutputToContain('10.9.9.9');
 });
+
+it('does not crash when the global auto_block mode is literally null', function () {
+    // WATCHTOWER_AUTO_BLOCK_MODE=null in .env gives the key a real PHP null,
+    // and config()'s default only covers an ABSENT key — so this used to
+    // hand null to a `string $mode` parameter and fatal under strict_types.
+    config()->set('watchtower.auto_block.mode', null);
+
+    seedBurst('10.0.0.1', 10, 30);
+    oneRule();
+
+    $this->artisan('watchtower:simulate')
+        ->assertSuccessful()
+        ->expectsOutputToContain('10.0.0.1');
+});
+
+it('refuses a --days beyond the ten-year ceiling', function () {
+    // Carbon happily returns a date in the year -2735881 for this, which
+    // would make every row "inside" the period and turn the narrowing
+    // aggregate into a whole-table scan.
+    oneRule();
+
+    $this->artisan('watchtower:simulate --days=999999999')->assertFailed();
+    $this->artisan('watchtower:simulate --days=3650')->assertSuccessful();
+});
+
+it('says a rule is skipped when its scope is not declared', function () {
+    config()->set('watchtower.scopes', ['auth']);
+
+    seedBurst('10.0.0.1', 20, 30);
+    oneRule(['scope' => 'nonsense', 'count' => 5]);
+
+    $this->artisan('watchtower:simulate')
+        ->assertSuccessful()
+        ->expectsOutputToContain('is not declared in watchtower.scopes')
+        ->doesntExpectOutputToContain('10.0.0.1');
+});
+
+it('names the addresses an allow-list protects instead of listing them as blocks', function () {
+    config()->set('watchtower.never_block', ['10.0.0.1']);
+
+    seedBurst('10.0.0.1', 20, 30);
+    oneRule(['count' => 5]);
+
+    $this->artisan('watchtower:simulate')
+        ->assertSuccessful()
+        ->expectsOutputToContain('never_block / never_auto_block');
+});
+
+it('reports a scoped downgrade as a block in scope, not as a warning', function () {
+    config()->set('watchtower.scopes', ['auth']);
+
+    seedBurst('10.0.0.1', 10, 30);
+
+    foreach ([1, 2, 3] as $i => $userId) {
+        logEntry('10.0.0.1', [
+            'user_id'     => $userId,
+            'occurred_at' => now()->copy()->subMinutes(30)->addSeconds($i),
+        ]);
+    }
+
+    oneRule(['scope' => 'auth']);
+
+    $this->artisan('watchtower:simulate')
+        ->assertSuccessful()
+        ->expectsOutputToContain('blocked them in scope rather than app-wide')
+        ->doesntExpectOutputToContain('would have been warnings, not blocks');
+});

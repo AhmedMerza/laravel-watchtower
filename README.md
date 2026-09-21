@@ -730,14 +730,47 @@ fresh install has nothing to say until logs accumulate. It reports every
 configured rule regardless of `auto_block.enabled` or a rule's `mode` — the
 reason you are running it is to decide those.
 
-**One deliberate inexactness.** The engine evaluates rules on a one-minute
-scheduler tick; the replay walks the rows and notices a crossing at the row
-that caused it, up to a minute earlier. It therefore never reports *fewer*
-blocks than you would have seen, which is the safe direction for a report
-you are using to decide whether to arm something. Escalating durations are
-not modelled either — every simulated block lasts `block_duration_minutes`,
-so an address that would have earned a longer second block shows slightly
-more blocks here than it would have got.
+It knows what the engine knows. A rule whose `scope` isn't declared in
+`watchtower.scopes` is skipped by the engine, so it is reported as skipped
+rather than simulated. Addresses covered by `never_block` or
+`never_auto_block` are listed separately instead of counted as would-be
+blocks, because the engine refuses those whatever a rule says. And on a
+*scoped* rule the shared-IP guard doesn't hold a block back — it narrows it
+to that scope — so the report says "scoped", not "warning".
+
+**Two deliberate inexactnesses, both erring towards over-reporting.** The
+engine evaluates rules on a one-minute scheduler tick; the replay walks the
+rows and notices a crossing at the row that caused it, up to a minute
+earlier. And escalating durations are not modelled — every simulated block
+lasts `block_duration_minutes`, so an address that would have earned a
+longer second block shows slightly more blocks here than it got. Rules are
+also replayed independently, while the live engine skips an address another
+rule has already blocked, so two overlapping rules can both claim the same
+address.
+
+### Cost, honestly
+
+Memory is bounded: each address is replayed through a ring buffer holding at
+most `count` timestamps, so one that logged a million rows costs the same as
+one that logged fifty.
+
+Query cost is a different matter, and worth knowing before you point this at
+a large table. The narrowing pass admits any address with `count` matching
+rows *anywhere in the period* — a much weaker filter than "`count` inside one
+window" — so on busy traffic it admits many addresses that never actually
+trip the rule, and each one is then streamed individually. LogScope has no
+`(ip_address, occurred_at)` index, so those per-address reads have no ideal
+plan.
+
+If you run this regularly against a large `log_entries`, add the composite
+index:
+
+```php
+Schema::table('log_entries', fn (Blueprint $t) => $t->index(['ip_address', 'occurred_at']));
+```
+
+It is a write cost on LogScope's hottest table, so measure before you keep
+it. Start with a small `--days` and widen.
 
 ---
 
