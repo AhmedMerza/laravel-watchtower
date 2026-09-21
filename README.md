@@ -3,11 +3,13 @@
 [![License](https://img.shields.io/github/license/AhmedMerza/laravel-watchtower?style=flat-square)](LICENSE.md)
 [![PHP Version](https://img.shields.io/badge/php-%3E%3D8.2-blue?style=flat-square)](https://php.net)
 
-> **Active blocking and cross-server coordination at the edge of your Laravel app** — block a bad actor in one environment and every other environment sees the block within minutes. No Cloudflare, no AWS WAF, no infrastructure changes. Block over a JSON API standalone, or one-click from any log entry when LogScope is installed.
+> **Active blocking and cross-server coordination at the edge of your Laravel app** — block a bad actor in one environment and every other environment sees the block within minutes. No Cloudflare, no AWS WAF, no infrastructure changes. Block from the built-in management page, over a JSON API, or one-click from any log entry when LogScope is installed.
 
 > **Status — heading to v1.0.** Core IP blocking, cross-environment push/pull sync, the cache abstraction (works on **any** Laravel cache driver — Redis is no longer required), and the opt-in auto-block engine (with `block` / `warn` / `disabled` modes) are all in place and tested. LogScope is optional: you need it for one-click blocking from its log detail panel, and for the log-based auto-block rules, which read LogScope's log table. The real-time detectors — failed logins, login lockouts, scanner paths and response bursts — work without it.
 >
-> Still landing before `v1.0.0`: a **standalone management UI** (today the standalone interface is the JSON API below; LogScope users get the in-panel Block-IP button).
+> The **[management page](#%EF%B8%8F-management-page)** ships too, so nothing here needs LogScope to be usable: it lists what is blocked and blocks and unblocks by hand, with no build step and no JavaScript.
+>
+> Still landing before `v1.0.0`: backtesting a rule against real history before switching it on (`watchtower:simulate`), pushing blocks out to Cloudflare or an nginx deny file rather than only to other Laravel environments, and an importer for anyone migrating off `antonioribeiro/firewall`. The full list, and what is deliberately **not** being built, is in the [roadmap](https://github.com/AhmedMerza/laravel-watchtower/issues/26).
 
 ## Quick Start
 
@@ -20,7 +22,7 @@ Add your own IP to `WATCHTOWER_NEVER_BLOCK_IPS` before you block anything — se
 
 **With LogScope:** a **Block IP** button now appears in your LogScope detail panel whenever a log entry has an IP address.
 
-<a id="standalone-no-logscope"></a>**Standalone (no LogScope):** a JSON management API mounts at `/watchtower/api/...` (configurable via `WATCHTOWER_ROUTE_PREFIX`) — `POST /api/block`, `DELETE /api/block/{ip}`, `GET /api/status/{ip}`, `GET /api/blocks`. There is no standalone HTML UI yet (that's coming before v1.0 — see the status note above); standalone, you drive blocks through this API.
+<a id="standalone-no-logscope"></a>**Standalone (no LogScope):** a JSON management API mounts at `/watchtower/api/...` (configurable via `WATCHTOWER_ROUTE_PREFIX`) — `POST /api/block`, `DELETE /api/block/{ip}`, `GET /api/status/{ip}`, `GET /api/blocks`. A **[management page](#%EF%B8%8F-management-page)** mounts at the same prefix — `/watchtower` — listing what is blocked, with a block form and an unblock that asks first, so the API is for your own scripts rather than the only way in.
 
 **The API is closed outside `local` until you open it.** Access goes through a `viewWatchtower` Gate, which by default allows everyone in the `local` environment and no one anywhere else — the same model as Horizon and Pulse. Define it in your `AppServiceProvider` to decide who gets in:
 
@@ -42,7 +44,7 @@ A Gate whose callback needs a `$user` refuses guests, so the routes need a sessi
 ## How It Works
 
 ```
-Admin blocks an IP from LogScope's UI or the API (staging)
+Admin blocks an IP from the management page, LogScope's UI or the API (staging)
     │
     ├─► DB row created + cache rebuilt → staging protected immediately
     │
@@ -60,6 +62,7 @@ Every incoming request is checked against Laravel's cache (Redis, Memcached, fil
 
 - [Requirements](#-requirements)
 - [Installation](#-installation)
+- [Upgrading](#%EF%B8%8F-upgrading)
 - [Configuration](#%EF%B8%8F-configuration)
 - [Management Page](#%EF%B8%8F-management-page)
 - [Cross-Environment Sync](#-cross-environment-sync)
@@ -98,7 +101,34 @@ WATCHTOWER_NEVER_BLOCK_IPS=127.0.0.1,::1,your.own.ip
 
 > **Important:** Add your own IP to `WATCHTOWER_NEVER_BLOCK_IPS` before enabling. You cannot be blocked by an IP or range on this list — it is checked before any block operation, before the cache, and before the DB. On IPv6, list your network (`2001:db8:1:2::/64`) rather than one address: blocking any address blocks its whole /64, and a never-block address protects only itself.
 
-Without LogScope, the management API refuses every request outside `local` until you define the `viewWatchtower` Gate — see [Standalone](#standalone-no-logscope).
+Without LogScope, the management page and API both refuse every request outside `local` until you define the `viewWatchtower` Gate — see [Standalone](#standalone-no-logscope).
+
+---
+
+## ⬆️ Upgrading
+
+Upgrading an existing install needs three things. Each is covered in full in the [CHANGELOG](CHANGELOG.md); this is the short version.
+
+**1. Run the migrations.** Recent releases added the `scope` column on `blacklisted_ips` and the `ip_offences` table that escalating durations use:
+
+```bash
+# only if you publish migrations — re-publish so the new ones land
+php artisan vendor:publish --tag=watchtower-migrations
+
+php artisan migrate
+```
+
+⚠️ Rolling the `scope` migration *back* fails while any scoped block exists, because the old unique index on `ip` alone cannot hold two rows for one address. Delete the scoped blocks first. That is deliberate — dropping them quietly to make the rollback succeed would remove blocks without telling anyone.
+
+**2. ⚠️ Auto-block now defaults to `warn`, and nothing will tell you.** Since **v0.4.0**, a rule with no explicit `mode` reports the address and lets the request through instead of blocking it. If you were relying on auto-block to actually block, set it as part of the upgrade:
+
+```env
+WATCHTOWER_AUTO_BLOCK_MODE=block
+```
+
+Nothing changes for anyone who already set a mode explicitly, per rule or globally. The reasoning: a rule is written from a guess about traffic nobody has looked at yet, and the cost of guessing wrong is locking real users out — so a new rule reports before it acts. That is the right default for a fresh install and a surprise for an existing one, which is why it is here.
+
+**3. Attack-tool User-Agent rejection is on by default.** Also since **v0.4.0**: a request whose `User-Agent` names sqlmap, Nikto, WPScan, masscan or zgrab is rejected. If you run any of those against your own site from CI or a pentest box, add its address to `WATCHTOWER_NEVER_BLOCK_IPS` or its `User-Agent` to `user_agents.allow` before upgrading — or set `WATCHTOWER_USER_AGENT_FILTER=false`. It rejects the request only and never blocks the address.
 
 ---
 
