@@ -694,7 +694,50 @@ php artisan watchtower:sync
 # Runs automatically every day — set WATCHTOWER_CLEANUP_ENABLED=false to manage manually
 # Permanent blocks (no expiry) are never touched
 php artisan watchtower:cleanup
+
+# Backtest the auto-block rules against the log history you already have.
+# Read-only — it writes nothing, whatever mode the rules are in.
+php artisan watchtower:simulate --days=7
+php artisan watchtower:simulate --rule=0 --json
 ```
+
+### Backtesting a rule before you arm it
+
+`warn` mode is the honest way to try a rule out, and it costs days: set it,
+wait, read logs. `watchtower:simulate` skips the waiting, because LogScope
+already kept the history the rule would have read:
+
+```
+Rule #0 — level=error, 10 hit(s) in 5 min [block]
+  1 address(es) would have been blocked, 1 block(s) in total.
++--------------+--------+------------------+------------------+-------+-----------------+-----------+
+| IP           | Blocks | First            | Last             | Users | Clean signed-in | Guard     |
++--------------+--------+------------------+------------------+-------+-----------------+-----------+
+| 198.51.100.4 | 1      | 2026-09-21 10:30 | 2026-09-21 10:30 | 4     | 4               | held back |
++--------------+--------+------------------+------------------+-------+-----------------+-----------+
+  1 of these also sent signed-in traffic that never matched the rule — a block would have taken that away too.
+  1 would have been held back by the shared-IP guard (>= 3 signed-in users), so they would have been warnings, not blocks.
+```
+
+The two warning lines are the point. **Clean signed-in** counts requests from
+that address that carried a signed-in user and never matched the rule — people
+who were doing nothing wrong and would have lost access anyway. **Guard** says
+whether the shared-IP guard would have stepped in, computed against the window
+the live guard would actually have read at that moment, not the whole period.
+
+It needs LogScope's log table and reports on whatever history is there, so a
+fresh install has nothing to say until logs accumulate. It reports every
+configured rule regardless of `auto_block.enabled` or a rule's `mode` — the
+reason you are running it is to decide those.
+
+**One deliberate inexactness.** The engine evaluates rules on a one-minute
+scheduler tick; the replay walks the rows and notices a crossing at the row
+that caused it, up to a minute earlier. It therefore never reports *fewer*
+blocks than you would have seen, which is the safe direction for a report
+you are using to decide whether to arm something. Escalating durations are
+not modelled either — every simulated block lasts `block_duration_minutes`,
+so an address that would have earned a longer second block shows slightly
+more blocks here than it would have got.
 
 ---
 

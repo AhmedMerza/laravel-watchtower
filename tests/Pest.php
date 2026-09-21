@@ -28,6 +28,35 @@ function failBlacklistInserts(): void
 }
 
 /**
+ * Make every write to every table this package owns abort, so that anything
+ * claiming to be read-only can be held to it by the database rather than by
+ * a reviewer's attention.
+ *
+ * Asserting "no writes" by counting rows afterwards only catches a write
+ * that CHANGED something: a block re-inserted with identical values, or a
+ * write inside a transaction that later rolled back, would pass a count and
+ * still mean the command is not read-only. A trigger fails the moment the
+ * statement is attempted, which is the property `watchtower:simulate`
+ * actually promises.
+ *
+ * The log table is deliberately included. A backtest reads history; writing
+ * to it would be corrupting the evidence.
+ */
+function failAllWatchtowerWrites(): void
+{
+    foreach (['blacklisted_ips', 'ip_offences', 'log_entries'] as $table) {
+        foreach (['INSERT', 'UPDATE', 'DELETE'] as $event) {
+            $name = 'readonly_'.strtolower($event).'_'.$table;
+
+            DB::statement(
+                "CREATE TRIGGER {$name} BEFORE {$event} ON {$table} "
+                ."BEGIN SELECT RAISE(ABORT, 'write attempted on {$table}'); END"
+            );
+        }
+    }
+}
+
+/**
  * A LogScope-shaped row for the log-driven auto-block rules to read.
  *
  * Shared rather than file-local: the scoped auto-block tests read the same

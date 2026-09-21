@@ -369,6 +369,13 @@ return [
     |                `would_have_blocked: true` to see what it WOULD catch
     |                before letting it lock anyone out. Once you trust the
     |                rule, set WATCHTOWER_AUTO_BLOCK_MODE=block to arm it.
+    |
+    |                Waiting isn't the only option. `php artisan
+    |                watchtower:simulate --days=7` replays the rules below
+    |                over the history LogScope has already collected and
+    |                reports what they WOULD have blocked last week, which
+    |                addresses, and how much signed-in traffic a block would
+    |                have taken down with it. It writes nothing.
     |   'block'    - actually block matching IPs.
     |   'disabled' - skip the rule entirely. Useful as a per-rule kill switch
     |                without removing the rule definition.
