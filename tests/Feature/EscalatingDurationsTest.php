@@ -242,6 +242,68 @@ it('leaves a manual block on the duration its caller asked for', function () {
     expect(IpOffence::where('ip', '1.2.3.4')->value('offence_count'))->toBe(1);
 });
 
+it('escalates a block a real-time detector decided, not just a scheduled rule', function () {
+    // The other end of the engine. Both converge on blockOrReport(), but
+    // nothing proved escalation actually engages when a detector trips it
+    // rather than a log rule.
+    config()->set('watchtower.auto_block.detectors.failed_logins', [
+        'enabled'        => true,
+        'count'          => 2,
+        'window_minutes' => 5,
+    ]);
+
+    $this->service->record('failed_logins', '9.9.9.9');
+    $this->service->record('failed_logins', '9.9.9.9');
+    expect(blockMinutes('9.9.9.9'))->toBe(60);
+
+    $this->blacklist->unblock('9.9.9.9');
+
+    $this->service->record('failed_logins', '9.9.9.9');
+    $this->service->record('failed_logins', '9.9.9.9');
+    expect(blockMinutes('9.9.9.9'))->toBe(360);
+});
+
+it('spends a rung when a shared address is downgraded to a scoped block', function () {
+    // The one hold-back that converts. It is a real block, so unlike the
+    // warn-mode and app-wide shared cases above, it does count.
+    config()->set('watchtower.scopes', ['auth']);
+    config()->set('watchtower.auto_block.rules', [[
+        'level'          => 'error',
+        'count'          => 3,
+        'window_minutes' => 5,
+        'scope'          => 'auth',
+    ]]);
+
+    foreach ([1, 2, 3] as $userId) {
+        logEntry('1.2.3.4', ['user_id' => $userId]);
+    }
+    $this->service->run();
+
+    expect(blockMinutes('1.2.3.4', 'auth'))->toBe(60)
+        ->and(IpOffence::where('scope', 'auth')->value('offence_count'))->toBe(1);
+
+    $this->blacklist->unblock('1.2.3.4');
+    DB::table('log_entries')->delete();
+
+    foreach ([1, 2, 3] as $userId) {
+        logEntry('1.2.3.4', ['user_id' => $userId]);
+    }
+    $this->service->run();
+
+    expect(blockMinutes('1.2.3.4', 'auth'))->toBe(360);
+});
+
+it('still blocks, at the flat duration, when the ledger cannot be written', function () {
+    // A real write failure, the way failBlacklistInserts() does it for the
+    // blocks table. Escalation improves a block and is never a precondition
+    // for one, and this is the only test that proves it: without the
+    // fallback, the tick would throw and nobody would be blocked at all.
+    DB::statement("CREATE TRIGGER fail_offence_insert BEFORE INSERT ON ip_offences BEGIN SELECT RAISE(ABORT, 'simulated ledger failure'); END");
+
+    expect(tripRule('1.2.3.4'))->toBe(60)
+        ->and(IpOffence::count())->toBe(0);
+});
+
 it('ships escalation switched off, with a ladder that only ever lengthens a block', function () {
     // Read the shipped file rather than the merged config, so a test override
     // can't satisfy this.
@@ -256,6 +318,28 @@ it('ships escalation switched off, with a ladder that only ever lengthens a bloc
         ->and($escalation['repeat_durations'])->toBe([360, 1440, 10080])
         ->and(min($escalation['repeat_durations']))
         ->toBeGreaterThan($shipped['auto_block']['block_duration_minutes']);
+});
+
+it('still deletes expired blocks when pruning the ledgers fails', function () {
+    // The prune runs first, so leaving it unguarded would mean a broken
+    // ledger table stops blocks from ever lapsing — a new, optional feature
+    // taking out what this command is actually for.
+    IpOffence::create([
+        'ip'               => '1.1.1.1',
+        'scope'            => '',
+        'offence_count'    => 3,
+        'first_offence_at' => now()->subDays(90),
+        'last_offence_at'  => now()->subDays(31),
+    ]);
+
+    DB::statement("CREATE TRIGGER fail_offence_delete BEFORE DELETE ON ip_offences BEGIN SELECT RAISE(ABORT, 'simulated prune failure'); END");
+
+    $this->blacklist->block('5.5.5.5', ['expires_at' => now()->subMinute()]);
+
+    $this->artisan('watchtower:cleanup')->assertSuccessful();
+
+    expect(BlacklistedIp::where('ip', '5.5.5.5')->exists())->toBeFalse()
+        ->and(IpOffence::count())->toBe(1);
 });
 
 it('forgets a ladder that has gone quiet and keeps one that has not', function () {

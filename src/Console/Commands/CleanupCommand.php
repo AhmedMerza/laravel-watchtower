@@ -27,7 +27,19 @@ class CleanupCommand extends Command
         // Before the blocks, so that a failed cache rebuild below — which
         // returns early — doesn't leave spent ledger rows accumulating for
         // as long as the cache stays broken. Nothing here touches the cache.
-        $pruned = $this->offences->prune();
+        //
+        // Caught for the same reason the ledger is caught where a block is
+        // decided: this is housekeeping for an optional feature that is off
+        // by default, and it must not cost the expired-block deletion and
+        // cache rebuild below, which are what this command is actually for.
+        // Running first would otherwise mean a broken ledger table stops
+        // blocks from ever lapsing.
+        try {
+            $pruned = $this->offences->prune();
+        } catch (\Throwable $e) {
+            $pruned = 0;
+            $this->warn('Could not prune the offence ledgers, carrying on with the blocks: '.$e->getMessage());
+        }
 
         if ($pruned > 0) {
             $this->info("Forgot {$pruned} decayed offence ledger(s).");

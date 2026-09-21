@@ -440,10 +440,24 @@ class AutoBlockService
      * blocked — and the log line is throttled, because a database that is
      * refusing writes will refuse one per offender for a whole tick.
      *
+     * The offence is recorded before block() rather than after it, because
+     * the count is what decides the duration block() is given. Two things
+     * follow, both accepted:
+     *
      * An address the never_* lists refuse still records an offence, since
      * block() below is what throws. That costs one row, which decay prunes,
      * and nothing ever reads it: an address that is always refused never
      * gets a block for the ladder to lengthen.
+     *
+     * And if block() fails for some other reason — a transient write error,
+     * a race on its own unique index — the count is left one ahead of the
+     * blocks actually issued, so a later block is one rung longer than the
+     * history strictly earned. That needs the database healthy enough to
+     * write the ledger and then failing on blacklisted_ips, it errs towards
+     * blocking rather than away from it, and it decays. The alternatives are
+     * worse: block() dispatches IpBlocked and queues the sync push, so a
+     * transaction spanning both would have listeners acting on a block a
+     * rollback then removed.
      */
     private function escalatedMinutes(string $ip, string $scope, int $durationMinutes): int
     {

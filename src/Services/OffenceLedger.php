@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Watchtower\Services;
 
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Watchtower\Models\IpOffence;
 use Watchtower\Support\FailureWindow;
@@ -55,7 +56,14 @@ class OffenceLedger
             return $defaultMinutes;
         }
 
-        return $ladder[min($count - 2, count($ladder) - 1)];
+        // Never below the flat duration. The ladder exists to lengthen a
+        // block, and a rung under block_duration_minutes would make a repeat
+        // offence cheaper than the first one — which the config comment and
+        // the changelog both promise cannot happen, and which nothing
+        // otherwise enforces once an operator edits either setting. Clamped
+        // rather than dropped, so that raising block_duration_minutes past a
+        // rung shortens nothing and simply flattens the bottom of the ladder.
+        return max($defaultMinutes, $ladder[min($count - 2, count($ladder) - 1)]);
     }
 
     /**
@@ -78,25 +86,40 @@ class OffenceLedger
      * Add this offence to the address's ledger and answer the running count,
      * starting again from 1 if the last one has decayed.
      *
-     * ponytail: two blocks decided for one address at the same instant can
-     * collide on the (ip, scope) unique index. The caller treats a throw as
-     * "no escalation this time" and falls back to the flat duration, and the
-     * next offence picks the ladder back up. Upgrade path if that ever shows
-     * up in practice: wrap this in a transaction with lockForUpdate().
+     * Locked, because reading the count into PHP and writing count+1 back is
+     * a read-modify-write: two blocks decided for one address at the same
+     * instant would both read the same number and both write the same
+     * increment, losing one **silently**. That is the traffic this feature
+     * exists to punish, so the ladder would climb slowest exactly during a
+     * burst.
+     *
+     * ponytail: the lock can only hold a row that already exists, so two
+     * blocks racing to record an address's FIRST offence can still collide on
+     * the (ip, scope) unique index. That one throws rather than passing
+     * quietly: the caller treats it as "no escalation this time", falls back
+     * to the flat duration, and the next offence picks the ladder back up.
+     * Upgrade path if it ever shows up in practice: an upsert with the
+     * increment expressed in SQL, which needs a per-driver CASE for decay.
      */
     private function record(string $target, string $scope): int
     {
-        $offence = IpOffence::firstOrNew(['ip' => $target, 'scope' => $scope]);
+        return DB::transaction(function () use ($target, $scope): int {
+            $offence = IpOffence::where('ip', $target)
+                ->where('scope', $scope)
+                ->lockForUpdate()
+                ->first()
+                ?? new IpOffence(['ip' => $target, 'scope' => $scope]);
 
-        $decayed = $offence->last_offence_at === null
-            || $offence->last_offence_at->lt(now()->subDays($this->decayDays()));
+            $decayed = $offence->last_offence_at === null
+                || $offence->last_offence_at->lt(now()->subDays($this->decayDays()));
 
-        $offence->offence_count = $decayed ? 1 : $offence->offence_count + 1;
-        $offence->first_offence_at = $decayed ? now() : ($offence->first_offence_at ?? now());
-        $offence->last_offence_at = now();
-        $offence->save();
+            $offence->offence_count = $decayed ? 1 : $offence->offence_count + 1;
+            $offence->first_offence_at = $decayed ? now() : ($offence->first_offence_at ?? now());
+            $offence->last_offence_at = now();
+            $offence->save();
 
-        return $offence->offence_count;
+            return $offence->offence_count;
+        });
     }
 
     /**
