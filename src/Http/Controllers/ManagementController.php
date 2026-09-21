@@ -142,9 +142,12 @@ class ManagementController extends Controller
      * Takes the row id, not an address: the list is one row per address per
      * scope, and the button under a row has to lift that row. It also keeps a
      * CIDR out of the URL, and keeps an empty scope out of the request body —
-     * the `web` group turns `''` into null, and null means every scope to
+     * Laravel's ConvertEmptyStringsToNull turns `''` into null before a
+     * controller sees it, and null means every scope to
      * BlacklistService::unblock(), so a global row's button would have lifted
-     * the address's scoped blocks too.
+     * the address's scoped blocks too. That middleware is global rather than
+     * part of the `web` group, so editing watchtower.routes.middleware can't
+     * change it in either direction.
      */
     public function unblock(Request $request): RedirectResponse
     {
