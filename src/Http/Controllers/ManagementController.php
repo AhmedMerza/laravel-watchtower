@@ -72,7 +72,13 @@ class ManagementController extends Controller
         // than a confirm() dialog keeps the page working without JavaScript.
         $confirm = $request->query('confirm');
 
-        return view('watchtower::index', [
+        // Annotated because larastan resolves view names against the app's
+        // view paths, and a package namespace registered at boot isn't one of
+        // them — so `watchtower::index` reads as a plain string to it.
+        /** @var view-string $template */
+        $template = 'watchtower::index';
+
+        return view($template, [
             'blocks'      => $blocks,
             'confirm'     => is_string($confirm) ? $confirm : null,
             'source'      => $source,
