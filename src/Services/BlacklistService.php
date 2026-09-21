@@ -105,7 +105,7 @@ class BlacklistService
         // which changes the wire format anyway.
         if ($record->scope === BlockScope::GLOBAL && config('watchtower.sync.master_url')) {
             PushBlockToMaster::dispatch($record)
-                ->onQueue(config('watchtower.notifications.queue', 'default'));
+                ->onQueue(config('watchtower.sync.queue', 'default'));
         }
 
         return $record;

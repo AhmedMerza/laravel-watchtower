@@ -157,6 +157,8 @@ WATCHTOWER_ROUTE_PREFIX=watchtower
 WATCHTOWER_MASTER_URL=https://your-master-app.com
 WATCHTOWER_SYNC_SECRET=a-long-random-secret
 WATCHTOWER_SYNC_TOLERANCE=300   # seconds a signed request stays valid
+WATCHTOWER_SYNC_QUEUE=          # queue the push-to-master job runs on;
+                                # falls back to WATCHTOWER_NOTIFICATION_QUEUE, then 'default'
 
 # Auto-block engine (disabled by default)
 WATCHTOWER_AUTO_BLOCK_ENABLED=false
@@ -179,7 +181,8 @@ WATCHTOWER_VERIFY_SEARCH_BOTS=false       # forward-confirmed reverse DNS for Go
 
 # Webhook notification on every block (optional — useful for n8n, Slack, WhatsApp)
 WATCHTOWER_WEBHOOK_URL=
-WATCHTOWER_NOTIFICATION_QUEUE=default
+WATCHTOWER_NOTIFICATION_QUEUE=default   # a worker must consume this queue, or the
+                                        # webhook is queued where nothing sends it
 
 # Dedicated log channel for Watchtower events (sync failures, auto-block skips, etc.)
 WATCHTOWER_LOG_CHANNEL=stack

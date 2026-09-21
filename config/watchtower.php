@@ -625,12 +625,25 @@ return [
     |                which a captured request can be replayed, so keep it
     |                short; raise it only if your environments' clocks drift.
     |
+    | 'queue' - the queue the push job runs on. A push is what keeps the
+    |                other environments in sync, not a notification, so it
+    |                gets its own key and can have its own worker. It falls
+    |                back to WATCHTOWER_NOTIFICATION_QUEUE (and the legacy
+    |                GUARD_ spelling) because that is the key this job used
+    |                to read: an app that set it keeps the worker it has,
+    |                and only needs WATCHTOWER_SYNC_QUEUE to split the two
+    |                apart. Make sure a worker actually
+    |                consumes whichever queue you name — a push nobody
+    |                processes fails silently, and the block never leaves
+    |                this environment.
+    |
     */
 
     'sync' => [
         'master_url'          => env('WATCHTOWER_MASTER_URL', env('GUARD_MASTER_URL')),
         'secret'              => env('WATCHTOWER_SYNC_SECRET', env('GUARD_SYNC_SECRET')),
         'timestamp_tolerance' => (int) env('WATCHTOWER_SYNC_TOLERANCE', 300),
+        'queue'               => env('WATCHTOWER_SYNC_QUEUE', env('WATCHTOWER_NOTIFICATION_QUEUE', env('GUARD_NOTIFICATION_QUEUE', 'default'))),
     ],
 
     /*
@@ -640,6 +653,12 @@ return [
     |
     | Fired (always queued) when any IP is blocked. Post to a webhook —
     | useful for n8n, Slack, or WhatsApp automations.
+    |
+    | 'queue' names the queue that webhook runs on, and a worker has to be
+    | consuming it: a job queued where nothing listens never sends the
+    | webhook and never errors either. It no longer decides where the sync
+    | push job runs — that is 'sync.queue' above, which falls back to this
+    | value so an app that had set it keeps the worker it had.
     |
     */
 

@@ -2,7 +2,9 @@
 
 declare(strict_types=1);
 
+use Illuminate\Events\CallQueuedListener;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Queue;
 use Watchtower\Enums\BlockSource;
 use Watchtower\Events\IpBlocked;
 use Watchtower\Listeners\NotifyOnBlock;
@@ -86,4 +88,26 @@ it('sends the scope name for a scoped block', function () {
     $this->listener->handle(new IpBlocked($scoped));
 
     Http::assertSent(fn ($request) => $request->data()['scope'] === 'auth');
+});
+
+it('queues the webhook on the configured notification queue', function () {
+    config()->set('watchtower.notifications.queue', 'notifications');
+
+    Queue::fake();
+
+    event($this->event);
+
+    Queue::assertPushedOn('notifications', CallQueuedListener::class,
+        fn ($job) => $job->class === NotifyOnBlock::class);
+});
+
+it('queues the webhook on default when no notification queue is named', function () {
+    config()->set('watchtower.notifications.queue', 'default');
+
+    Queue::fake();
+
+    event($this->event);
+
+    Queue::assertPushedOn('default', CallQueuedListener::class,
+        fn ($job) => $job->class === NotifyOnBlock::class);
 });

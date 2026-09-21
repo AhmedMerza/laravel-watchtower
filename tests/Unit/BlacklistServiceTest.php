@@ -64,6 +64,33 @@ it('dispatches PushBlockToMaster when master URL is configured', function () {
     Queue::assertPushed(PushBlockToMaster::class);
 });
 
+it('pushes to master on the queue sync.queue names', function () {
+    Event::fake();
+    Queue::fake();
+    config()->set('watchtower.sync.master_url', 'https://master.example.com');
+    config()->set('watchtower.sync.queue', 'sync');
+
+    $this->service->block('1.2.3.4');
+
+    Queue::assertPushedOn('sync', PushBlockToMaster::class);
+});
+
+// The push job read watchtower.notifications.queue until #50 moved it to its
+// own key. Without this fallback an app that had set the notification queue —
+// and runs a worker only for it — would upgrade into a push job queued where
+// nothing consumes it, which is the silent failure #50 is about, moved.
+it('falls back to the notification queue when no sync queue is named', function () {
+    putenv('WATCHTOWER_NOTIFICATION_QUEUE=notifications');
+
+    try {
+        $config = require __DIR__.'/../../config/watchtower.php';
+
+        expect($config['sync']['queue'])->toBe('notifications');
+    } finally {
+        putenv('WATCHTOWER_NOTIFICATION_QUEUE');
+    }
+});
+
 it('does not dispatch PushBlockToMaster when master URL is not configured', function () {
     Event::fake();
     Queue::fake();

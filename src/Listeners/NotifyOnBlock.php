@@ -12,7 +12,17 @@ use Watchtower\Support\BlockScope;
 
 class NotifyOnBlock implements ShouldQueue
 {
-    public string $queue = 'default';
+    /**
+     * A method rather than the `$queue` property Laravel also accepts: a
+     * property initialiser can't call config(), so the property could only
+     * ever hold the literal 'default' — which is what made
+     * WATCHTOWER_NOTIFICATION_QUEUE do nothing for the webhook it names.
+     * The dispatcher reads this at dispatch time, when config is loaded.
+     */
+    public function viaQueue(): string
+    {
+        return config('watchtower.notifications.queue', 'default');
+    }
 
     public function handle(IpBlocked $event): void
     {
