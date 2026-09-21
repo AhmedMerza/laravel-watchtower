@@ -10,6 +10,7 @@ use Watchtower\Enums\BlockSource;
 use Watchtower\Events\IpBlocked;
 use Watchtower\Jobs\PushBlockToMaster;
 use Watchtower\Models\BlacklistedIp;
+use Watchtower\Services\BlacklistCache;
 use Watchtower\Services\BlacklistService;
 use Watchtower\Support\SyncSignature;
 
@@ -200,6 +201,22 @@ it('does not let an incoming push downgrade a local manual block', function () {
         'source' => 'manual',
         'reason' => 'blocked here by hand',
     ]);
+});
+
+it('blocks the address in the cache, not just in the table', function () {
+    postSigned($this, json_encode(['ip' => '5.6.7.8', 'source_env' => 'staging']))->assertOk();
+
+    // The row goes, so the cache has to answer on its own. Without this the
+    // assertion below proves nothing: isBlocked() warms itself from the DB
+    // when it finds no ranges key, so it would report the address blocked
+    // whether or not the push ever wrote a cache entry. A key written by
+    // put() survives that warm, being deliberately outside the rebuild index.
+    BlacklistedIp::where('ip', '5.6.7.8')->delete();
+
+    // BlockedIpMiddleware reads the cache and never the DB, so a push that
+    // wrote the row and missed the cache entry would leave the address
+    // reaching the app while every other assertion here still passed.
+    expect((new BlacklistCache)->isBlocked('5.6.7.8'))->toBeTrue();
 });
 
 it('announces a block a satellite pushes here', function () {

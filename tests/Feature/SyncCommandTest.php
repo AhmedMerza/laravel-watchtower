@@ -258,3 +258,22 @@ it('rebuilds the cache once for the run, not once per record', function () {
     expect($cache->rebuilds)->toBe(1)
         ->and($cache->writes)->toBe(0);
 });
+
+it('does not copy the master\'s log_entry_id into the local row', function () {
+    Http::fake([
+        'master.example.com/watchtower/sync/blocks' => Http::response([
+            'data' => [
+                // A real value, because every other fixture here sends null —
+                // which is exactly how this could regress unnoticed.
+                ['ip' => '1.2.3.4', 'reason' => 'synced', 'source_env' => 'production', 'expires_at' => null, 'blocked_by' => null, 'log_entry_id' => '01JD8Z1Q0000000000000000AA'],
+            ],
+        ], 200),
+    ]);
+
+    $this->artisan('watchtower:sync')->assertSuccessful();
+
+    // It is a ULID into *this* node's watchtower_logs, so the master's value
+    // names a request the satellite never saw — and the management page links
+    // a block to it.
+    $this->assertDatabaseHas('blacklisted_ips', ['ip' => '1.2.3.4', 'log_entry_id' => null]);
+});

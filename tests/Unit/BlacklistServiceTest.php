@@ -433,14 +433,14 @@ describe('ranges and IPv6 prefixes', function () {
     });
 });
 
-it('keeps a local manual block rather than letting a synced record downgrade it', function () {
+it('keeps a local block rather than letting a synced record downgrade it', function (BlockSource $source) {
     Event::fake();
     Queue::fake();
 
     BlacklistedIp::create([
         'ip'         => '1.2.3.4',
-        'reason'     => 'blocked here by hand',
-        'source'     => BlockSource::Manual,
+        'reason'     => 'the local decision',
+        'source'     => $source,
         'source_env' => 'production',
     ]);
 
@@ -448,13 +448,20 @@ it('keeps a local manual block rather than letting a synced record downgrade it'
 
     // The rule lived in SyncController and again in SyncCommand before #38.
     // Both now call this, so there is one place for it to be wrong.
+    //
+    // Auto as well as Manual: the guard is documented as protecting "a local
+    // manual or auto block" and the condition doesn't distinguish them, so
+    // narrowing it to Manual would otherwise leave every test green.
     expect($result['applied'])->toBeFalse()
-        ->and($result['record']->source)->toBe(BlockSource::Manual)
-        ->and($result['record']->reason)->toBe('blocked here by hand');
+        ->and($result['record']->source)->toBe($source)
+        ->and($result['record']->reason)->toBe('the local decision');
 
     Event::assertNotDispatched(IpBlocked::class);
     $this->assertDatabaseCount('blacklisted_ips', 1);
-});
+})->with([
+    'a manual block' => BlockSource::Manual,
+    'an auto block'  => BlockSource::Auto,
+]);
 
 it('updates a row that is itself a synced block', function () {
     Event::fake();

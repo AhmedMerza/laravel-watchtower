@@ -143,7 +143,7 @@ class BlacklistService
      *
      * @param  array{reason?: string|null, source_env?: string|null, expires_at?: mixed, blocked_by?: string|null}  $attributes
      * @param  bool  $deferCache  Skip this record's cache write, for a caller that rebuilds once for a whole run. watchtower:sync pulls the entire list, and write() pays for a full rebuild on every range in it. A caller that defers owns the rebuild.
-     * @param  bool  $announce  Whether to fire IpBlocked, and with it the webhook. True on the push path and false on the pull, which is what keeps a block announced once — by the environment that received it, not again by every satellite that later replicates it. That contract is documented under "Webhook Notification"; without it a satellite's first pull would post its whole inherited blocklist.
+     * @param  bool  $announce  Whether to fire IpBlocked, and with it the webhook. True on the push path and false on the pull, which is what keeps a block announced once — by the environment that received it, not again by every satellite that later replicates it. That contract is documented under "Webhook Notification"; without it a satellite's first pull would post its whole inherited blocklist. **Do not announce while also deferring the cache.** The event would then say an address is blocked while the middleware, which reads only the cache, still lets it through — for however long the caller takes to rebuild. A caller that defers owns the announcement as well, once its cache is in place.
      * @return array{applied: bool, record: BlacklistedIp} applied is false when a local manual or auto block was kept, and record is that local row
      *
      * @throws NeverBlockException when the never-block whitelist covers the address
