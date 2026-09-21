@@ -41,9 +41,15 @@ function uiPost(object $test, string $uri, array $data = []): object
         ->post($uri, $data + ['_token' => 'test-token']);
 }
 
+/**
+ * forceCreate, not create: `created_at` is not in the model's $fillable, so
+ * create() drops it silently and every row in a loop lands on the same
+ * second — which left the pagination test below ordering on a full tie and
+ * passing only because SQLite happened to return insertion order.
+ */
 function blockRow(string $ip, array $attributes = []): BlacklistedIp
 {
-    return BlacklistedIp::create(array_merge([
+    return BlacklistedIp::forceCreate(array_merge([
         'ip'         => $ip,
         'source'     => BlockSource::Manual,
         'source_env' => 'testing',
@@ -119,9 +125,25 @@ it('blocks a range in a scope', function () {
         'ip'       => '203.0.113.0/24',
         'duration' => '1h',
         'scope'    => 'auth',
-    ])->assertRedirect();
+    ])->assertRedirect()
+        ->assertSessionHas('watchtower_status', 'Blocked 203.0.113.0/24 from the auth routes.');
 
     expect(BlacklistedIp::firstWhere('ip', '203.0.113.0/24')->scope)->toBe('auth');
+});
+
+it('reports the network it stored for a single IPv6 address', function () {
+    uiPost(signedInAdmin($this), '/watchtower/block', [
+        'ip'       => '2001:db8::5',
+        'duration' => '1h',
+    ])->assertRedirect();
+
+    $block = BlacklistedIp::sole();
+
+    // An operator who blocks one IPv6 address needs to see that the /64
+    // around it was blocked, so the message names the stored target.
+    expect($block->ip)->toContain('/64')
+        ->and($block->ip)->not->toBe('2001:db8::5')
+        ->and(session('watchtower_status'))->toBe("Blocked {$block->ip}.");
 });
 
 it('refuses a scope no route carries', function () {
@@ -156,10 +178,14 @@ it('refuses a range broader than the limit unless the form forces it', function 
 it('shows why a never_block address was refused', function () {
     config()->set('watchtower.never_block', ['127.0.0.1']);
 
+    // The exception's own message, not a generic "invalid": the operator has
+    // to be able to tell "that address is protected" from "you typed it wrong".
     uiPost(signedInAdmin($this), '/watchtower/block', [
         'ip'       => '127.0.0.1',
         'duration' => '1h',
-    ])->assertSessionHasErrors('ip');
+    ])->assertSessionHasErrors([
+        'ip' => '127.0.0.1 is in the never-block whitelist and cannot be blocked.',
+    ]);
 
     expect(BlacklistedIp::count())->toBe(0);
 });
@@ -192,6 +218,69 @@ it('lifts only the row it was asked to lift', function () {
     uiPost(signedInAdmin($this), '/watchtower/unblock', ['id' => $global->id])->assertRedirect();
 
     expect(BlacklistedIp::pluck('scope')->all())->toBe(['auth']);
+});
+
+it('can still lift a block whose scope is no longer declared', function () {
+    $block = blockRow('10.0.0.1', ['scope' => 'auth']);
+
+    // The scope is retired from config while its rows are still in the table.
+    // BlockScope::normalize() throws on a name it no longer knows, which
+    // would 500 the one page that can clear those rows.
+    config()->set('watchtower.scopes', []);
+
+    uiPost(signedInAdmin($this), '/watchtower/unblock', ['id' => $block->id])
+        ->assertRedirect()
+        ->assertSessionHas('watchtower_status', 'Unblocked 10.0.0.1.');
+
+    expect(BlacklistedIp::count())->toBe(0);
+});
+
+it('hides the scope selector and still blocks when no scopes are declared', function () {
+    config()->set('watchtower.scopes', []);
+
+    signedInAdmin($this)->get('/watchtower')
+        ->assertOk()
+        ->assertDontSee('Applies to');
+
+    uiPost(signedInAdmin($this), '/watchtower/block', [
+        'ip'       => '203.0.113.9',
+        'duration' => '1h',
+    ])->assertRedirect();
+
+    expect(BlacklistedIp::firstWhere('ip', '203.0.113.9')->scope)->toBe(BlockScope::GLOBAL);
+});
+
+it('sends every redirect to the list, never to the Referer the request carried', function () {
+    // back() prefers the Referer header over the session's previous URL and
+    // does not require it to point at this app. All three paths are covered
+    // deliberately: an earlier version of this test only exercised the block
+    // success path, which returns its own redirect and would have passed
+    // whatever the other two did.
+    $block = blockRow('10.0.0.1');
+    $evil = 'https://evil.example/anywhere';
+
+    uiPost(signedInAdmin($this)->withHeader('referer', $evil), '/watchtower/block', [
+        'ip' => '203.0.113.7', 'duration' => '1h',
+    ])->assertRedirect(route('watchtower.ui.index'));
+
+    uiPost(signedInAdmin($this)->withHeader('referer', $evil), '/watchtower/block', [
+        'ip' => 'not-an-ip', 'duration' => '1h',
+    ])->assertRedirect(route('watchtower.ui.index'));
+
+    uiPost(signedInAdmin($this)->withHeader('referer', $evil), '/watchtower/unblock', [
+        'id' => $block->id,
+    ])->assertRedirect(route('watchtower.ui.index'));
+});
+
+it('comes back to the filter and page the unblock was made from', function () {
+    $block = blockRow('10.0.0.1', ['source' => BlockSource::Auto]);
+
+    uiPost(signedInAdmin($this), '/watchtower/unblock', [
+        'id'     => $block->id,
+        'source' => 'auto',
+        'state'  => 'all',
+        'page'   => '2',
+    ])->assertRedirect(route('watchtower.ui.index', ['source' => 'auto', 'state' => 'all', 'page' => 2]));
 });
 
 it('says so when the block is already gone', function () {
@@ -270,7 +359,13 @@ it('keeps the filter when paging', function () {
 it('loads nothing from the network and runs no JavaScript', function () {
     blockRow('10.0.0.1');
 
-    $html = signedInAdmin($this)->get('/watchtower')->assertOk()->getContent();
+    $response = signedInAdmin($this)->get('/watchtower')->assertOk();
+
+    // A positive assertion first: every check below is a not->toContain, and
+    // they would all pass against an empty 200 from a broken view.
+    $response->assertSee('10.0.0.1')->assertSee('<table', escape: false);
+
+    $html = $response->getContent();
 
     // The whole point of the server-rendered page: it cannot be broken by a
     // CDN outage, needs no build step, and needs no script-src exception.

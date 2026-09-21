@@ -10,7 +10,7 @@ use Illuminate\Routing\Controller;
 use Illuminate\Validation\Rule;
 use Watchtower\Exceptions\NeverBlockException;
 use Watchtower\Models\BlacklistedIp;
-use Watchtower\Rules\BlockTarget;
+use Watchtower\Rules\BlockRules;
 use Watchtower\Services\BlacklistService;
 use Watchtower\Support\BlockScope;
 
@@ -20,17 +20,11 @@ class BlockController extends Controller
 
     public function block(Request $request): JsonResponse
     {
-        $validated = $request->validate([
-            'ip'           => ['required', 'string', 'max:50', new BlockTarget(allowBroad: $request->boolean('force'))],
-            'force'        => ['sometimes', 'boolean'],
-            'reason'       => ['nullable', 'string', 'max:500'],
+        $validated = $request->validate(BlockRules::shared($request->boolean('force')) + [
+            // The API's own two: a caller naming an exact expiry has a reason
+            // to, and only a block made from a log entry carries its id.
             'expires_at'   => ['nullable', 'date'],
             'log_entry_id' => ['nullable', 'string', 'max:26'],
-            // Rule::in rather than a free string, so a scope no route carries
-            // is a 422 the caller can read instead of a block that enforces
-            // nothing. BlacklistService refuses it too; this just says so in
-            // the shape the rest of the endpoint's errors take.
-            'scope'        => ['nullable', 'string', Rule::in(BlockScope::declared())],
         ]);
 
         // data_get() reads an Eloquent user's attributes and a GenericUser's

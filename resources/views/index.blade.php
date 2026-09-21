@@ -47,6 +47,9 @@
         <h2>Block an address</h2>
         <form method="POST" action="{{ route('watchtower.ui.block') }}">
             @csrf
+            {{-- Carried so a refused block returns to the list you were on. --}}
+            <input type="hidden" name="source" value="{{ $source }}">
+            <input type="hidden" name="state" value="{{ $state }}">
             <div class="row">
                 <div>
                     <label for="ip">IP address or CIDR range</label>
@@ -180,6 +183,10 @@
                                     <form method="POST" action="{{ route('watchtower.ui.unblock') }}" class="inline-form">
                                         @csrf
                                         <input type="hidden" name="id" value="{{ $block->id }}">
+                                        {{-- So the redirect comes back to this filter and page. --}}
+                                        <input type="hidden" name="source" value="{{ $source }}">
+                                        <input type="hidden" name="state" value="{{ $state }}">
+                                        <input type="hidden" name="page" value="{{ $blocks->currentPage() }}">
                                         <button type="submit" class="primary">Unblock</button>
                                     </form>
                                     <a href="{{ route('watchtower.ui.index', $filters + ['page' => $blocks->currentPage()]) }}">Cancel</a>

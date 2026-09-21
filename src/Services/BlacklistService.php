@@ -123,12 +123,39 @@ class BlacklistService
      */
     public function unblock(string $ip, ?string $scope = null): bool
     {
+        return $this->remove($ip, $scope === null ? null : [BlockScope::normalize($scope)]);
+    }
+
+    /**
+     * Lift one stored block, identified by its row rather than by an address.
+     *
+     * The row's scope is used exactly as stored, and deliberately NOT passed
+     * through BlockScope::normalize(): normalizing is a guard on *input*, and
+     * a row outlives the config that declared its scope. Retire or rename a
+     * scope and its rows stay in the table — normalize() then throws
+     * UnknownScopeException on them, which would turn the management page's
+     * Unblock into a 500 on exactly the rows an operator most needs to clear,
+     * with no other way to remove them. The value came out of the database,
+     * so it already matches the cache namespace it was written to.
+     */
+    public function unblockRecord(BlacklistedIp $record): bool
+    {
+        return $this->remove($record->ip, [$record->scope]);
+    }
+
+    /**
+     * Delete the rows for an address in the given scopes and forget their
+     * cache entries. A null $scopes means every scope.
+     *
+     * @param  list<string>|null  $scopes
+     */
+    private function remove(string $ip, ?array $scopes): bool
+    {
         $targets = $this->targetsFor($ip);
         $query = BlacklistedIp::whereIn('ip', $targets);
 
-        if ($scope !== null) {
-            $scopes = [BlockScope::normalize($scope)];
-            $query->where('scope', $scopes[0]);
+        if ($scopes !== null) {
+            $query->whereIn('scope', $scopes);
         } else {
             // No scope means every scope. "Unblock this address" has always
             // meant the address can use the app again, and it has to keep
