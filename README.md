@@ -694,7 +694,83 @@ php artisan watchtower:sync
 # Runs automatically every day — set WATCHTOWER_CLEANUP_ENABLED=false to manage manually
 # Permanent blocks (no expiry) are never touched
 php artisan watchtower:cleanup
+
+# Backtest the auto-block rules against the log history you already have.
+# Read-only — it writes nothing, whatever mode the rules are in.
+php artisan watchtower:simulate --days=7
+php artisan watchtower:simulate --rule=0 --json
 ```
+
+### Backtesting a rule before you arm it
+
+`warn` mode is the honest way to try a rule out, and it costs days: set it,
+wait, read logs. `watchtower:simulate` skips the waiting, because LogScope
+already kept the history the rule would have read:
+
+```
+Rule #0 — level=error, 10 hit(s) in 5 min [block]
+  1 address(es) would have been blocked, 1 block(s) in total.
++--------------+--------+------------------+------------------+-------+-----------------+-----------+
+| IP           | Blocks | First            | Last             | Users | Clean signed-in | Guard     |
++--------------+--------+------------------+------------------+-------+-----------------+-----------+
+| 198.51.100.4 | 1      | 2026-09-21 10:30 | 2026-09-21 10:30 | 4     | 4               | held back |
++--------------+--------+------------------+------------------+-------+-----------------+-----------+
+  1 of these also sent signed-in traffic that never matched the rule — a block would have taken that away too.
+  1 would have been held back by the shared-IP guard (>= 3 signed-in users), so they would have been warnings, not blocks.
+```
+
+The two warning lines are the point. **Clean signed-in** counts requests from
+that address that carried a signed-in user and never matched the rule — people
+who were doing nothing wrong and would have lost access anyway. **Guard** says
+whether the shared-IP guard would have stepped in, computed against the window
+the live guard would actually have read at that moment, not the whole period.
+
+It needs LogScope's log table and reports on whatever history is there, so a
+fresh install has nothing to say until logs accumulate. It reports every
+configured rule regardless of `auto_block.enabled` or a rule's `mode` — the
+reason you are running it is to decide those.
+
+It knows what the engine knows. A rule whose `scope` isn't declared in
+`watchtower.scopes` is skipped by the engine, so it is reported as skipped
+rather than simulated. Addresses covered by `never_block` or
+`never_auto_block` are listed separately instead of counted as would-be
+blocks, because the engine refuses those whatever a rule says. And on a
+*scoped* rule the shared-IP guard doesn't hold a block back — it narrows it
+to that scope — so the report says "scoped", not "warning".
+
+**Two deliberate inexactnesses, both erring towards over-reporting.** The
+engine evaluates rules on a one-minute scheduler tick; the replay walks the
+rows and notices a crossing at the row that caused it, up to a minute
+earlier. And escalating durations are not modelled — every simulated block
+lasts `block_duration_minutes`, so an address that would have earned a
+longer second block shows slightly more blocks here than it got. Rules are
+also replayed independently, while the live engine skips an address another
+rule has already blocked, so two overlapping rules can both claim the same
+address.
+
+### Cost, honestly
+
+Memory is bounded: each address is replayed through a ring buffer holding at
+most `count` timestamps, so one that logged a million rows costs the same as
+one that logged fifty.
+
+Query cost is a different matter, and worth knowing before you point this at
+a large table. The narrowing pass admits any address with `count` matching
+rows *anywhere in the period* — a much weaker filter than "`count` inside one
+window" — so on busy traffic it admits many addresses that never actually
+trip the rule, and each one is then streamed individually. LogScope has no
+`(ip_address, occurred_at)` index, so those per-address reads have no ideal
+plan.
+
+If you run this regularly against a large `log_entries`, add the composite
+index:
+
+```php
+Schema::table('log_entries', fn (Blueprint $t) => $t->index(['ip_address', 'occurred_at']));
+```
+
+It is a write cost on LogScope's hottest table, so measure before you keep
+it. Start with a small `--days` and widen.
 
 ---
 

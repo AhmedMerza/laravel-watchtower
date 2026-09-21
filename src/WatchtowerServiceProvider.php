@@ -17,6 +17,7 @@ use Spatie\LaravelPackageTools\Package;
 use Spatie\LaravelPackageTools\PackageServiceProvider;
 use Watchtower\Console\Commands\CleanupCommand;
 use Watchtower\Console\Commands\InstallCommand;
+use Watchtower\Console\Commands\SimulateCommand;
 use Watchtower\Console\Commands\SyncCommand;
 use Watchtower\Events\IpBlocked;
 use Watchtower\Http\Controllers\BlockController;
@@ -58,7 +59,7 @@ class WatchtowerServiceProvider extends PackageServiceProvider
             ->hasMigration('update_blacklisted_ips_table_add_scope')
             ->runsMigrations()
             ->hasViews()
-            ->hasCommands([InstallCommand::class, SyncCommand::class, CleanupCommand::class]);
+            ->hasCommands([InstallCommand::class, SyncCommand::class, CleanupCommand::class, SimulateCommand::class]);
     }
 
     public function registeringPackage(): void

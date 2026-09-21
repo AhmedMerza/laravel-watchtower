@@ -20,10 +20,17 @@ class AutoBlockService
      * Valid auto-block modes. Anything else falls back to 'warn', the safe
      * end of the range: a typo in the mode shouldn't start blocking people.
      */
-    private const VALID_MODES = ['block', 'warn', 'disabled'];
+    public const VALID_MODES = ['block', 'warn', 'disabled'];
 
-    /** Distinct signed-in users from one address before a block downgrades. */
-    private const DEFAULT_SHARED_IP_USER_THRESHOLD = 3;
+    /**
+     * Distinct signed-in users from one address before a block downgrades.
+     *
+     * Public, like VALID_MODES above, because `watchtower:simulate` reports
+     * what THIS engine would have done and has to answer from the same
+     * numbers. A second copy in the command is how the report starts
+     * describing an engine that no longer exists.
+     */
+    public const DEFAULT_SHARED_IP_USER_THRESHOLD = 3;
 
     public function __construct(
         private readonly BlacklistService $blacklist,
