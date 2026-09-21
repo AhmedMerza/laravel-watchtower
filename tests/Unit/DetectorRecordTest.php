@@ -11,6 +11,7 @@ use Watchtower\Models\BlacklistedIp;
 use Watchtower\Services\AutoBlockService;
 use Watchtower\Services\BlacklistCache;
 use Watchtower\Services\BlacklistService;
+use Watchtower\Services\OffenceLedger;
 use Watchtower\Support\HitWindow;
 
 beforeEach(function () {
@@ -36,6 +37,7 @@ beforeEach(function () {
     $this->service = new AutoBlockService(
         new BlacklistService(new BlacklistCache),
         $this->hits,
+        new OffenceLedger,
     );
 });
 

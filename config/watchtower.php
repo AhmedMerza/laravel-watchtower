@@ -414,6 +414,38 @@ return [
         // falls back to the default, loudly, when it isn't a whole number.
         'shared_ip_user_threshold' => env('WATCHTOWER_SHARED_IP_USER_THRESHOLD', 3),
         'block_duration_minutes'   => env('WATCHTOWER_AUTO_BLOCK_DURATION', env('GUARD_AUTO_BLOCK_DURATION', 60)),
+
+        /*
+        | Escalating durations for repeat offenders.
+        |
+        | An hour is a pause, not a deterrent, for someone who comes back. With
+        | this on, an address that earns a second auto-block gets a longer one,
+        | and a third longer again.
+        |
+        | The FIRST auto-block always lasts block_duration_minutes above.
+        | 'repeat_durations' is the 2nd, 3rd, 4th … and its last value repeats
+        | from then on, so the defaults below read: 1 hour, then 6, then a day,
+        | then a week for every offence after that. Keeping the first block out
+        | of the list is what stops two settings claiming the same number —
+        | turning escalation on can lengthen a block, never shorten one.
+        |
+        | The count is kept per address per scope in the `ip_offences` table,
+        | so it survives `cache:clear`, and it DECAYS: an address that goes
+        | quiet for 'decay_days' starts again from the bottom, which is what
+        | keeps a reassigned address from serving the last tenant's sentence.
+        |
+        | Only auto-blocks escalate. A manual block and a block arriving over
+        | sync carry the duration their caller asked for, untouched.
+        */
+        'escalation'               => [
+            'enabled'          => env('WATCHTOWER_ESCALATION', false),
+            'repeat_durations' => [360, 1440, 10080],
+            // Not cast, for the same reason as the threshold above: a blank
+            // value casting to 0 would reset every ladder on every block, so
+            // escalation would look switched on and never escalate.
+            'decay_days'       => env('WATCHTOWER_ESCALATION_DECAY_DAYS', 30),
+        ],
+
         'rules'                    => [
             // Example — a rule you're still tuning. With no 'mode' it runs
             // in warn mode, the global default:

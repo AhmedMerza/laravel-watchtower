@@ -32,6 +32,7 @@ use Watchtower\Listeners\NotifyOnBlock;
 use Watchtower\Services\AutoBlockService;
 use Watchtower\Services\BlacklistCache;
 use Watchtower\Services\BlacklistService;
+use Watchtower\Services\OffenceLedger;
 use Watchtower\Services\UserAgentFilter;
 use Watchtower\Support\FailureWindow;
 use Watchtower\Support\HitWindow;
@@ -52,6 +53,7 @@ class WatchtowerServiceProvider extends PackageServiceProvider
             // one runs first and fails on any install that doesn't publish
             // migrations. MigrationOrderTest pins this.
             ->hasMigration('create_blacklisted_ips_table')
+            ->hasMigration('create_ip_offences_table')
             ->hasMigration('update_blacklisted_ips_table_add_scope')
             ->runsMigrations()
             ->hasViews()
@@ -64,6 +66,7 @@ class WatchtowerServiceProvider extends PackageServiceProvider
         $this->app->singleton(BlacklistService::class);
         $this->app->singleton(AutoBlockService::class);
         $this->app->singleton(HitWindow::class);
+        $this->app->singleton(OffenceLedger::class);
         // Singleton so the deny/allow patterns compile once per worker
         // rather than once per request.
         $this->app->singleton(UserAgentFilter::class);
