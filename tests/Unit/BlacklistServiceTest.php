@@ -122,6 +122,11 @@ it('counts only entries whose block has not expired', function () {
         'source' => BlockSource::Manual,
         'expires_at' => now()->subMinutes(5),
     ]);
+    BlacklistedIp::create([
+        'ip' => '9.9.9.3',
+        'source' => BlockSource::Manual,
+        'expires_at' => null,
+    ]);
 
-    expect($this->service->activeCount())->toBe(1);
+    expect($this->service->activeCount())->toBe(2);
 });

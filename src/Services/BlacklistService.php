@@ -78,9 +78,7 @@ class BlacklistService
      */
     public function activeCount(): int
     {
-        return BlacklistedIp::query()
-            ->where('expires_at', '>', now())
-            ->count();
+        return BlacklistedIp::active()->count();
     }
 
     /**
