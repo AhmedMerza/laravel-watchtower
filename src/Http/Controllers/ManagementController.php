@@ -62,7 +62,7 @@ class ManagementController extends Controller
         [$source, $state] = BlockFilters::fromRequest($request);
 
         $blocks = BlacklistedIp::filter($source, $state)
-            ->orderByDesc('created_at')
+            ->latestFirst()
             ->paginate(self::PER_PAGE)
             ->withQueryString();
 

@@ -10,6 +10,7 @@ use Watchtower\Enums\BlockSource;
 use Watchtower\Events\IpBlocked;
 use Watchtower\Models\BlacklistedIp;
 use Watchtower\Services\BlacklistCache;
+use Watchtower\Support\BlockFilters;
 
 beforeEach(function () {
     // Use the array cache store — real cache, no Redis-facade mocking.
@@ -247,9 +248,77 @@ describe('the block list', function () {
     it('survives an array where a filter should be', function () use ($make) {
         $make();
 
-        foreach (['source[]=auto', 'state[]=all', 'per_page[]=5'] as $query) {
+        foreach (['source[]=auto', 'state[]=all'] as $query) {
             $this->getJson('/logscope/watchtower/api/blocks?'.$query)->assertOk();
         }
+
+        // Not just "doesn't 500": (int) on a non-empty array is 1, so an
+        // unguarded cast turns this into one row per page rather than the
+        // default perPage()'s docblock promises.
+        $this->getJson('/logscope/watchtower/api/blocks?per_page[]=5')
+            ->assertOk()
+            ->assertJsonPath('per_page', 25);
+    });
+
+    it('pages through rows that tie on created_at without dropping or repeating one', function () use ($make) {
+        foreach (range(1, 12) as $ignored) {
+            $make();
+        }
+
+        // Every row in the same second. created_at is second-resolution and a
+        // sync push or an auto-block burst writes a batch inside one, so this
+        // is the ordinary case rather than a contrived one.
+        //
+        // This asserts paging stays complete; it does NOT prove the tiebreaker,
+        // because SQLite happens to return tied rows in rowid order and so
+        // passes without it. The guarantee itself is pinned by the next test,
+        // which reads the order clauses rather than trusting one driver.
+        BlacklistedIp::query()->update(['created_at' => now()->subMinute()]);
+
+        $seen = [];
+
+        foreach ([1, 2, 3] as $page) {
+            $seen = array_merge($seen, $this->getJson(
+                '/logscope/watchtower/api/blocks?per_page=5&page='.$page
+            )->assertOk()->json('data.*.ip'));
+        }
+
+        expect($seen)->toHaveCount(12)
+            ->and(array_unique($seen))->toHaveCount(12);
+    });
+
+    // Guards the drift between the vocabulary BlockFilters accepts and the
+    // arms scopeFilter actually implements: a state added to STATES with no
+    // matching arm falls through to `active`, and would otherwise look like a
+    // working filter that silently ignores what it was asked for.
+    // MySQL and Postgres give no order at all among rows tied on the sort
+    // column, so a page boundary landing inside a tied group can repeat a row
+    // or skip one. SQLite can't demonstrate that — it orders ties by rowid —
+    // so the guarantee is asserted where it's driver-independent: the clauses.
+    it('breaks created_at ties on the ULID, so paging is deterministic on any driver', function () {
+        expect(BlacklistedIp::query()->latestFirst()->getQuery()->orders)->toBe([
+            ['column' => 'created_at', 'direction' => 'desc'],
+            ['column' => 'id', 'direction' => 'desc'],
+        ]);
+    });
+
+    it('gives every state in BlockFilters::STATES its own meaning', function () use ($make) {
+        // Three distinct totals. Equal ones would let a state that silently
+        // fell through to `active` match the count it was supposed to differ
+        // from, and the fixture rather than the assertion would be deciding.
+        $make(['expires_at' => now()->subHour()]);
+        $make(['expires_at' => now()->subDay()]);
+        $make();
+
+        $totals = [];
+
+        foreach (BlockFilters::STATES as $state) {
+            $totals[$state] = $this->getJson('/logscope/watchtower/api/blocks?state='.$state)
+                ->assertOk()->json('total');
+        }
+
+        expect($totals)->toBe(['active' => 1, 'expired' => 2, 'all' => 3])
+            ->and(BlockFilters::STATES)->toHaveCount(3);
     });
 
     it('keeps the filters on the pagination links', function () use ($make) {

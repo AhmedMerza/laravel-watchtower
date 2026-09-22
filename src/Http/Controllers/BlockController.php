@@ -18,8 +18,12 @@ use Watchtower\Support\BlockScope;
 class BlockController extends Controller
 {
     /**
-     * Rows per page when the caller doesn't ask — the management page's own,
-     * so the two lists page the same way by default.
+     * Rows per page when the caller doesn't ask.
+     *
+     * The same 25 the management page uses, copied rather than shared: the
+     * page's number answers "enough to scan on a screen", this one answers
+     * "a sensible first page for a client", and there is no reason one
+     * moving should drag the other. Nothing enforces that they match.
      */
     private const PER_PAGE = 25;
 
@@ -107,7 +111,7 @@ class BlockController extends Controller
         [$source, $state] = BlockFilters::fromRequest($request);
 
         $blocks = BlacklistedIp::filter($source, $state)
-            ->orderByDesc('created_at')
+            ->latestFirst()
             ->paginate($this->perPage($request))
             ->withQueryString();
 
@@ -124,8 +128,14 @@ class BlockController extends Controller
      */
     private function perPage(Request $request): int
     {
-        $perPage = $request->integer('per_page');
+        $perPage = $request->input('per_page');
 
-        return $perPage < 1 ? self::PER_PAGE : min($perPage, self::MAX_PER_PAGE);
+        // is_numeric() before the cast, not $request->integer(): that casts
+        // through (int), and (int) on a non-empty array is 1 — so `per_page[]=5`
+        // would quietly mean one row per page rather than the default this
+        // docblock promises.
+        return is_numeric($perPage) && (int) $perPage >= 1
+            ? min((int) $perPage, self::MAX_PER_PAGE)
+            : self::PER_PAGE;
     }
 }
