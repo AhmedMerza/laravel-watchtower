@@ -96,7 +96,7 @@ it('counts the rejection against the address once the detector is armed', functi
 
     $this->autoBlock->shouldReceive('record')
         ->once()
-        ->with('bad_user_agent', '203.0.113.9', null)
+        ->with('bad_user_agent', '203.0.113.9', null, null)
         ->andReturn(false);
 
     expect($this->middleware->handle(uaRequest('sqlmap/1.8.2'), $this->next)->getStatusCode())->toBe(403);
@@ -110,7 +110,7 @@ it('counts against the network an IPv6 block would cover, not the bare address',
     // address survives canonicalisation on the way there.
     $this->autoBlock->shouldReceive('record')
         ->once()
-        ->with('bad_user_agent', '2001:db8::1', null)
+        ->with('bad_user_agent', '2001:db8::1', null, null)
         ->andReturn(false);
 
     $this->middleware->handle(uaRequest('sqlmap/1.8.2', '2001:0db8:0000::0001'), $this->next);
@@ -138,7 +138,7 @@ it('names the signed-in user, so the shared-IP guard can see them', function () 
     // dropped the id would leave the guard blind and nothing would fail.
     $this->autoBlock->shouldReceive('record')
         ->once()
-        ->with('bad_user_agent', '203.0.113.9', 42)
+        ->with('bad_user_agent', '203.0.113.9', 42, null)
         ->andReturn(false);
 
     $request = uaRequest('sqlmap/1.8.2');
@@ -155,7 +155,7 @@ it('prefers the address the blocking middleware already resolved', function () {
     // a stash nobody reads is a silent no-op.
     $this->autoBlock->shouldReceive('record')
         ->once()
-        ->with('bad_user_agent', '198.51.100.7', null)
+        ->with('bad_user_agent', '198.51.100.7', null, null)
         ->andReturn(false);
 
     $request = uaRequest('sqlmap/1.8.2');

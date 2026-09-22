@@ -53,7 +53,7 @@ class UserAgentMiddleware
             return $next($request);
         }
 
-        $normalized = $this->clientIp($request);
+        $normalized = BlockedIpMiddleware::clientIp($request);
 
         if ($normalized !== null && IpRange::covers((array) config('watchtower.never_block', []), $normalized)) {
             return $next($request);
@@ -69,29 +69,6 @@ class UserAgentMiddleware
         $this->report($reason, $agent, $normalized);
 
         return BlockResponse::make($request);
-    }
-
-    /**
-     * The canonical client address, taken from BlockedIpMiddleware when it
-     * ran ahead of us — which in the assembled stack it always does.
-     *
-     * Symfony recomputes getClientIps() on every call rather than memoising
-     * it, so asking again re-walks the trusted-proxy chain and re-parses
-     * X-Forwarded-For, then pays another inet_pton/inet_ntop round trip to
-     * canonicalise the same string into the same answer. The fallback is
-     * for this middleware used on its own, as the unit tests do.
-     */
-    private function clientIp(Request $request): ?string
-    {
-        $stashed = $request->attributes->get(BlockedIpMiddleware::CLIENT_IP);
-
-        if (is_string($stashed)) {
-            return $stashed;
-        }
-
-        $ip = $request->ip();
-
-        return $ip === null ? null : (IpRange::canonical($ip) ?? $ip);
     }
 
     /**
@@ -122,6 +99,7 @@ class UserAgentMiddleware
             'bad_user_agent',
             $ip,
             is_int($userId) || is_string($userId) ? $userId : null,
+            BlockedIpMiddleware::verdict($request),
         );
     }
 

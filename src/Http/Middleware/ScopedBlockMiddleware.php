@@ -46,7 +46,7 @@ class ScopedBlockMiddleware
             return $next($request);
         }
 
-        $ip = $this->clientIp($request);
+        $ip = BlockedIpMiddleware::clientIp($request);
 
         if ($ip === null) {
             return $next($request);
@@ -98,28 +98,6 @@ class ScopedBlockMiddleware
         }
 
         return $next($request);
-    }
-
-    /**
-     * The canonical client address BlockedIpMiddleware already resolved.
-     *
-     * Reading its attribute rather than re-deriving keeps the two middleware
-     * looking at the same address — Symfony recomputes getClientIps() on every
-     * call and a proxy config change mid-request would otherwise let them
-     * disagree. The fallback covers a route group that somehow runs without
-     * the global middleware, so this still enforces rather than failing open.
-     */
-    private function clientIp(Request $request): ?string
-    {
-        $resolved = $request->attributes->get(BlockedIpMiddleware::CLIENT_IP);
-
-        if (is_string($resolved) && $resolved !== '') {
-            return $resolved;
-        }
-
-        $ip = $request->ip();
-
-        return $ip === null ? null : (IpRange::canonical($ip) ?? $ip);
     }
 
     /**

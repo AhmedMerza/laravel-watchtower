@@ -119,7 +119,7 @@ class SignalDetectorMiddleware
      */
     private function record(string $detector, Request $request): bool
     {
-        $ip = $request->ip();
+        $ip = BlockedIpMiddleware::clientIp($request);
 
         if ($ip === null) {
             return false;
@@ -131,6 +131,7 @@ class SignalDetectorMiddleware
             $detector,
             $ip,
             is_int($userId) || is_string($userId) ? $userId : null,
+            BlockedIpMiddleware::verdict($request),
         );
     }
 }
