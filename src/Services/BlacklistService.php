@@ -73,6 +73,17 @@ class BlacklistService
     }
 
     /**
+     * Count currently-active blacklist entries (not yet expired),
+     * for the summary shown on the status dashboard.
+     */
+    public function activeCount(): int
+    {
+        return BlacklistedIp::query()
+            ->where('expires_at', '>', now())
+            ->count();
+    }
+
+    /**
      * Normalize an IP address to its canonical form.
      * Handles IPv4-mapped IPv6 addresses (e.g. ::ffff:1.2.3.4 → 1.2.3.4).
      */

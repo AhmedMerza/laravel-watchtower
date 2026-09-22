@@ -110,3 +110,18 @@ it('upserts rather than duplicating when blocking an already-blocked IP', functi
     $this->assertDatabaseCount('blacklisted_ips', 1);
     expect(BlacklistedIp::where('ip', '5.5.5.5')->first()->reason)->toBe('second');
 });
+
+it('counts only entries whose block has not expired', function () {
+    BlacklistedIp::create([
+        'ip' => '9.9.9.1',
+        'source' => BlockSource::Manual,
+        'expires_at' => now()->addMinutes(30),
+    ]);
+    BlacklistedIp::create([
+        'ip' => '9.9.9.2',
+        'source' => BlockSource::Manual,
+        'expires_at' => now()->subMinutes(5),
+    ]);
+
+    expect($this->service->activeCount())->toBe(1);
+});
