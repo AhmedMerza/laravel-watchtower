@@ -240,6 +240,18 @@ describe('the block list', function () {
             ->assertJsonPath('total', 1);
     });
 
+    // The is_string() guard in BlockFilters is load-bearing, not defensive
+    // decoration: without it an array reaches where('source', [...]) and the
+    // request 500s. A query string is attacker-shaped input on an endpoint
+    // whose whole job is answering questions about attackers.
+    it('survives an array where a filter should be', function () use ($make) {
+        $make();
+
+        foreach (['source[]=auto', 'state[]=all', 'per_page[]=5'] as $query) {
+            $this->getJson('/logscope/watchtower/api/blocks?'.$query)->assertOk();
+        }
+    });
+
     it('keeps the filters on the pagination links', function () use ($make) {
         foreach (range(1, 3) as $ignored) {
             $make(['source' => BlockSource::Auto]);
