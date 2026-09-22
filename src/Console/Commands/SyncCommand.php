@@ -7,6 +7,7 @@ namespace Watchtower\Console\Commands;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
+use Watchtower\Exceptions\NeverAutoBlockException;
 use Watchtower\Exceptions\NeverBlockException;
 use Watchtower\Services\BlacklistCache;
 use Watchtower\Services\BlacklistService;
@@ -59,6 +60,7 @@ class SyncCommand extends Command
             $written = [];
             $skipped = 0;
             $whitelisted = 0;
+            $autoRefused = 0;
 
             foreach ($blocks as $block) {
                 try {
@@ -77,7 +79,23 @@ class SyncCommand extends Command
                         'source_env' => $block['source_env'] ?? 'master',
                         'expires_at' => $block['expires_at'] ?? null,
                         'blocked_by' => $block['blocked_by'] ?? null,
+                        // The master's own row carries its source, so the
+                        // pull direction has always had this on the wire —
+                        // only the push payload needed a new field. A master
+                        // row that is itself `sync` came from a third node
+                        // and no longer knows what decided it, which reads
+                        // here as unknown, the same as a master too old to
+                        // send it (#56).
+                        'origin_source' => $block['source'] ?? null,
                     ], deferCache: true, announce: false);
+                } catch (NeverAutoBlockException) {
+                    // Refused because a RULE elsewhere decided it and this
+                    // node's never_auto_block covers the address. Counted
+                    // apart from never_block: an admin here could still
+                    // block it, so the two are not the same answer.
+                    $autoRefused++;
+
+                    continue;
                 } catch (NeverBlockException) {
                     // The master can block an address this environment has
                     // whitelisted; it does not get to write it here.
@@ -97,6 +115,7 @@ class SyncCommand extends Command
 
             $synced = count($written);
             $refused = $whitelisted === 0 ? '' : "; {$whitelisted} refused by never_block";
+            $refused .= $autoRefused === 0 ? '' : "; {$autoRefused} refused by never_auto_block";
 
             // rebuild() logs and swallows its own DB failure, so ask it. The
             // middleware reads only the cache, so write what was just synced
@@ -112,7 +131,9 @@ class SyncCommand extends Command
                 return self::FAILURE;
             }
 
-            $this->info("Synced {$synced} IPs from master ({$skipped} skipped — local manual/auto blocks preserved{$refused}). Redis cache rebuilt.");
+            // "live" is the guarantee, not decoration: a lapsed local row used
+            // to be counted here too, while preserving nothing (#74).
+            $this->info("Synced {$synced} IPs from master ({$skipped} skipped — live local manual/auto blocks preserved{$refused}). Redis cache rebuilt.");
 
             return self::SUCCESS;
 
