@@ -58,6 +58,14 @@ class AutoBlockService
      *                                   from, when there is one, so the
      *                                   shared-IP guard can tell a carrier
      *                                   gateway from one bad actor.
+     * @param  bool|null  $blocked  whether this address is already blocked
+     *                              app-wide, when the caller already knows.
+     *                              BlockedIpMiddleware resolves it for every
+     *                              request and stashes it — see
+     *                              BlockedIpMiddleware::BLOCKED — so passing
+     *                              it saves repeating two cache reads on a
+     *                              path an attacker sets the pace of. Null
+     *                              means look it up.
      * @return bool whether the address is blocked APP-WIDE now — the
      *              scanner-path detector answers the request itself when it
      *              is. A detector with a scope never returns true, because
@@ -65,7 +73,7 @@ class AutoBlockService
      *              block must only be enforced by the route middleware
      *              carrying its scope.
      */
-    public function record(string $detector, string $ip, int|string|null $userId = null): bool
+    public function record(string $detector, string $ip, int|string|null $userId = null, ?bool $blocked = null): bool
     {
         // Fail open, the way BlockedIpMiddleware does. This runs inside the
         // request — in middleware, and in an event listener inside the auth
@@ -74,7 +82,7 @@ class AutoBlockService
         // best-effort layer on top of the app; it is never worth the app
         // itself. Losing a few counts during an outage is the right trade.
         try {
-            return $this->detect($detector, $ip, $userId);
+            return $this->detect($detector, $ip, $userId, $blocked);
         } catch (\Throwable $e) {
             $this->reportDetectorFailure($e);
 
@@ -86,7 +94,7 @@ class AutoBlockService
      * Count one signal and decide. See record(), which is this behind a
      * fail-open guard.
      */
-    private function detect(string $detector, string $ip, int|string|null $userId): bool
+    private function detect(string $detector, string $ip, int|string|null $userId, ?bool $blocked = null): bool
     {
         if (! config('watchtower.auto_block.enabled', false)) {
             return false;
@@ -116,7 +124,11 @@ class AutoBlockService
         // Already blocked: don't count, and don't block again. A blocked
         // scanner keeps knocking, and re-blocking on every knock would
         // restart the duration each time and never let it lapse.
-        if ($this->blacklist->isBlocked($ip)) {
+        //
+        // $blocked is the answer BlockedIpMiddleware already paid for on this
+        // request; asking again repeats both of its cache reads for a value
+        // that can only have changed in the microseconds since.
+        if ($blocked ?? $this->blacklist->isBlocked($ip)) {
             return true;
         }
 
@@ -211,9 +223,6 @@ class AutoBlockService
         int $windowMinutes,
         int $sharedIpThreshold,
     ): bool {
-        // Read before clearing below — forget() drops the user set too.
-        $users = $this->hits->users($detector, $counted);
-
         // Whatever is decided below, this crossing has been answered, so the
         // count starts again. Clearing here rather than only on a successful
         // block is what stops a held-back detector re-reporting per request:
@@ -226,7 +235,11 @@ class AutoBlockService
         // `count` signals instead, the same cadence a rule reports at once
         // per tick. Blocking clears it for its own reason too: a lapsed
         // block shouldn't re-fire on the very next signal.
-        $this->hits->forget($detector, $counted);
+        //
+        // close() hands back the users seen in the window it is closing, so
+        // they are read before they are dropped rather than in a separate
+        // call that has to be kept above this one.
+        $users = $this->hits->close($detector, $counted);
 
         $reason = sprintf(
             'Auto-blocked: %s reached %d in %d min',

@@ -6,6 +6,8 @@ namespace Watchtower\Listeners;
 
 use Illuminate\Auth\Events\Failed;
 use Illuminate\Auth\Events\Lockout;
+use Illuminate\Http\Request;
+use Watchtower\Http\Middleware\BlockedIpMiddleware;
 use Watchtower\Services\AutoBlockService;
 
 /**
@@ -27,12 +29,12 @@ class DetectAuthFailures
 
     public function handleFailed(Failed $event): void
     {
-        $this->record('failed_logins', request()->ip());
+        $this->record('failed_logins', request());
     }
 
     public function handleLockout(Lockout $event): void
     {
-        $this->record('login_lockouts', $event->request->ip());
+        $this->record('login_lockouts', $event->request);
     }
 
     /**
@@ -53,13 +55,17 @@ class DetectAuthFailures
      * log-based guard documents — and never_auto_block is the answer for a
      * known office or carrier range.
      */
-    private function record(string $detector, ?string $ip): void
+    private function record(string $detector, ?Request $request): void
     {
+        $ip = $request === null ? null : BlockedIpMiddleware::clientIp($request);
+
         // No request behind the event (a console login, a queued job).
         if ($ip === null) {
             return;
         }
 
-        $this->autoBlock->record($detector, $ip);
+        // These fire inside the route, so BlockedIpMiddleware has already
+        // run and its verdict is on the request — see its BLOCKED constant.
+        $this->autoBlock->record($detector, $ip, null, BlockedIpMiddleware::verdict($request));
     }
 }
