@@ -328,16 +328,35 @@ it('streams an address whose history spans many keyset pages', function () {
         DB::table('log_entries')->insert($chunk);
     }
 
-    $before = memory_get_usage();
-    $result = ($this->run)(['count' => 2000, 'window_minutes' => 5]);
-    $used = memory_get_usage() - $before;
+    // Count the paging queries rather than measuring memory. An earlier
+    // version of this test asserted a `memory_get_usage()` delta and was
+    // FLAKY: that delta includes the PDO result buffer, the query log and
+    // whatever the previous test left for the collector, none of which this
+    // code controls — it passed locally and on eight CI cells, then failed
+    // on the ninth under a different random order seed (6.0MB against a 4MB
+    // ceiling). Query count is deterministic and tests the thing that
+    // actually matters here: that the walk pages instead of fetching 2500
+    // rows at once, and that it terminates rather than looping on a keyset
+    // it cannot advance.
+    //
+    // The memory bound is structural, not measured: the buffer is a fixed
+    // `array_fill(0, $threshold, 0)` that never grows.
+    $pages = 0;
 
-    // The point of the ring buffer: it holds `count` timestamps, not the
-    // 2500 rows it walked past. If the stream ever collects rows instead of
-    // yielding them, this is what notices.
+    DB::listen(function ($query) use (&$pages): void {
+        if (str_contains($query->sql, 'order by') && str_contains($query->sql, 'limit')) {
+            $pages++;
+        }
+    });
+
+    $result = ($this->run)(['count' => 2000, 'window_minutes' => 5]);
+
+    // 2500 rows at a 1000-row page size: two full pages and a short one that
+    // ends the walk. Fewer means rows were skipped; more means it is not
+    // stopping on a short page.
     expect($result['offenders'])->toHaveCount(1)
         ->and($result['offenders'][0]['blocks'])->toBe(1)
-        ->and($used)->toBeLessThan(4 * 1024 * 1024);
+        ->and($pages)->toBe(3);
 });
 
 /*
