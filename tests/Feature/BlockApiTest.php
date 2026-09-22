@@ -109,8 +109,7 @@ describe('the block list', function () {
     // A row per call, so a test can say how many blocks exist without
     // repeating the same five keys each time.
     $make = function (array $attributes = []): BlacklistedIp {
-        static $n = 0;
-        $n++;
+        $n = BlacklistedIp::count() + 1;
 
         return BlacklistedIp::create($attributes + [
             'ip'         => "10.0.0.{$n}",
