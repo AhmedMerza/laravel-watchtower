@@ -71,6 +71,26 @@ class BlacklistedIp extends Model
     }
 
     /**
+     * Newest first, with the tiebreak that makes paging safe.
+     *
+     * `created_at` is a second-resolution timestamp, and a sync push or an
+     * auto-block burst writes several rows inside one second — so ordering on
+     * it alone leaves tied rows free to swap places between the query that
+     * builds page 1 and the query that builds page 2. A tied row then appears
+     * on both pages, or on neither, and a client enumerating the list by
+     * following `next_page_url` silently misses blocks.
+     *
+     * The id is a ULID: unique, and already time-ordered, so as a tiebreaker
+     * it settles ties without changing the order anyone actually sees. Same
+     * reasoning as `watchtower:simulate`'s keyset paging on `(occurred_at,
+     * id)`, for the same reason — this table ties on a timestamp constantly.
+     */
+    public function scopeLatestFirst(Builder $query): Builder
+    {
+        return $query->orderByDesc('created_at')->orderByDesc('id');
+    }
+
+    /**
      * The management list's filters.
      *
      * Kept on the model rather than in the controller so that exposing the
