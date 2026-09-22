@@ -4,6 +4,8 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-22
+
 ### Added
 
 - **`watchtower:simulate` backtests the auto-block rules against the log history you already have, so you can see what a rule would have done last week instead of arming it and waiting.** `warn` mode is the honest way to try a rule out and it costs days — set it, wait, read logs. Watchtower can skip the waiting because LogScope kept the history the rule would have read; no other Laravel firewall package can do this for the plain reason that none of them has the data. `php artisan watchtower:simulate --days=7` reports, per rule, which addresses would have been blocked, when, and how many times, how many distinct signed-in users each address showed, and — the number that should actually stop you — how many requests came from that address carrying a signed-in user and never matched the rule at all. Those are people doing nothing wrong who would have lost access anyway. It also flags what the shared-IP guard would have done to each address, computed against the window the live guard would really have read rather than the period as a whole, so it doesn't predict downgrades that wouldn't happen. `--rule=N` narrows to one rule and `--json` is for CI. It reports every configured rule regardless of `auto_block.enabled` or a rule's `mode`, because deciding those is the reason to run it. ([#24](https://github.com/AhmedMerza/laravel-watchtower/issues/24))
@@ -172,7 +174,8 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 - **There is no transitional `ahmedmerza/logscope-guard` package.** It has been removed from Packagist. To upgrade, `composer remove ahmedmerza/logscope-guard`, `composer require ahmedmerza/watchtower`, then work through the BREAKING entries under Changed.
 
-[Unreleased]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.2.1...v0.3.0

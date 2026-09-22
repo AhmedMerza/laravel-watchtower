@@ -107,7 +107,7 @@ Without LogScope, the management page and API both refuse every request outside 
 
 ## ⬆️ Upgrading
 
-Upgrading an existing install needs three things. Each is covered in full in the [CHANGELOG](CHANGELOG.md); this is the short version.
+Upgrading an existing install needs three things, plus one more if you read the API from a script. Each is covered in full in the [CHANGELOG](CHANGELOG.md); this is the short version.
 
 **1. Run the migrations.** Recent releases added the `scope` column on `blacklisted_ips` and the `ip_offences` table that escalating durations use:
 
@@ -129,6 +129,8 @@ WATCHTOWER_AUTO_BLOCK_MODE=block
 Nothing changes for anyone who already set a mode explicitly, per rule or globally. The reasoning: a rule is written from a guess about traffic nobody has looked at yet, and the cost of guessing wrong is locking real users out — so a new rule reports before it acts. That is the right default for a fresh install and a surprise for an existing one, which is why it is here.
 
 **3. Attack-tool User-Agent rejection is on by default.** Also since **v0.4.0**: a request whose `User-Agent` names sqlmap, Nikto, WPScan, masscan or zgrab is rejected. If you run any of those against your own site from CI or a pentest box, add its address to `WATCHTOWER_NEVER_BLOCK_IPS` or its `User-Agent` to `user_agents.allow` before upgrading — or set `WATCHTOWER_USER_AGENT_FILTER=false`. It rejects the request only and never blocks the address.
+
+**4. ⚠️ `GET /api/blocks` is paginated, so `data` is no longer the whole list.** Since **v0.6.0**, it returns one page (25 rows by default) inside Laravel's paginator body rather than every active block in one array. A script that read `data` as the complete blocklist now silently sees only the first page. Read `total` and follow `next_page_url`, or raise `?per_page=` up to 100. The default filter is still `state=active`, so the first page holds the rows it always did — see [Listing Blocks](#listing-blocks). Nothing else changed shape: `POST /api/block`, `DELETE /api/block/{ip}` and `GET /api/status/{ip}` are untouched.
 
 ---
 
