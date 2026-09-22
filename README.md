@@ -532,7 +532,19 @@ WATCHTOWER_NEVER_AUTO_BLOCK_IPS=203.0.113.0/24,2001:db8:2::/48
 
 `never_auto_block` binds automation only — **an admin can still block a listed address by hand**, through the UI or the API. That is the whole difference from `never_block`, which nothing can override. Use `never_auto_block` for "a rule would be right about this traffic and wrong about the people behind it", and `never_block` for "never, under any circumstances".
 
-> ⚠️ **It does not survive sync.** The list is applied where the automated decision is made. A block that a *satellite* decided arrives here as a synced block, not an automated one, and this node's `never_auto_block` is not consulted — the sync payload doesn't carry where the block came from, so the receiving node can't tell an admin's block from a rule's. `never_block` is enforced on every block a sync applies, in both directions, and is the list to use when an address must survive one. Tracked in [#56](https://github.com/AhmedMerza/laravel-watchtower/issues/56).
+**It survives sync in both directions.** The sync payload carries what decided
+each block, so a receiving node applies its own `never_auto_block` to a block
+another environment's *rule* made, while still accepting one an admin there
+made by hand — which is the distinction the list exists for. `never_block` is
+enforced on every synced block regardless, as it always was.
+
+> ⚠️ **One node at a time, during an upgrade.** A satellite running a version
+> older than 0.6.0 doesn't send that field, and a node that can't tell what
+> decided a block treats it as unknown rather than as automation — so an old
+> satellite keeps syncing exactly as it does today, and its admins' manual
+> blocks keep working. `never_auto_block` starts covering that satellite's
+> automated blocks once it is upgraded. `watchtower:sync` counts what it turns
+> away as `refused by never_auto_block`, separately from `never_block`.
 
 ### Escalating durations
 

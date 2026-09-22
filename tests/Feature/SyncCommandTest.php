@@ -6,6 +6,7 @@ use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Str;
 use Watchtower\Enums\BlockSource;
 use Watchtower\Events\IpBlocked;
 use Watchtower\Models\BlacklistedIp;
@@ -276,4 +277,129 @@ it('does not copy the master\'s log_entry_id into the local row', function () {
     // names a request the satellite never saw — and the management page links
     // a block to it.
     $this->assertDatabaseHas('blacklisted_ips', ['ip' => '1.2.3.4', 'log_entry_id' => null]);
+});
+
+/*
+|--------------------------------------------------------------------------
+| The pull direction of #56 and #74.
+|--------------------------------------------------------------------------
+*/
+
+/** A master response carrying one block, with its fields overridable. */
+function masterBlocks(array $block = []): void
+{
+    Http::fake([
+        'master.example.com/watchtower/sync/blocks' => Http::response([
+            'data' => [array_merge([
+                'ip'         => '5.6.7.8',
+                'reason'     => 'Brute force',
+                'source_env' => 'master',
+                'source'     => 'auto',
+                'expires_at' => null,
+            ], $block)],
+        ], 200),
+    ]);
+}
+
+it('refuses a pulled block that the master\'s automation decided, when never_auto_block covers it', function () {
+    config()->set('watchtower.never_auto_block', ['5.6.7.8']);
+    masterBlocks();
+
+    $this->artisan('watchtower:sync')
+        ->assertSuccessful()
+        ->expectsOutputToContain('refused by never_auto_block');
+
+    expect(BlacklistedIp::where('ip', '5.6.7.8')->exists())->toBeFalse();
+});
+
+it('applies a pulled block an admin made, even when never_auto_block covers it', function () {
+    config()->set('watchtower.never_auto_block', ['5.6.7.8']);
+    masterBlocks(['source' => 'manual']);
+
+    $this->artisan('watchtower:sync')->assertSuccessful();
+
+    expect(BlacklistedIp::where('ip', '5.6.7.8')->exists())->toBeTrue();
+});
+
+it('treats a master too old to send a source as unknown, not as automation', function () {
+    config()->set('watchtower.never_auto_block', ['5.6.7.8']);
+    masterBlocks(['source' => null]);
+
+    $this->artisan('watchtower:sync')->assertSuccessful();
+
+    expect(BlacklistedIp::where('ip', '5.6.7.8')->exists())->toBeTrue();
+});
+
+it('lets a pulled block replace a lapsed local one, and stops counting it as preserved', function () {
+    BlacklistedIp::create([
+        'id'         => (string) Str::ulid(),
+        'ip'         => '5.6.7.8',
+        'reason'     => 'lapsed local block',
+        'source'     => BlockSource::Manual,
+        'source_env' => 'local',
+        'scope'      => '',
+        'expires_at' => now()->subHour(),
+    ]);
+
+    masterBlocks(['source' => 'manual']);
+
+    $this->artisan('watchtower:sync')
+        ->assertSuccessful()
+        ->expectsOutputToContain('Synced 1 IPs from master (0 skipped');
+
+    expect(BlacklistedIp::where('ip', '5.6.7.8')->first()->source)->toBe(BlockSource::Sync);
+});
+
+it('counts every bucket correctly when one pull hits all of them at once', function () {
+    // Each counter had a test of its own, but none crossed: a pull that
+    // produces a synced block, a preserved live local one, a never_block
+    // refusal and a never_auto_block refusal in the SAME run is where the
+    // arithmetic and the message concatenation can disagree.
+    config()->set('watchtower.never_block', ['10.0.0.3']);
+    config()->set('watchtower.never_auto_block', ['10.0.0.4']);
+
+    BlacklistedIp::create([
+        'id'         => (string) Str::ulid(),
+        'ip'         => '10.0.0.2',
+        'reason'     => 'live local block',
+        'source'     => BlockSource::Manual,
+        'source_env' => 'local',
+        'scope'      => '',
+        'expires_at' => now()->addHour(),
+    ]);
+
+    Http::fake([
+        'master.example.com/watchtower/sync/blocks' => Http::response([
+            'data' => [
+                ['ip' => '10.0.0.1', 'source' => 'manual', 'source_env' => 'master', 'expires_at' => null],
+                ['ip' => '10.0.0.2', 'source' => 'manual', 'source_env' => 'master', 'expires_at' => null],
+                ['ip' => '10.0.0.3', 'source' => 'manual', 'source_env' => 'master', 'expires_at' => null],
+                ['ip' => '10.0.0.4', 'source' => 'auto', 'source_env' => 'master', 'expires_at' => null],
+            ],
+        ], 200),
+    ]);
+
+    $this->artisan('watchtower:sync')
+        ->assertSuccessful()
+        ->expectsOutputToContain('Synced 1 IPs from master (1 skipped — live local manual/auto blocks preserved; 1 refused by never_block; 1 refused by never_auto_block)');
+
+    // 1 written + 1 skipped + 1 never_block + 1 never_auto_block = the 4 pulled.
+    expect(BlacklistedIp::where('ip', '10.0.0.1')->first()->source)->toBe(BlockSource::Sync)
+        ->and(BlacklistedIp::where('ip', '10.0.0.2')->first()->reason)->toBe('live local block')
+        ->and(BlacklistedIp::where('ip', '10.0.0.3')->exists())->toBeFalse()
+        ->and(BlacklistedIp::where('ip', '10.0.0.4')->exists())->toBeFalse();
+});
+
+it('treats a relayed block from the master as unknown, not as automation', function () {
+    // A master row whose own source is `sync` came from a third node and no
+    // longer knows what decided it. 'sync' is NOT 'auto' — reading it as
+    // automation is a plausible-looking "fix" (both mean "no admin here"),
+    // and it would start refusing every block that travelled two hops, which
+    // is the normal shape of a fleet with more than two environments.
+    config()->set('watchtower.never_auto_block', ['5.6.7.8']);
+    masterBlocks(['source' => 'sync']);
+
+    $this->artisan('watchtower:sync')->assertSuccessful();
+
+    expect(BlacklistedIp::where('ip', '5.6.7.8')->exists())->toBeTrue();
 });

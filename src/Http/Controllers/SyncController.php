@@ -7,6 +7,9 @@ namespace Watchtower\Http\Controllers;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
+use Illuminate\Validation\Rule;
+use Watchtower\Enums\BlockSource;
+use Watchtower\Exceptions\NeverAutoBlockException;
 use Watchtower\Exceptions\NeverBlockException;
 use Watchtower\Models\BlacklistedIp;
 use Watchtower\Rules\BlockTarget;
@@ -53,6 +56,20 @@ class SyncController extends Controller
             'source_env' => ['nullable', 'string', 'max:50'],
             'expires_at' => ['nullable', 'date'],
             'blocked_by' => ['nullable', 'string', 'max:255'],
+            // Optional on purpose: a satellite that predates #56 doesn't send
+            // it, and must keep syncing exactly as it does today rather than
+            // failing validation the moment this master is upgraded.
+            //
+            // Manual or Auto only, not the whole enum. PushBlockToMaster
+            // returns early on a Sync record, so no honest sender can produce
+            // a third value here, and the wire contract should say what it
+            // actually accepts. Rule::in over the backed values rather than
+            // Rule::enum()->only(), which is newer than the oldest Laravel
+            // this package supports.
+            'source'     => ['nullable', 'string', Rule::in([
+                BlockSource::Manual->value,
+                BlockSource::Auto->value,
+            ])],
         ]);
 
         try {
@@ -65,7 +82,13 @@ class SyncController extends Controller
                 'source_env' => $validated['source_env'] ?? 'unknown',
                 'expires_at' => isset($validated['expires_at']) ? now()->parse($validated['expires_at']) : null,
                 'blocked_by' => $validated['blocked_by'] ?? null,
+                'origin_source' => $validated['source'] ?? null,
             ]);
+        } catch (NeverAutoBlockException $e) {
+            // Caught before its parent so the satellite is told WHICH list
+            // refused it: never_auto_block leaves the door open to an admin
+            // here, and never_block does not. Same status either way.
+            return response()->json(['error' => $e->getMessage()], 422);
         } catch (NeverBlockException $e) {
             // never_block on the master wins over a satellite's opinion.
             return response()->json(['error' => $e->getMessage()], 422);

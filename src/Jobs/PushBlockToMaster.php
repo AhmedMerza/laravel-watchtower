@@ -66,6 +66,12 @@ class PushBlockToMaster implements ShouldQueue
                 // so limit(…, 500) returns 503 and fails the master's rule.
                 : Str::limit($this->record->reason, self::REASON_LIMIT - 3),
             'source_env' => app()->environment(),
+            // What decided this block HERE, so the master can apply its own
+            // never_auto_block to a rule's decision without also refusing an
+            // admin's. A Sync record is never pushed onward, so this is only
+            // ever 'manual' or 'auto'. A master too old to know the field
+            // ignores it (#56).
+            'source'     => $this->record->source->value,
             'expires_at' => $this->record->expires_at?->toIso8601String(),
             'blocked_by' => $this->record->blocked_by,
         ];

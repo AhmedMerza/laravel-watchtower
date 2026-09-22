@@ -53,9 +53,9 @@ class BlacklistService
         // The string form is resolved first because the model's enum cast
         // accepts one, so `'source' => 'auto'` persists as an auto block
         // while a strict enum comparison would wave it past this guard.
-        // Note this does NOT cover BlockSource::Sync — an auto block made on
-        // another node arrives here as Sync and is not re-evaluated. See the
-        // sync caveat in the README.
+        // A block arriving from another node does not come through here at
+        // all — applySync() is its one entry point, and it applies this same
+        // list against the `origin_source` the sender now reports (#56).
         $source = $options['source'] ?? BlockSource::Manual;
 
         if (is_string($source)) {
@@ -124,10 +124,14 @@ class BlacklistService
      * This is not block() because four things about a block that arrived from
      * somewhere else are decided differently:
      *
-     * - never_auto_block is not consulted. The payload doesn't say whether a
-     *   rule or an admin made the block, so the receiving node can't tell one
-     *   from the other. never_block still applies, and is the list to use
-     *   when an address must survive a sync. See the README caveat (#56).
+     * - never_auto_block is consulted only when the sender SAYS the block was
+     *   automated, via `origin_source`. The list means "automation may not
+     *   touch this, an admin still may", so applying it to every incoming
+     *   record would also refuse a satellite admin's deliberate block — the
+     *   one thing the list is meant to allow. A payload without the field is
+     *   a node that predates it, and is treated as unknown rather than as
+     *   automated: upgrading one node must never start silently refusing
+     *   another's admin decisions (#56).
      * - The scope is always global. The wire format has no scope field, so
      *   there is nothing else this could write; `scope` joins it in #37.
      * - An incoming record never downgrades a local manual or auto block.
@@ -142,7 +146,7 @@ class BlacklistService
      * satellite never saw. The pull path used to copy it in, where it
      * resolved to nothing.
      *
-     * @param  array{reason?: string|null, source_env?: string|null, expires_at?: mixed, blocked_by?: string|null}  $attributes
+     * @param  array{reason?: string|null, source_env?: string|null, expires_at?: mixed, blocked_by?: string|null, origin_source?: string|null}  $attributes  origin_source is what the SENDING node recorded — 'auto' is the only value that changes anything here, and null means the sender is too old to say.
      * @param  bool  $deferCache  Skip this record's cache write, for a caller that rebuilds once for a whole run. watchtower:sync pulls the entire list, and write() pays for a full rebuild on every range in it. A caller that defers owns the rebuild.
      * @param  bool  $announce  Whether to fire IpBlocked, and with it the webhook. True on the push path and false on the pull, which is what keeps a block announced once — by the environment that received it, not again by every satellite that later replicates it. That contract is documented under "Webhook Notification"; without it a satellite's first pull would post its whole inherited blocklist. **Do not announce while also deferring the cache.** The event would then say an address is blocked while the middleware, which reads only the cache, still lets it through — for however long the caller takes to rebuild. A caller that defers owns the announcement as well, once its cache is in place.
      * @return array{applied: bool, record: BlacklistedIp} applied is false when a local manual or auto block was kept, and record is that local row
@@ -156,6 +160,16 @@ class BlacklistService
         // refuses to block, whether or not it already holds a row for it.
         $this->assertBlockable($ip);
 
+        // Only when the sender says a rule made this. NeverAutoBlockException
+        // extends NeverBlockException, so a caller that catches the parent
+        // still refuses the block — it just can't tell the operator which
+        // list did it. Both sync callers catch this one first for that reason.
+        if (($attributes['origin_source'] ?? null) === BlockSource::Auto->value && $this->isNeverAutoBlock($ip)) {
+            throw new NeverAutoBlockException(
+                "{$this->normalizeIp($ip)} is in the never-auto-block list; another environment's automation cannot block it here, but an admin can."
+            );
+        }
+
         $target = $this->normalizeTarget($ip);
 
         // Scoped to the global row, the only row this can write. Matching any
@@ -164,8 +178,22 @@ class BlacklistService
         // refuse a legitimate app-wide block; and on the write it would find
         // that scoped row and turn a block on a handful of routes into an
         // app-wide one.
+        // active(), because the rule protects a decision that is IN FORCE, and
+        // a lapsed row is a receipt rather than a decision. Without this, a
+        // local block that expired an hour ago — whose row watchtower:cleanup
+        // has not swept yet — still turned away the master's live block, for
+        // up to a day on a daily cleanup schedule. The master considered the
+        // address blocked, this node did not block it, and the run reported
+        // the disagreement as "local blocks preserved" (#74).
+        //
+        // find() and pick() in this same service already ignore expired rows;
+        // this guard was the one place treating a dead row as a live one.
+        //
+        // The write below still matches on (ip, scope) without the filter, so
+        // it updates that lapsed row rather than colliding with it.
         $existing = BlacklistedIp::where('ip', $target)
             ->where('scope', BlockScope::GLOBAL)
+            ->active()
             ->first();
 
         if ($existing !== null && $existing->source !== BlockSource::Sync) {
