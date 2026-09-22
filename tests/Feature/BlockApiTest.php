@@ -104,24 +104,154 @@ it('returns the correct status for an unblocked IP', function () {
         ->assertJsonPath('blocked', false);
 });
 
-it('returns the full list of active blocks', function () {
-    BlacklistedIp::create(['ip' => '1.1.1.1', 'source' => BlockSource::Manual, 'source_env' => 'testing']);
-    BlacklistedIp::create(['ip' => '2.2.2.2', 'source' => BlockSource::Auto, 'source_env' => 'testing']);
+describe('the block list', function () {
+    // A row per call, so a test can say how many blocks exist without
+    // repeating the same five keys each time.
+    $make = function (array $attributes = []): BlacklistedIp {
+        static $n = 0;
+        $n++;
 
-    $response = $this->getJson('/logscope/watchtower/api/blocks');
+        return BlacklistedIp::create($attributes + [
+            'ip'         => "10.0.0.{$n}",
+            'source'     => BlockSource::Manual,
+            'source_env' => 'testing',
+        ]);
+    };
 
-    $response->assertStatus(200)
-        ->assertJsonCount(2, 'data');
-});
+    it('lists active blocks', function () use ($make) {
+        $make();
+        $make(['source' => BlockSource::Auto]);
 
-it('does not return expired blocks in the list', function () {
-    BlacklistedIp::create(['ip' => '1.1.1.1', 'source' => BlockSource::Manual, 'source_env' => 'testing', 'expires_at' => now()->subHour()]);
-    BlacklistedIp::create(['ip' => '2.2.2.2', 'source' => BlockSource::Manual, 'source_env' => 'testing', 'expires_at' => now()->addHour()]);
+        $this->getJson('/logscope/watchtower/api/blocks')
+            ->assertOk()
+            ->assertJsonCount(2, 'data')
+            ->assertJsonPath('total', 2);
+    });
 
-    $response = $this->getJson('/logscope/watchtower/api/blocks');
+    it('does not return expired blocks', function () use ($make) {
+        $make(['expires_at' => now()->subHour()]);
+        $make(['expires_at' => now()->addHour()]);
 
-    $response->assertStatus(200)
-        ->assertJsonCount(1, 'data');
+        $this->getJson('/logscope/watchtower/api/blocks')
+            ->assertOk()
+            ->assertJsonCount(1, 'data')
+            ->assertJsonPath('total', 1);
+    });
+
+    it('paginates rather than returning every block at once', function () use ($make) {
+        foreach (range(1, 30) as $ignored) {
+            $make();
+        }
+
+        // 30 rows, a 25-row default page: the second page holds the rest.
+        $this->getJson('/logscope/watchtower/api/blocks')
+            ->assertOk()
+            ->assertJsonCount(25, 'data')
+            ->assertJsonPath('total', 30)
+            ->assertJsonPath('per_page', 25)
+            ->assertJsonPath('current_page', 1)
+            ->assertJsonPath('last_page', 2);
+
+        $this->getJson('/logscope/watchtower/api/blocks?page=2')
+            ->assertOk()
+            ->assertJsonCount(5, 'data')
+            ->assertJsonPath('current_page', 2);
+    });
+
+    it('lets a caller choose the page size', function () use ($make) {
+        $make();
+        $make();
+        $make();
+
+        $this->getJson('/logscope/watchtower/api/blocks?per_page=2')
+            ->assertOk()
+            ->assertJsonCount(2, 'data')
+            ->assertJsonPath('per_page', 2)
+            ->assertJsonPath('total', 3);
+    });
+
+    it('caps the page size, so per_page cannot restore the unbounded query', function () use ($make) {
+        $make();
+
+        $this->getJson('/logscope/watchtower/api/blocks?per_page=100000')
+            ->assertOk()
+            ->assertJsonPath('per_page', 100);
+    });
+
+    it('falls back to the default page size rather than erroring on a junk per_page', function () use ($make) {
+        $make();
+
+        foreach (['abc', '0', '-5', ''] as $junk) {
+            $this->getJson('/logscope/watchtower/api/blocks?per_page='.$junk)
+                ->assertOk()
+                ->assertJsonPath('per_page', 25);
+        }
+    });
+
+    it('filters by source', function () use ($make) {
+        $make();
+        $make(['source' => BlockSource::Auto]);
+        $make(['source' => BlockSource::Auto]);
+
+        $this->getJson('/logscope/watchtower/api/blocks?source=auto')
+            ->assertOk()
+            ->assertJsonCount(2, 'data')
+            ->assertJsonPath('total', 2);
+    });
+
+    it('filters by state', function () use ($make) {
+        $make(['expires_at' => now()->subHour()]);
+        $make(['expires_at' => now()->subDay()]);
+        $make();
+
+        $this->getJson('/logscope/watchtower/api/blocks?state=expired')
+            ->assertOk()
+            ->assertJsonPath('total', 2);
+
+        $this->getJson('/logscope/watchtower/api/blocks?state=all')
+            ->assertOk()
+            ->assertJsonPath('total', 3);
+    });
+
+    it('combines the source and state filters', function () {
+        BlacklistedIp::create(['ip' => '10.1.0.1', 'source' => BlockSource::Auto, 'source_env' => 'testing', 'expires_at' => now()->subHour()]);
+        BlacklistedIp::create(['ip' => '10.1.0.2', 'source' => BlockSource::Auto, 'source_env' => 'testing', 'expires_at' => now()->subDay()]);
+        BlacklistedIp::create(['ip' => '10.1.0.3', 'source' => BlockSource::Manual, 'source_env' => 'testing', 'expires_at' => now()->subHour()]);
+        BlacklistedIp::create(['ip' => '10.1.0.4', 'source' => BlockSource::Auto, 'source_env' => 'testing']);
+        BlacklistedIp::create(['ip' => '10.1.0.5', 'source' => BlockSource::Manual, 'source_env' => 'testing']);
+
+        $response = $this->getJson('/logscope/watchtower/api/blocks?source=auto&state=expired');
+
+        // The addresses, not the count: dropping either filter returns a
+        // different set, but not always a differently sized one.
+        $response->assertOk();
+        expect($response->json('data.*.ip'))->toEqualCanonicalizing(['10.1.0.1', '10.1.0.2']);
+    });
+
+    // The management page's own rule, now shared: a hand-edited query string
+    // shouldn't be an error page on the tool you reach for when something is
+    // wrong, so an unreadable filter lists active blocks instead of 422ing.
+    it('ignores an unrecognised filter rather than refusing the request', function () use ($make) {
+        $make();
+        $make(['expires_at' => now()->subHour()]);
+
+        $this->getJson('/logscope/watchtower/api/blocks?source=nonsense&state=nonsense')
+            ->assertOk()
+            ->assertJsonPath('total', 1);
+    });
+
+    it('keeps the filters on the pagination links', function () use ($make) {
+        foreach (range(1, 3) as $ignored) {
+            $make(['source' => BlockSource::Auto]);
+        }
+
+        $response = $this->getJson('/logscope/watchtower/api/blocks?source=auto&per_page=2');
+
+        $response->assertOk();
+        expect($response->json('next_page_url'))
+            ->toContain('source=auto')
+            ->toContain('per_page=2');
+    });
 });
 
 describe('ranges', function () {

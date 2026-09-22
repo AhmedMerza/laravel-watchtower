@@ -12,10 +12,20 @@ use Watchtower\Exceptions\NeverBlockException;
 use Watchtower\Models\BlacklistedIp;
 use Watchtower\Rules\BlockRules;
 use Watchtower\Services\BlacklistService;
+use Watchtower\Support\BlockFilters;
 use Watchtower\Support\BlockScope;
 
 class BlockController extends Controller
 {
+    /**
+     * Rows per page when the caller doesn't ask — the management page's own,
+     * so the two lists page the same way by default.
+     */
+    private const PER_PAGE = 25;
+
+    /** The most a caller can ask for in one page. */
+    private const MAX_PER_PAGE = 100;
+
     public function __construct(private readonly BlacklistService $service) {}
 
     public function block(Request $request): JsonResponse
@@ -80,10 +90,42 @@ class BlockController extends Controller
         ]);
     }
 
-    public function index(): JsonResponse
+    /**
+     * The block list, paginated and filtered.
+     *
+     * Takes the same `source` and `state` the management page does, through
+     * the same normalisation, so the two lists cannot answer the same
+     * question differently.
+     *
+     * This used to return every active block in one array. That is fine for
+     * the LogScope panel, which asks about one address, and not something a
+     * client can page through — so `data` is now one page of rows, with
+     * Laravel's own pagination metadata beside it.
+     */
+    public function index(Request $request): JsonResponse
     {
-        $blocks = BlacklistedIp::active()->orderByDesc('created_at')->get();
+        [$source, $state] = BlockFilters::fromRequest($request);
 
-        return response()->json(['data' => $blocks]);
+        $blocks = BlacklistedIp::filter($source, $state)
+            ->orderByDesc('created_at')
+            ->paginate($this->perPage($request))
+            ->withQueryString();
+
+        return response()->json($blocks);
+    }
+
+    /**
+     * Rows per page: the caller's, within a ceiling.
+     *
+     * The ceiling is half the point of paginating at all — without it
+     * `?per_page=1000000` is the unbounded query this endpoint used to be,
+     * spelled differently. A missing or unreadable value takes the default
+     * rather than erroring, for the reason BlockFilters gives.
+     */
+    private function perPage(Request $request): int
+    {
+        $perPage = $request->integer('per_page');
+
+        return $perPage < 1 ? self::PER_PAGE : min($perPage, self::MAX_PER_PAGE);
     }
 }

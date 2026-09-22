@@ -16,6 +16,7 @@ use Watchtower\Exceptions\NeverBlockException;
 use Watchtower\Models\BlacklistedIp;
 use Watchtower\Rules\BlockRules;
 use Watchtower\Services\BlacklistService;
+use Watchtower\Support\BlockFilters;
 use Watchtower\Support\BlockScope;
 
 /**
@@ -27,8 +28,8 @@ use Watchtower\Support\BlockScope;
  * when an asset fails to load. It is also why the filters live in the query
  * string: they survive a bookmark, a refresh and a redirect after a block.
  *
- * The JSON API in BlockController is unchanged and stays the integration
- * surface; this page shares its services and its validation rules, not its
+ * The JSON API in BlockController stays the integration surface; this page
+ * shares its services, its validation rules and its list filters, not its
  * endpoints.
  */
 class ManagementController extends Controller
@@ -54,14 +55,11 @@ class ManagementController extends Controller
         'permanent' => null,
     ];
 
-    /** @var list<string> */
-    private const STATES = ['active', 'expired', 'all'];
-
     public function __construct(private readonly BlacklistService $service) {}
 
     public function index(Request $request): View
     {
-        [$source, $state] = $this->filters($request);
+        [$source, $state] = BlockFilters::fromRequest($request);
 
         $blocks = BlacklistedIp::filter($source, $state)
             ->orderByDesc('created_at')
@@ -183,27 +181,6 @@ class ManagementController extends Controller
     }
 
     /**
-     * The filters a request is asking for, whether it carried them in the
-     * query string (the list) or as hidden fields (a form posting back).
-     *
-     * An unrecognised value is ignored rather than refused: a hand-edited
-     * query string shouldn't be an error page on the tool you reach for when
-     * something is wrong.
-     *
-     * @return array{0: string|null, 1: string}
-     */
-    private function filters(Request $request): array
-    {
-        $source = $request->input('source');
-        $source = is_string($source) && BlockSource::tryFrom($source) !== null ? $source : null;
-
-        $state = $request->input('state');
-        $state = is_string($state) && in_array($state, self::STATES, true) ? $state : 'active';
-
-        return [$source, $state];
-    }
-
-    /**
      * A redirect to the list the request came from, keeping its filters.
      *
      * An explicit route, never `back()`: Laravel's `back()` prefers the
@@ -213,7 +190,7 @@ class ManagementController extends Controller
      */
     private function backToList(Request $request, bool $keepPage = false): RedirectResponse
     {
-        [$source, $state] = $this->filters($request);
+        [$source, $state] = BlockFilters::fromRequest($request);
 
         $parameters = array_filter([
             'source' => $source,
