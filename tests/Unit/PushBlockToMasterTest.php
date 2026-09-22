@@ -113,3 +113,39 @@ it('logs a warning on final failure via failed()', function () {
 
     (new PushBlockToMaster($this->record))->failed(new RuntimeException('connection refused'));
 });
+
+/*
+|--------------------------------------------------------------------------
+| The outbound half of #56.
+|--------------------------------------------------------------------------
+|
+| The master's never_auto_block decision is only as good as this field. The
+| receiving side had tests from the start; the SENDING side had none, so
+| deleting this one array entry left all 583 tests green — the producer was
+| never asserted, only the consumer.
+*/
+
+it('tells the master that a rule made this block', function () {
+    Http::fake(['master.example.com/watchtower/sync/block' => Http::response(['ok' => true], 200)]);
+
+    $auto = BlacklistedIp::create([
+        'ip'         => '9.8.7.6',
+        'reason'     => 'Brute force',
+        'source'     => BlockSource::Auto,
+        'source_env' => 'staging',
+    ]);
+
+    (new PushBlockToMaster($auto))->handle();
+
+    Http::assertSent(fn ($request): bool => $request['source'] === 'auto');
+});
+
+it('tells the master that an admin made this block', function () {
+    // The other half of the same guarantee: the master must be able to tell
+    // these apart, or never_auto_block either refuses everything or nothing.
+    Http::fake(['master.example.com/watchtower/sync/block' => Http::response(['ok' => true], 200)]);
+
+    (new PushBlockToMaster($this->record))->handle();
+
+    Http::assertSent(fn ($request): bool => $request['source'] === 'manual');
+});

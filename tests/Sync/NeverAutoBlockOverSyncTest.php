@@ -82,3 +82,14 @@ it('does not apply never_auto_block to an address that is not on the list', func
 
     expect(BlacklistedIp::where('ip', '1.2.3.4')->first()->source)->toBe(BlockSource::Sync);
 });
+
+it('refuses a pushed `sync` source, which no honest satellite can produce', function () {
+    // PushBlockToMaster returns early on a Sync record, so a satellite never
+    // relays a block it received. The push contract is manual-or-auto, and
+    // validation now says so rather than accepting a third value it has no
+    // meaning for. The PULL direction is different — see the relayed-origin
+    // test in SyncCommandTest, where a master's own row really can be `sync`.
+    postSigned($this, pushBody(['source' => 'sync']))->assertStatus(422);
+
+    expect(BlacklistedIp::where('ip', '5.6.7.8')->exists())->toBeFalse();
+});

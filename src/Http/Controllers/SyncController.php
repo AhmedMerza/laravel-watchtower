@@ -59,7 +59,17 @@ class SyncController extends Controller
             // Optional on purpose: a satellite that predates #56 doesn't send
             // it, and must keep syncing exactly as it does today rather than
             // failing validation the moment this master is upgraded.
-            'source'     => ['nullable', 'string', Rule::enum(BlockSource::class)],
+            //
+            // Manual or Auto only, not the whole enum. PushBlockToMaster
+            // returns early on a Sync record, so no honest sender can produce
+            // a third value here, and the wire contract should say what it
+            // actually accepts. Rule::in over the backed values rather than
+            // Rule::enum()->only(), which is newer than the oldest Laravel
+            // this package supports.
+            'source'     => ['nullable', 'string', Rule::in([
+                BlockSource::Manual->value,
+                BlockSource::Auto->value,
+            ])],
         ]);
 
         try {

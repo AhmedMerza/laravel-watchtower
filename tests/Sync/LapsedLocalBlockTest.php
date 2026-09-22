@@ -114,3 +114,34 @@ it('does not let a lapsed local block hide a never_auto_block refusal', function
 
     expect(BlacklistedIp::where('ip', '5.6.7.8')->first()->reason)->toBe('lapsed local block');
 });
+
+it('applies the lapsed-row exemption to an IPv6 address too', function () {
+    // The guard queries normalizeTarget($ip) — a single IPv6 address widened
+    // to its /64 — while the allow-lists ask about the raw address. Nothing
+    // proved the exemption still works once the stored target and the
+    // incoming address stop being the same string.
+    $prefix = '2001:db8:1:1::/64';
+
+    BlacklistedIp::create([
+        'id'         => (string) Str::ulid(),
+        'ip'         => $prefix,
+        'reason'     => 'lapsed local block',
+        'source'     => BlockSource::Manual,
+        'source_env' => 'local',
+        'scope'      => '',
+        'expires_at' => now()->subHour(),
+    ]);
+
+    postSigned($this, (string) json_encode([
+        'ip'         => '2001:db8:1:1::5',
+        'reason'     => 'Master says so',
+        'source_env' => 'satellite-eu',
+    ]))->assertOk()->assertJsonPath('applied', true);
+
+    $row = BlacklistedIp::where('ip', $prefix)->first();
+
+    expect($row)->not->toBeNull()
+        ->and($row->source)->toBe(BlockSource::Sync)
+        ->and($row->reason)->toBe('Master says so')
+        ->and(BlacklistedIp::count())->toBe(1);
+});
