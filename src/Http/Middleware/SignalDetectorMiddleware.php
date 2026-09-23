@@ -6,10 +6,10 @@ namespace Watchtower\Http\Middleware;
 
 use Closure;
 use Illuminate\Http\Request;
-use Illuminate\Support\Str;
 use Symfony\Component\HttpFoundation\Response;
 use Watchtower\Services\AutoBlockService;
 use Watchtower\Support\BlockResponse;
+use Watchtower\Support\PathMatcher;
 
 /**
  * The two detectors that read the request itself.
@@ -42,14 +42,13 @@ class SignalDetectorMiddleware
 
     public function handle(Request $request, Closure $next): Response
     {
-        $patterns = $this->scannerPatterns();
-
-        // decodedPath() so `/%2Eenv` is caught the same as `/.env`, and
-        // ignoreCase because Str::is() — and so $request->is() — is
-        // case-sensitive by default, while scanners vary case precisely to
-        // slip past naive matching. `/WP-ADMIN/setup-config.php` is the
-        // same probe as `/wp-admin/setup-config.php`.
-        if ($patterns !== [] && Str::is($patterns, $request->decodedPath(), true)) {
+        // decodedPath() so `/%2Eenv` is caught the same as `/.env`. Case is
+        // folded inside the matcher, because Str::is() — and so
+        // $request->is() — is case-sensitive by default, while scanners vary
+        // case precisely to slip past naive matching.
+        // `/WP-ADMIN/setup-config.php` is the same probe as
+        // `/wp-admin/setup-config.php`.
+        if (PathMatcher::matchesAny($this->scannerPatterns(), $request->decodedPath())) {
             // Answer the probe ourselves rather than letting it through and
             // blocking only the next one. The default patterns hit nothing
             // real, but the list is configurable, and a pattern that does
@@ -89,10 +88,14 @@ class SignalDetectorMiddleware
     }
 
     /**
-     * The configured scanner patterns, as ->is() wants them: no leading
-     * slash. They read better in config with one, so accept either.
+     * The configured scanner patterns, exactly as they sit in config.
      *
-     * @return list<string>
+     * Handed over raw rather than normalised here: PathMatcher strips the
+     * leading slash while it compiles, and keys its memo on this array, so
+     * rebuilding a normalised copy per request would both duplicate that work
+     * and hand the memo a fresh array to miss on every time.
+     *
+     * @return array<mixed>
      */
     private function scannerPatterns(): array
     {
@@ -102,10 +105,7 @@ class SignalDetectorMiddleware
             return [];
         }
 
-        return array_values(array_map(
-            static fn ($pattern): string => ltrim((string) $pattern, '/'),
-            (array) ($settings['patterns'] ?? []),
-        ));
+        return (array) ($settings['patterns'] ?? []);
     }
 
     /**
