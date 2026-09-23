@@ -147,6 +147,31 @@ final class IpRange
         return false;
     }
 
+    /**
+     * covers(), for entries that have already been canonicalised.
+     *
+     * The request path asks the never_block question up to three times per
+     * request from three different middleware, and canonicalising an entry is
+     * an inet_pton/inet_ntop round trip — so a caller that holds a stable list
+     * parses it once and matches against it here. `covers()` stays the entry
+     * point for a list that arrives raw, and keeps its parse-as-you-go
+     * short-circuit for the single-entry lookups BlacklistService does.
+     *
+     * @param  list<string>  $entries  canonical, malformed ones already dropped
+     */
+    public static function coversCanonical(array $entries, string $canonical): bool
+    {
+        [$address, $length] = self::split($canonical);
+
+        foreach ($entries as $entry) {
+            if (self::split($entry)[1] <= $length && IpUtils::checkIp($address, $entry)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     /** Clear every bit of a packed address past the first $length. */
     private static function mask(string $packed, int $length): string
     {

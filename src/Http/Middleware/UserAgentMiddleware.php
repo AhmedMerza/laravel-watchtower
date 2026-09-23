@@ -11,7 +11,7 @@ use Symfony\Component\HttpFoundation\Response;
 use Watchtower\Services\AutoBlockService;
 use Watchtower\Services\UserAgentFilter;
 use Watchtower\Support\BlockResponse;
-use Watchtower\Support\IpRange;
+use Watchtower\Support\NeverBlockList;
 
 /**
  * Turns away requests whose User-Agent names a known attack tool.
@@ -55,7 +55,7 @@ class UserAgentMiddleware
 
         $normalized = BlockedIpMiddleware::clientIp($request);
 
-        if ($normalized !== null && IpRange::covers((array) config('watchtower.never_block', []), $normalized)) {
+        if ($normalized !== null && NeverBlockList::neverBlock($normalized)) {
             return $next($request);
         }
 

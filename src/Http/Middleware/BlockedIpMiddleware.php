@@ -12,6 +12,7 @@ use Watchtower\Services\BlacklistCache;
 use Watchtower\Support\BlockResponse;
 use Watchtower\Support\FailureWindow;
 use Watchtower\Support\IpRange;
+use Watchtower\Support\NeverBlockList;
 
 class BlockedIpMiddleware
 {
@@ -102,7 +103,7 @@ class BlockedIpMiddleware
 
         // Never block whitelisted IPs or ranges — check before the cache to
         // guarantee safety, so they win over any block that covers them.
-        if (IpRange::covers((array) config('watchtower.never_block', []), $normalized)) {
+        if (NeverBlockList::neverBlock($normalized)) {
             return $next($request);
         }
 

@@ -12,7 +12,7 @@ use Watchtower\Services\BlacklistCache;
 use Watchtower\Support\BlockResponse;
 use Watchtower\Support\BlockScope;
 use Watchtower\Support\FailureWindow;
-use Watchtower\Support\IpRange;
+use Watchtower\Support\NeverBlockList;
 
 /**
  * Turns away an address blocked in one scope, on the routes that carry it.
@@ -55,7 +55,7 @@ class ScopedBlockMiddleware
         // Never block whitelisted IPs or ranges — checked before the cache,
         // and before any scope is consulted, so the guarantee `never_block`
         // makes is the same one on every route.
-        if (IpRange::covers((array) config('watchtower.never_block', []), $ip)) {
+        if (NeverBlockList::neverBlock($ip)) {
             return $next($request);
         }
 
