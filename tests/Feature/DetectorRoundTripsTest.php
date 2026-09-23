@@ -85,8 +85,30 @@ it('skips the user-set delete when the traffic was anonymous', function () {
     expect($this->store->opsMatching(':scanner_paths:'))->toBe([
         'add hits:scanner_paths:203.0.113.42',
         'increment hits:scanner_paths:203.0.113.42',
+        'get notional:scanner_paths:203.0.113.42',
         'get users:scanner_paths:203.0.113.42',
         'forget hits:scanner_paths:203.0.113.42',
+    ]);
+});
+
+it('costs a held address nothing past the hit and the hold it is serving', function () {
+    config()->set('watchtower.auto_block.mode', 'warn');
+    config()->set('watchtower.auto_block.detectors.scanner_paths.count', 1);
+
+    // The first probe crosses, reports, and opens the notional block.
+    $this->withServerVariables(['REMOTE_ADDR' => '203.0.113.44'])->get('/.env');
+    $this->store->ops = [];
+
+    // The second pays the counter it was always going to pay, then one read
+    // that says "already decided" and ends it. No user read, no close, no log
+    // write — the ~4 operations per probe issue #71 measured at ~1,030 a day,
+    // which a real block would never have let happen at all.
+    $this->withServerVariables(['REMOTE_ADDR' => '203.0.113.44'])->get('/.env');
+
+    expect($this->store->opsMatching(':scanner_paths:'))->toBe([
+        'add hits:scanner_paths:203.0.113.44',
+        'increment hits:scanner_paths:203.0.113.44',
+        'get notional:scanner_paths:203.0.113.44',
     ]);
 });
 

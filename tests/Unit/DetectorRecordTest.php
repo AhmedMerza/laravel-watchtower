@@ -128,6 +128,51 @@ it('warns instead of blocking when enough signed-in users share the address', fu
     $this->assertDatabaseMissing('blacklisted_ips', ['ip' => '198.51.100.7']);
 });
 
+it('re-measures a shared address instead of holding the verdict', function () {
+    config()->set('watchtower.auto_block.shared_ip_user_threshold', 3);
+
+    $logChannel = Mockery::mock()->shouldIgnoreMissing();
+    // Twice, not once. A detector holds a decision it was stopped from
+    // enforcing for as long as the block would have run, so a dry run reports
+    // one entry per block it predicts — but `warn` mode and never_auto_block
+    // are settings that will say the same thing in an hour, and the number of
+    // signed-in users an address is showing is not. Holding this one would
+    // turn a guard an attacker has to keep re-earning into an hour of
+    // immunity bought once.
+    $logChannel->shouldReceive('warning')
+        ->twice()
+        ->withArgs(fn (string $m, array $c): bool => ($c['not_blocked_because'] ?? null) === 'shared IP');
+    Log::shouldReceive('channel')->andReturn($logChannel);
+
+    foreach ([7, 8, 9, 7, 8, 9] as $userId) {
+        $this->service->record('failed_logins', '198.51.100.11', $userId);
+    }
+
+    $this->assertDatabaseMissing('blacklisted_ips', ['ip' => '198.51.100.11']);
+});
+
+it('blocks a formerly-shared address as soon as its users stop appearing', function () {
+    config()->set('watchtower.auto_block.shared_ip_user_threshold', 3);
+    Log::shouldReceive('channel')->andReturn(Mockery::mock()->shouldIgnoreMissing());
+
+    foreach ([7, 8, 9] as $userId) {
+        $this->service->record('failed_logins', '198.51.100.12', $userId);
+    }
+
+    $this->assertDatabaseMissing('blacklisted_ips', ['ip' => '198.51.100.12']);
+
+    // The same address, now anonymous. Holding the shared-IP verdict the way
+    // a warn-mode one is held would have left this address untouchable for
+    // block_duration_minutes on the strength of three accounts that showed up
+    // once — which is the attack the README says this guard does not stop.
+    // Re-measuring blocks it on the very next crossing.
+    foreach (range(1, 3) as $i) {
+        $this->service->record('failed_logins', '198.51.100.12');
+    }
+
+    $this->assertDatabaseHas('blacklisted_ips', ['ip' => '198.51.100.12']);
+});
+
 it('still blocks when the same volume comes from one signed-in user', function () {
     config()->set('watchtower.auto_block.shared_ip_user_threshold', 3);
 

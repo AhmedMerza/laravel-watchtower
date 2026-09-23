@@ -248,20 +248,20 @@ it('never lets a failed login hand an identity to the shared-IP guard', function
     $this->assertDatabaseHas('blacklisted_ips', ['ip' => '203.0.113.34']);
 });
 
-it('reports a held-back detector once per threshold crossing, not once per matching request', function () {
+it('reports a held-back detector once per block it predicts, not once per threshold crossing', function () {
     config()->set('watchtower.auto_block.mode', 'warn');
     config()->set('watchtower.auto_block.detectors.response_bursts.count', 3);
 
     $logChannel = Mockery::mock()->shouldIgnoreMissing();
-    // Nine matching requests at a threshold of three: three reports. Warn
-    // mode never blocks, so without resetting the counter on the decision
-    // the count would sit at or above the threshold and re-report on every
-    // request from the third onwards — seven lines here, and thousands
-    // during a real burst. That is both a disk-filling handle for an
-    // unauthenticated attacker and the fastest way to drown the dry run
-    // warn mode exists for.
+    // Nine matching requests at a threshold of three. Closing the window on
+    // each crossing bounds this at three; a real block would have stopped the
+    // traffic at the first, so the dry run reports once and holds that
+    // decision for as long as the block would have run. The distinction is
+    // the whole point of warn mode: a line per crossing describes traffic
+    // arming would have prevented, and at `count => 1` — which scanner_paths
+    // ships — a crossing is every single request.
     $logChannel->shouldReceive('warning')
-        ->times(3)
+        ->once()
         ->withArgs(fn (string $m, array $c): bool => ($c['detector'] ?? null) === 'response_bursts');
     Log::shouldReceive('channel')->andReturn($logChannel);
 
@@ -270,4 +270,61 @@ it('reports a held-back detector once per threshold crossing, not once per match
     }
 
     $this->assertDatabaseMissing('blacklisted_ips', ['ip' => '203.0.113.35']);
+});
+
+it('reports again once the block it was predicting would have lapsed', function () {
+    config()->set('watchtower.auto_block.mode', 'warn');
+    config()->set('watchtower.auto_block.block_duration_minutes', 30);
+
+    $logChannel = Mockery::mock()->shouldIgnoreMissing();
+    $logChannel->shouldReceive('warning')
+        ->twice()
+        ->withArgs(fn (string $m, array $c): bool => ($c['detector'] ?? null) === 'scanner_paths');
+    Log::shouldReceive('channel')->andReturn($logChannel);
+
+    // Reports, then holds.
+    $this->withServerVariables(['REMOTE_ADDR' => '203.0.113.36'])->get('/.env');
+    $this->travel(29)->minutes();
+    $this->withServerVariables(['REMOTE_ADDR' => '203.0.113.36'])->get('/.env');
+
+    // Past the duration a real block would have carried, the address is back
+    // — so the dry run says so again rather than staying quiet for good.
+    $this->travel(2)->minutes();
+    $this->withServerVariables(['REMOTE_ADDR' => '203.0.113.36'])->get('/.env');
+});
+
+it('arms on the very next request rather than serving out the dry run hold', function () {
+    config()->set('watchtower.auto_block.mode', 'warn');
+
+    $this->withServerVariables(['REMOTE_ADDR' => '203.0.113.37'])->get('/.env');
+    $this->assertDatabaseMissing('blacklisted_ips', ['ip' => '203.0.113.37']);
+
+    // The hold from the dry run is still live. Arming is an operator changing
+    // their mind about this exact address, so it must not spend up to
+    // block_duration_minutes silently declining to act on it — which is why
+    // the hold records the mode it was opened under.
+    config()->set('watchtower.auto_block.mode', 'block');
+
+    $this->withServerVariables(['REMOTE_ADDR' => '203.0.113.37'])->get('/.env');
+    $this->assertDatabaseHas('blacklisted_ips', ['ip' => '203.0.113.37']);
+});
+
+it('holds a never_auto_block address after one refusal, in block mode too', function () {
+    config()->set('watchtower.never_auto_block', ['203.0.113.39']);
+
+    $logChannel = Mockery::mock()->shouldIgnoreMissing();
+    // never_auto_block is a standing refusal, so nothing ever takes the
+    // address away from the detector the way a block does. Every probe used
+    // to be refused afresh and write its own line — in block mode as much as
+    // in warn, which is why this hold is not conditioned on the mode.
+    $logChannel->shouldReceive('warning')
+        ->once()
+        ->withArgs(fn (string $m, array $c): bool => ($c['not_blocked_because'] ?? null) === 'never_auto_block');
+    Log::shouldReceive('channel')->andReturn($logChannel);
+
+    foreach (range(1, 5) as $i) {
+        $this->withServerVariables(['REMOTE_ADDR' => '203.0.113.39'])->get('/.env');
+    }
+
+    $this->assertDatabaseMissing('blacklisted_ips', ['ip' => '203.0.113.39']);
 });

@@ -32,6 +32,18 @@ class AutoBlockService
      */
     public const DEFAULT_SHARED_IP_USER_THRESHOLD = 3;
 
+    /**
+     * The hold-back holdBack() reports for a shared address, and the reason
+     * the `not_blocked_because` log key carries for one.
+     *
+     * A constant because three places now turn on this exact answer and not
+     * on the others: the scoped downgrade, and the detector hold that
+     * deliberately excludes it. It is the one hold-back that is a live
+     * measurement rather than a standing setting, so the two that treat it
+     * specially have to agree on which one it is.
+     */
+    private const HELD_BY_SHARED_IP = 'shared IP';
+
     public function __construct(
         private readonly BlacklistService $blacklist,
         private readonly HitWindow $hits,
@@ -223,18 +235,43 @@ class AutoBlockService
         int $windowMinutes,
         int $sharedIpThreshold,
     ): bool {
+        // This detector has already decided about this address and was held
+        // back from enforcing it. Honour that decision for as long as the
+        // block would have lasted, the way the isBlocked() check in detect()
+        // honours a real one: a blocked scanner never reaches the counter at
+        // all, so a dry run that keeps re-deciding is not predicting what
+        // arming would do — it is describing traffic a real block would have
+        // stopped.
+        //
+        // Checked here, past the threshold, rather than before the counter:
+        // a `response_bursts` signal that is 12 of 40 must stay two cache
+        // operations, and putting this in front of hit() would have added a
+        // third to every one of them — undoing on the loosest, highest-volume
+        // detector what was just won on all of them. Here it is paid only by
+        // a signal that already crossed, and it replaces strictly more than
+        // it costs: the close(), the user read and the log write below.
+        //
+        // Leaving the counter running is deliberate too. It decays on its own
+        // window, and not clearing it means nothing is written for a held
+        // address beyond the hit it was already paying for.
+        if ($this->hits->underNotionalBlock($detector, $counted, $mode)) {
+            return false;
+        }
+
         // Whatever is decided below, this crossing has been answered, so the
-        // count starts again. Clearing here rather than only on a successful
-        // block is what stops a held-back detector re-reporting per request:
-        // warn mode never blocks, so a counter left sitting at its threshold
-        // would re-decide — and re-log — on every matching request for the
-        // rest of the window. A scanner sending thousands would write
-        // thousands of near-identical lines, which is both a disk-filling
-        // handle for an unauthenticated attacker and the fastest way to
-        // drown the dry run warn mode exists for. It now reports once per
-        // `count` signals instead, the same cadence a rule reports at once
-        // per tick. Blocking clears it for its own reason too: a lapsed
-        // block shouldn't re-fire on the very next signal.
+        // count starts again. Blocking clears it so a lapsed block doesn't
+        // re-fire on the very next signal; a held-back decision clears it so
+        // a counter left sitting at its threshold doesn't re-decide on every
+        // matching request for the rest of the window.
+        //
+        // That second reason only ever amortised by `count`, though, and
+        // `scanner_paths` ships `count => 1` deliberately — a single request
+        // for /.env is not a mistake, and accumulating before blocking would
+        // both serve the matched request and hand an attacker room to game
+        // the shared-IP guard. A divisor of 1 is no divisor: every probe
+        // crossed, closed and logged. What actually bounds the repeat rate
+        // is the notional block opened below, which keeps the address away
+        // from the detector the way a real block would have.
         //
         // close() hands back the users seen in the window it is closing, so
         // they are read before they are dropped rather than in a separate
@@ -260,16 +297,46 @@ class AutoBlockService
             'user_ids'       => $users,
         ];
 
-        return $this->blockOrReport(
+        $durationMinutes = (int) config('watchtower.auto_block.block_duration_minutes', 60);
+
+        $heldBy = $this->blockOrReport(
             $ip,
             $reason,
             $mode,
             $scope,
             count($users),
             $sharedIpThreshold,
-            (int) config('watchtower.auto_block.block_duration_minutes', 60),
+            $durationMinutes,
             $context,
         );
+
+        // Reported, not enforced. Hold the decision for as long as the block
+        // would have run, so a dry run reads as one entry per block it
+        // predicts rather than one per request, and so an address automation
+        // is refused permission to touch stops costing a decision per probe.
+        //
+        // NOT for the shared-IP guard, which is the one hold-back that is a
+        // live measurement rather than a standing setting. `warn` mode and
+        // never_auto_block are config: they will say the same thing in an
+        // hour, so honouring them for an hour changes nothing. How many
+        // signed-in users an address is showing changes minute to minute, and
+        // holding that answer would convert a guard an attacker has to keep
+        // re-earning — three accounts live in a one-minute window, for
+        // response_bursts — into an hour of immunity bought once. The README
+        // is explicit that this guard is not a control an adversary respects;
+        // that is a reason to leave it re-measured, not to make it stickier.
+        // It also needs no hold: it cannot fire at `count => 1`, where at
+        // most the current request's own user is known, so the detector this
+        // issue is about never reaches it.
+        //
+        // The flat duration, never the escalated one: escalatedMinutes() is
+        // only consulted past every hold-back, because a near miss is not an
+        // offence and must not lengthen anything.
+        if ($heldBy !== null && $heldBy !== self::HELD_BY_SHARED_IP) {
+            $this->hits->openNotionalBlock($detector, $counted, $mode, max(1, $durationMinutes) * 60);
+        }
+
+        return $heldBy === null;
     }
 
     /**
@@ -281,7 +348,12 @@ class AutoBlockService
      * is the duplication issue #38 is open about, one table over.
      *
      * @param  array<string, mixed>  $context
-     * @return bool whether the address ended up blocked
+     * @return string|null why the address did NOT end up blocked, or null if
+     *                     it did. The detector path holds a reported decision
+     *                     for the span the block would have run, and which
+     *                     hold-back produced it decides whether it may — see
+     *                     blockDetected(). A caller that only needs the
+     *                     outcome compares against null.
      */
     private function blockOrReport(
         string $ip,
@@ -292,7 +364,7 @@ class AutoBlockService
         int $sharedIpThreshold,
         int $durationMinutes,
         array $context,
-    ): bool {
+    ): ?string {
         $notBlockedBecause = $this->holdBack($mode, $distinctUsers, $sharedIpThreshold);
 
         // A shared address on a scoped rule is the case scopes exist for.
@@ -305,7 +377,7 @@ class AutoBlockService
         // stay one, or arming nothing would start blocking. never_auto_block
         // is a refusal about an address, not a decision about reach, and it
         // is enforced in BlacklistService::block() regardless.
-        $downgraded = $notBlockedBecause === 'shared IP' && $scope !== BlockScope::GLOBAL;
+        $downgraded = $notBlockedBecause === self::HELD_BY_SHARED_IP && $scope !== BlockScope::GLOBAL;
 
         if ($downgraded) {
             $notBlockedBecause = null;
@@ -314,7 +386,7 @@ class AutoBlockService
         if ($notBlockedBecause !== null) {
             $this->logWouldHaveBlocked($ip, $reason, $notBlockedBecause, $distinctUsers, $context);
 
-            return false;
+            return $notBlockedBecause;
         }
 
         // Only past every hold-back, and never before: a warn-mode dry run
@@ -339,12 +411,12 @@ class AutoBlockService
             // worth the same visibility as any other near miss.
             $this->logWouldHaveBlocked($ip, $reason, 'never_auto_block', $distinctUsers, $context);
 
-            return false;
+            return 'never_auto_block';
         } catch (NeverBlockException) {
             Log::channel(config('watchtower.log_channel', 'stack'))
                 ->debug('Watchtower: auto-block skipped for whitelisted IP', ['ip' => $ip]);
 
-            return false;
+            return 'never_block';
         }
 
         if ($downgraded) {
@@ -362,7 +434,9 @@ class AutoBlockService
                 ]);
         }
 
-        return true;
+        // Nothing held it back — including the downgraded case, which is a
+        // real block narrowed to a scope rather than a near miss.
+        return null;
     }
 
     /**
@@ -439,7 +513,7 @@ class AutoBlockService
     {
         return match (true) {
             $mode === 'warn' => 'warn mode',
-            $sharedIpThreshold > 0 && $distinctUsers >= $sharedIpThreshold => 'shared IP',
+            $sharedIpThreshold > 0 && $distinctUsers >= $sharedIpThreshold => self::HELD_BY_SHARED_IP,
             default => null,
         };
     }

@@ -10,13 +10,18 @@ use Illuminate\Support\Facades\Cache;
 /**
  * Per-IP hit counting for the real-time detectors, in a decaying window.
  *
- * Two kinds of key, both under the configured cache prefix and both
- * decaying with the detector's own window:
+ * Three kinds of key, all under the configured cache prefix:
  *
- * - `{prefix}:hits:{detector}:{ip}` — the counter.
+ * - `{prefix}:hits:{detector}:{ip}` — the counter, decaying with the
+ *   detector's own window.
  * - `{prefix}:users:{detector}:{ip}` — the signed-in users seen from that
  *   address while it was accumulating hits, which is what the shared-IP
- *   guard reads for detectors that have no log table to query.
+ *   guard reads for detectors that have no log table to query. Decays with
+ *   the same window.
+ * - `{prefix}:notional:{detector}:{ip}` — a block this detector decided on
+ *   and did not get to enforce, decaying with the duration that block
+ *   would have lasted rather than with the window. See
+ *   openNotionalBlock().
  *
  * Nothing here is written for traffic that doesn't match a detector: an
  * address only gets a counter once it has already done something a
@@ -172,6 +177,46 @@ class HitWindow
         }
 
         return $seen;
+    }
+
+    /**
+     * Record that this detector decided to block an address and did not get
+     * to — warn mode, the shared-IP guard, or a never_* refusal — so the
+     * decision can be honoured for as long as the block would have lasted.
+     *
+     * A real block takes the address away from the detector entirely:
+     * AutoBlockService::detect() returns at its isBlocked() check before
+     * counting anything. Nothing did that for a decision that was only
+     * reported, so the address kept arriving, kept crossing the threshold
+     * and kept being reported — once per `count` signals, which for a
+     * detector shipping `count => 1` is once per request.
+     *
+     * The mode is the stored value rather than part of the key so that
+     * arming a detector takes effect on the very next request: a hold
+     * opened under `warn` doesn't answer for `block`, and the address is
+     * counted and blocked for real instead of serving out a dry run's
+     * silence. The residue is narrower and deliberate — a hold opened in
+     * `block` mode by the shared-IP guard stands until it lapses even if
+     * the address's user count drops in the meantime, which is a heuristic
+     * guard erring towards the people behind the address.
+     */
+    public function openNotionalBlock(string $detector, string $ip, string $mode, int $seconds): void
+    {
+        $this->cache()->put($this->key('notional', $detector, $ip), $mode, max(1, $seconds));
+    }
+
+    /**
+     * Whether a block this detector already decided on is still notionally
+     * in force for this address, under the mode now in effect.
+     *
+     * Read on the crossing rather than ahead of the counter, so a signal
+     * that never reaches its threshold pays nothing for it — see the comment
+     * at the call site. A held address then costs one read in place of the
+     * close, the user read and the log write it stands in for.
+     */
+    public function underNotionalBlock(string $detector, string $ip, string $mode): bool
+    {
+        return $this->cache()->get($this->key('notional', $detector, $ip)) === $mode;
     }
 
     /**
