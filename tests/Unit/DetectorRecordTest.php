@@ -395,6 +395,32 @@ it('opens a hold for at least a second even when asked for none', function () {
         ->toBe(['mode' => 'warn', 'reason' => 'warn mode']);
 });
 
+it('re-decides a hold left by a version that stored the bare mode', function () {
+    config()->set('watchtower.auto_block.mode', 'warn');
+
+    // The pre-reason value shape, as a deploy onto a live cache would find
+    // it: a bare mode string at the same key. If the guard in notionalHold()
+    // regressed and this flowed through, the array access on it would throw
+    // into record()'s fail-open — silently disabling detection for the
+    // address until the key lapsed.
+    Cache::put('watchtower:blacklist:notional:failed_logins:198.51.100.27', 'warn', 3600);
+
+    $logChannel = Mockery::mock()->shouldIgnoreMissing();
+    // Read as "no hold", so the address is re-decided — and that decision
+    // rewrites the key with the reason filled in.
+    $logChannel->shouldReceive('warning')
+        ->once()
+        ->withArgs(fn (string $m, array $c): bool => ($c['not_blocked_because'] ?? null) === 'warn mode');
+    Log::shouldReceive('channel')->andReturn($logChannel);
+
+    foreach (range(1, 3) as $i) {
+        $this->service->record('failed_logins', '198.51.100.27');
+    }
+
+    expect($this->hits->notionalHold('failed_logins', '198.51.100.27'))
+        ->toBe(['mode' => 'warn', 'reason' => 'warn mode']);
+});
+
 it('counts an IPv6 client by the network a block would cover, not the address it hops to', function () {
     // Three different addresses inside one /64. A counter keyed on the bare
     // address would see a single hit for each and never reach the threshold,
