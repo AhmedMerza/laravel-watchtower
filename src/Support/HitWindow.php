@@ -20,8 +20,8 @@ use Illuminate\Support\Facades\Cache;
  *   the same window.
  * - `{prefix}:notional:{detector}:{ip}` — a block this detector decided on
  *   and did not get to enforce, decaying with the duration that block
- *   would have lasted rather than with the window. See
- *   openNotionalBlock().
+ *   would have lasted rather than with the window. The value is the mode
+ *   and the hold-back reason, not a flag. See openNotionalBlock().
  *
  * Nothing here is written for traffic that doesn't match a detector: an
  * address only gets a counter once it has already done something a
@@ -153,9 +153,13 @@ class HitWindow
      * "no users" is a perfectly ordinary answer. That made the correct order
      * a comment to obey rather than something the API enforced.
      *
-     * Closing on every threshold crossing, not only on one that blocked, is
-     * what stops a held-back detector re-deciding per request — see
-     * AutoBlockService::blockDetected(), which explains what that costs.
+     * Closing on every crossing that reaches a decision, not only on one
+     * that blocked, is what keeps a counter parked at its threshold from
+     * re-deciding on every matching request for the rest of the window. A
+     * crossing that is already held never gets here — the notional block
+     * answers first, which is what stops a held-back detector re-deciding
+     * per request. See AutoBlockService::blockDetected(), which explains
+     * what that costs.
      *
      * @return list<string>
      */
@@ -191,32 +195,55 @@ class HitWindow
      * and kept being reported — once per `count` signals, which for a
      * detector shipping `count => 1` is once per request.
      *
-     * The mode is the stored value rather than part of the key so that
-     * arming a detector takes effect on the very next request: a hold
-     * opened under `warn` doesn't answer for `block`, and the address is
-     * counted and blocked for real instead of serving out a dry run's
-     * silence. The residue is narrower and deliberate — a hold opened in
-     * `block` mode by the shared-IP guard stands until it lapses even if
-     * the address's user count drops in the meantime, which is a heuristic
-     * guard erring towards the people behind the address.
+     * The mode is stored rather than part of the key so that arming a
+     * detector takes effect on the very next request: a hold opened under
+     * `warn` doesn't answer for `block`, and the address is counted and
+     * blocked for real instead of serving out a dry run's silence. The
+     * residue is narrower and deliberate — a hold opened in `block` mode by
+     * the shared-IP guard stands until it lapses even if the address's user
+     * count drops in the meantime, which is a heuristic guard erring towards
+     * the people behind the address.
+     *
+     * The reason rides along because one kind of hold-back is about the
+     * address, not the detector: a never_* refusal names ONE address, while
+     * the key here is the prefix a block would have covered. Served raw,
+     * such a hold would exempt every address in that prefix. The reader
+     * re-asks the list for the address now asking — see
+     * AutoBlockService::holdStillSpeaksFor().
      */
-    public function openNotionalBlock(string $detector, string $ip, string $mode, int $seconds): void
+    public function openNotionalBlock(string $detector, string $ip, string $mode, string $reason, int $seconds): void
     {
-        $this->cache()->put($this->key('notional', $detector, $ip), $mode, max(1, $seconds));
+        $this->cache()->put(
+            $this->key('notional', $detector, $ip),
+            ['mode' => $mode, 'reason' => $reason],
+            // Clamped away from 0, which means "no expiry" on some drivers —
+            // a permanent hold from one bad config value.
+            max(1, $seconds),
+        );
     }
 
     /**
-     * Whether a block this detector already decided on is still notionally
-     * in force for this address, under the mode now in effect.
+     * The hold this detector has open on the address, or null when there is
+     * none — which is also the answer for a bare-mode value left by a
+     * version that predates the stored reason. That hold decays within one
+     * block duration, and re-deciding it once is what writes its reason in.
      *
      * Read on the crossing rather than ahead of the counter, so a signal
      * that never reaches its threshold pays nothing for it — see the comment
      * at the call site. A held address then costs one read in place of the
      * close, the user read and the log write it stands in for.
+     *
+     * @return array{mode: string, reason: string}|null
      */
-    public function underNotionalBlock(string $detector, string $ip, string $mode): bool
+    public function notionalHold(string $detector, string $ip): ?array
     {
-        return $this->cache()->get($this->key('notional', $detector, $ip)) === $mode;
+        $hold = $this->cache()->get($this->key('notional', $detector, $ip));
+
+        if (! is_array($hold) || ! is_string($hold['mode'] ?? null) || ! is_string($hold['reason'] ?? null)) {
+            return null;
+        }
+
+        return ['mode' => $hold['mode'], 'reason' => $hold['reason']];
     }
 
     /**

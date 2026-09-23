@@ -13,6 +13,7 @@ use Watchtower\Exceptions\UnknownScopeException;
 use Watchtower\Support\BlockScope;
 use Watchtower\Support\FailureWindow;
 use Watchtower\Support\HitWindow;
+use Watchtower\Support\NeverBlockList;
 
 class AutoBlockService
 {
@@ -254,7 +255,17 @@ class AutoBlockService
         // Leaving the counter running is deliberate too. It decays on its own
         // window, and not clearing it means nothing is written for a held
         // address beyond the hit it was already paying for.
-        if ($this->hits->underNotionalBlock($detector, $counted, $mode)) {
+        //
+        // The reason the hold was opened under matters as much as the mode.
+        // The hold is keyed on $counted — the prefix a block would cover —
+        // but a never_* refusal names ONE address: BlacklistService::block()
+        // checks it before the target is widened. Served raw, such a hold
+        // would exempt every address in the prefix, most of which are on no
+        // list at all. holdStillSpeaksFor() re-asks the list for the address
+        // now asking.
+        $hold = $this->hits->notionalHold($detector, $counted);
+
+        if ($hold !== null && $hold['mode'] === $mode && $this->holdStillSpeaksFor($hold['reason'], $ip)) {
             return false;
         }
 
@@ -332,8 +343,12 @@ class AutoBlockService
         // The flat duration, never the escalated one: escalatedMinutes() is
         // only consulted past every hold-back, because a near miss is not an
         // offence and must not lengthen anything.
+        //
+        // The reason is stored with the hold because a never_* refusal is
+        // about one address and the key is about a prefix — see
+        // holdStillSpeaksFor(), which is what reads it back.
         if ($heldBy !== null && $heldBy !== self::HELD_BY_SHARED_IP) {
-            $this->hits->openNotionalBlock($detector, $counted, $mode, max(1, $durationMinutes) * 60);
+            $this->hits->openNotionalBlock($detector, $counted, $mode, $heldBy, max(1, $durationMinutes) * 60);
         }
 
         return $heldBy === null;
@@ -516,6 +531,35 @@ class AutoBlockService
             $sharedIpThreshold > 0 && $distinctUsers >= $sharedIpThreshold => self::HELD_BY_SHARED_IP,
             default => null,
         };
+    }
+
+    /**
+     * Whether a hold opened on this prefix still answers for the address now
+     * asking.
+     *
+     * 'warn mode' is a stance about the detector, not the address: it covers
+     * the prefix evenly, and arming is already answered by the mode the hold
+     * was opened under, so nothing is re-asked. Any future hold-back that is
+     * likewise config-level lands in this branch by default, which is the
+     * safe direction — the whole engine falls back to NOT blocking on
+     * ambiguity.
+     *
+     * A never_* refusal is different. It names ONE address, checked in
+     * BlacklistService::block() before the target is widened, while the hold
+     * it opened covers the whole prefix a block would have. Honouring it for
+     * every address in that prefix would let one exempt entry shield its
+     * /64 — none of them counted, evaluated, logged or blocked. So the list
+     * is re-asked for the address now asking: memoised in NeverBlockList, no
+     * round trip. That is also what makes taking an address off the list
+     * take effect on its next signal rather than when the hold lapses.
+     */
+    private function holdStillSpeaksFor(string $reason, string $ip): bool
+    {
+        if ($reason !== 'never_auto_block' && $reason !== 'never_block') {
+            return true;
+        }
+
+        return NeverBlockList::refusesAutoBlock($ip);
     }
 
     /**
