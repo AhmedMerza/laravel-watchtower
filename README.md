@@ -17,7 +17,7 @@
 - **One block, every environment.** Production, staging and the rest share one blocklist over signed requests.
 - **Automatic blocking that starts as a dry run.** Detectors and log rules report what they *would* block until you arm them, and `watchtower:simulate` backtests a rule against your log history first.
 - **Careful with real people.** It won't auto-block an address that many signed-in users share, and you can block an address from your login routes only instead of the whole app.
-- **Nothing to build or host.** A management page with no JavaScript, a JSON API, and optional one-click blocking from [LogScope](https://github.com/AhmedMerza/laravel-logscope).
+- **Nothing to build or host.** A management page with no JavaScript and a JSON API. [LogScope](https://github.com/AhmedMerza/laravel-logscope) is optional: with it, log-based rules and `watchtower:simulate` can read your log history.
 
 ## Quick Start
 
@@ -55,12 +55,12 @@ public function boot(): void
 }
 ```
 
-**With LogScope installed**, a **Block IP** button appears on every log entry that has an IP address, and LogScope's own authorization applies instead of the Gate.
+**With LogScope installed**, the page moves to `/logscope/watchtower` and LogScope's own authorization applies instead of the Gate. LogScope 1.6.1–2.1.x also show a **Block IP** button on each log entry; 2.2.0 removed it.
 
 ## How It Works
 
 ```
-Admin blocks an IP from the management page, LogScope's UI or the API (staging)
+Admin blocks an IP from the management page or the API (staging)
     │
     ├─► DB row created + cache rebuilt → staging protected immediately
     │
@@ -95,7 +95,7 @@ All docs: **[docs/](docs/README.md)** · [Configuration](docs/configuration.md) 
 - PHP 8.2, 8.3 or 8.4
 - Laravel 12 or 13 (Laravel 13 needs PHP 8.3+). Laravel 11 isn't supported: it is past security support, and a current Composer refuses to install it.
 - Any Laravel cache store. Redis is recommended for production.
-- *Optional:* [ahmedmerza/logscope](https://github.com/AhmedMerza/laravel-logscope) >= 1.6.1, for the Block IP button and for [log-based auto-block rules](docs/auto-block.md#log-rules). The [detectors](docs/auto-block.md#detectors) work without it. LogScope 1.5.2–1.6.0 never shows the button.
+- *Optional:* [ahmedmerza/logscope](https://github.com/AhmedMerza/laravel-logscope) >= 1.6.1, for [log-based auto-block rules](docs/auto-block.md#log-rules) and [backtesting](docs/auto-block.md#backtesting-a-rule-before-you-arm-it). The [detectors](docs/auto-block.md#detectors) work without it. LogScope 1.6.1–2.1.x also show a Block IP button on each log entry.
 
 ## Upgrading
 

@@ -76,7 +76,7 @@ By default, blocked IPs receive a plain-text `403 Access denied.` response. It's
 
 ## IP Ranges and IPv6
 
-A block can be a single IP or a CIDR range, from the API, the LogScope button, auto-block or sync:
+A block can be a single IP or a CIDR range, from the management page, the API, auto-block or sync:
 
 ```json
 POST /watchtower/api/block

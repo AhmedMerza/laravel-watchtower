@@ -14,7 +14,7 @@ A page at your route prefix — `/watchtower` by default — lists what is block
 
 It is behind **the same authorization as the API** — the `viewWatchtower` Gate in a standalone install, LogScope's own check when LogScope is present — and there is no setting that exposes the page without the API or the other way round.
 
-The page mounts in **both** modes. LogScope's panel acts on one address at a time from a log entry and has no list of what is currently blocked, so an install with LogScope needs it just as much; there it sits at `/logscope/watchtower`.
+The page mounts in **both** modes; with LogScope installed it sits at `/logscope/watchtower`. From LogScope 2.2.0 it is the only place to block by hand from a browser, because LogScope no longer shows a Block IP button. On 1.6.1–2.1.x that button acts on one address at a time from a log entry and has no list of what is blocked, so an install with LogScope needs this page either way.
 
 **No build step, and nothing loaded from the network.** It is server-rendered Blade with one inline stylesheet and no JavaScript at all — no npm, no CDN, no published assets to keep in step with an upgrade, and it works on a host with no outbound access. The unblock confirmation is a round trip rather than a dialog, so the page needs no `script-src` exception; a strict CSP does need `style-src 'unsafe-inline'` for the stylesheet. It follows the operating system's light or dark setting.
 
