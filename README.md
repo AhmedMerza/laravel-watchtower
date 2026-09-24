@@ -9,7 +9,13 @@
 >
 > The **[management page](#%EF%B8%8F-management-page)** ships too, so nothing here needs LogScope to be usable: it lists what is blocked and blocks and unblocks by hand, with no build step and no JavaScript.
 >
-> Still landing before `v1.0.0`: backtesting a rule against real history before switching it on (`watchtower:simulate`), pushing blocks out to Cloudflare or an nginx deny file rather than only to other Laravel environments, and an importer for anyone migrating off `antonioribeiro/firewall`. The full list, and what is deliberately **not** being built, is in the [roadmap](https://github.com/AhmedMerza/laravel-watchtower/issues/26).
+> Still landing before `v1.0.0`: pushing blocks out to Cloudflare or an nginx deny file rather than only to other Laravel environments, and an importer for anyone migrating off `antonioribeiro/firewall`. The full list, and what is deliberately **not** being built, is in the [roadmap](https://github.com/AhmedMerza/laravel-watchtower/issues/26).
+
+<p align="center">
+  <img src=".github/demo/simulate.png" alt="watchtower:simulate replaying two auto-block rules over a week of log history: one address would have been blocked for credential stuffing, an office gateway held back by the shared-IP guard, and a scanner caught by a warn-mode rule" width="100%">
+</p>
+
+<p align="center"><sub><a href="#backtesting-a-rule-before-you-arm-it"><code>watchtower:simulate</code></a> — see what a rule would have blocked last week before you arm it. Read-only.</sub></p>
 
 ## Quick Start
 
