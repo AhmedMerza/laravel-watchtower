@@ -900,3 +900,31 @@ it('does not let one rule hold an address for a rule matching the same rows in a
 
     expect($seen)->toHaveCount(2);
 });
+
+it('keeps evaluating warn-mode rules when the hold cache is down, reporting without a hold', function () {
+    config()->set('watchtower.auto_block.mode', 'warn');
+    config()->set('watchtower.auto_block.rules', [
+        oneErrorRule(),
+        oneErrorRule(['window_minutes' => 10]),
+    ]);
+    logEntry('30.30.30.38');
+
+    $hits = Mockery::mock(HitWindow::class);
+    $hits->shouldReceive('notionalHold')->andThrow(new RuntimeException('cache down'));
+    $hits->shouldReceive('openNotionalBlock')->andThrow(new RuntimeException('cache down'));
+
+    $reported = new ArrayObject;
+    $logChannel = Mockery::mock();
+    $logChannel->shouldReceive('warning')->andReturnUsing(function (string $message, array $context) use ($reported): void {
+        $reported[] = $context['rule']['window_minutes'];
+    });
+    $logChannel->shouldReceive('error')
+        ->once()
+        ->withArgs(fn (string $message, array $context): bool => str_contains($message, 'hold')
+            && $context['error'] === 'cache down');
+    Log::shouldReceive('channel')->andReturn($logChannel);
+
+    (new AutoBlockService($this->blacklist, $hits, new OffenceLedger))->run();
+
+    expect($reported->getArrayCopy())->toBe([5, 10]);
+});

@@ -772,7 +772,7 @@ class AutoBlockService
         $holder = $this->ruleHolder($level, $messageContains, $threshold, $windowMinutes, $scope);
         $settled = fn (string $ip): bool => $this->blacklist->isBlocked($ip)
             || $this->blockedInScope($ip, $scope)
-            || $this->isHeld($holder, $this->blacklist->normalizeTarget($ip), $ip, $mode);
+            || $this->ruleHeld($holder, $ip, $mode);
 
         // Dropped before the user-count query so it isn't computed for
         // addresses that are already settled — their rows keep matching for
@@ -812,7 +812,55 @@ class AutoBlockService
 
             $heldBy = $this->blockOrReport($ip, $reason, $mode, $scope, $users, $sharedIpThreshold, $durationMinutes, $context);
 
-            $this->holdDecision($holder, $this->blacklist->normalizeTarget($ip), $mode, $heldBy, $durationMinutes);
+            try {
+                $this->holdDecision($holder, $this->blacklist->normalizeTarget($ip), $mode, $heldBy, $durationMinutes);
+            } catch (\Throwable $e) {
+                // Unheld, so reported again next tick — the behaviour before
+                // the hold existed, and better than losing the rules after it.
+                $this->reportRuleHoldFailure($e);
+            }
+        }
+    }
+
+    /**
+     * isHeld() for a rule, failing open to "not held".
+     *
+     * The hold is the only cache a warn-mode rule touches — isBlocked() reads
+     * the table and the report is a log line — so without this a cache outage
+     * would throw out of run() and take every later rule's dry run with it.
+     * Not held means reported again, which is what a rule did before it had a
+     * hold at all. The detector path needs none of this: record() already
+     * fails open around the whole decision.
+     */
+    private function ruleHeld(string $holder, string $ip, string $mode): bool
+    {
+        try {
+            return $this->isHeld($holder, $this->blacklist->normalizeTarget($ip), $ip, $mode);
+        } catch (\Throwable $e) {
+            $this->reportRuleHoldFailure($e);
+
+            return false;
+        }
+    }
+
+    /**
+     * Once per window, not per offender per tick — see reportDetectorFailure().
+     */
+    private function reportRuleHoldFailure(\Throwable $e): void
+    {
+        if (FailureWindow::isOpen('rule-hold')) {
+            return;
+        }
+
+        FailureWindow::open('rule-hold');
+
+        try {
+            Log::channel(config('watchtower.log_channel', 'stack'))
+                ->error('Watchtower: a rule could not read or write its hold, so it reported without one', [
+                    'error' => $e->getMessage(),
+                ]);
+        } catch (\Throwable) {
+            // A broken log channel must not undo the fail-open.
         }
     }
 
