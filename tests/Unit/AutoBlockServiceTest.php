@@ -718,3 +718,251 @@ it('applies never_auto_block to a caller that passes the source as a string', fu
 
     $this->assertDatabaseMissing('blacklisted_ips', ['ip' => '33.33.33.33']);
 });
+
+/**
+ * Capture every would-have-blocked line, so a test can count them across
+ * several ticks rather than expecting exactly one.
+ *
+ * @return ArrayObject<int, array<string, mixed>>
+ */
+function captureWouldHaveBlocked(): ArrayObject
+{
+    $seen = new ArrayObject;
+
+    $logChannel = Mockery::mock();
+    $logChannel->shouldReceive('warning')->andReturnUsing(function (string $message, array $context) use ($seen): void {
+        if (($context['would_have_blocked'] ?? false) === true) {
+            $seen[] = $context;
+        }
+    });
+    $logChannel->shouldReceive('debug')->zeroOrMoreTimes();
+    Log::shouldReceive('channel')->andReturn($logChannel);
+
+    return $seen;
+}
+
+function oneErrorRule(array $overrides = []): array
+{
+    return array_merge([
+        'level'            => 'error',
+        'message_contains' => null,
+        'count'            => 1,
+        'window_minutes'   => 5,
+    ], $overrides);
+}
+
+// #86: a warn-mode rule never blocks, so nothing took the address out of play
+// and it was re-reported on every tick while its rows stayed in the window.
+it('reports a warn-mode crossing once, not on every tick its rows stay in the window', function () {
+    config()->set('watchtower.auto_block.mode', 'warn');
+    config()->set('watchtower.auto_block.rules', [oneErrorRule()]);
+    logEntry('30.30.30.30');
+
+    $seen = captureWouldHaveBlocked();
+
+    $this->service->run();
+    $this->travel(1)->minutes();
+    $this->service->run();
+    $this->travel(1)->minutes();
+    $this->service->run();
+
+    expect($seen)->toHaveCount(1);
+});
+
+it('reports a warn-mode address again once block_duration_minutes has lapsed', function () {
+    config()->set('watchtower.auto_block.mode', 'warn');
+    config()->set('watchtower.auto_block.block_duration_minutes', 10);
+    config()->set('watchtower.auto_block.rules', [oneErrorRule()]);
+    logEntry('30.30.30.31');
+
+    $seen = captureWouldHaveBlocked();
+
+    $this->service->run();
+
+    // Still offending, inside the hold.
+    $this->travel(9)->minutes();
+    logEntry('30.30.30.31');
+    $this->service->run();
+    expect($seen)->toHaveCount(1);
+
+    // Still offending, past the hold.
+    $this->travel(2)->minutes();
+    logEntry('30.30.30.31');
+    $this->service->run();
+    expect($seen)->toHaveCount(2);
+});
+
+it('blocks on the next tick once a held warn-mode rule is armed', function () {
+    config()->set('watchtower.auto_block.mode', 'warn');
+    config()->set('watchtower.auto_block.rules', [oneErrorRule()]);
+    logEntry('30.30.30.32');
+
+    captureWouldHaveBlocked();
+    $this->service->run();
+
+    config()->set('watchtower.auto_block.mode', 'block');
+    $this->service->run();
+
+    $this->assertDatabaseHas('blacklisted_ips', ['ip' => '30.30.30.32']);
+});
+
+it('does not hold a shared-IP hold-back, which is re-measured every tick', function () {
+    config()->set('watchtower.auto_block.shared_ip_user_threshold', 3);
+    config()->set('watchtower.auto_block.rules', [oneErrorRule(['count' => 3])]);
+
+    foreach ([1, 2, 3] as $userId) {
+        logEntry('30.30.30.33', ['user_id' => $userId]);
+    }
+
+    $seen = captureWouldHaveBlocked();
+
+    $this->service->run();
+    $this->service->run();
+
+    expect($seen)->toHaveCount(2);
+});
+
+it('holds a never_auto_block refusal in block mode, until the address leaves the list', function () {
+    config()->set('watchtower.never_auto_block', ['30.30.30.34']);
+    config()->set('watchtower.auto_block.rules', [oneErrorRule()]);
+    logEntry('30.30.30.34');
+
+    $seen = captureWouldHaveBlocked();
+
+    $this->service->run();
+    $this->service->run();
+    expect($seen)->toHaveCount(1);
+
+    config()->set('watchtower.never_auto_block', []);
+    $this->service->run();
+
+    $this->assertDatabaseHas('blacklisted_ips', ['ip' => '30.30.30.34']);
+});
+
+it('keeps a rule held when a rule is added above it, since the hold is not keyed on the index', function () {
+    config()->set('watchtower.auto_block.mode', 'warn');
+    config()->set('watchtower.auto_block.rules', [oneErrorRule()]);
+    logEntry('30.30.30.35');
+
+    $seen = captureWouldHaveBlocked();
+
+    $this->service->run();
+
+    config()->set('watchtower.auto_block.rules', [
+        oneErrorRule(['level' => 'critical']),
+        oneErrorRule(),
+    ]);
+    $this->service->run();
+
+    expect($seen)->toHaveCount(1);
+});
+
+it('reports afresh once the rule matching the address is edited', function () {
+    config()->set('watchtower.auto_block.mode', 'warn');
+    config()->set('watchtower.auto_block.rules', [oneErrorRule()]);
+    logEntry('30.30.30.36');
+
+    $seen = captureWouldHaveBlocked();
+
+    $this->service->run();
+
+    config()->set('watchtower.auto_block.rules', [oneErrorRule(['window_minutes' => 10])]);
+    $this->service->run();
+
+    expect($seen)->toHaveCount(2);
+});
+
+it('holds the IPv6 prefix a block would cover, so a sibling in the same /64 is not reported separately', function () {
+    config()->set('watchtower.auto_block.mode', 'warn');
+    config()->set('watchtower.auto_block.rules', [oneErrorRule()]);
+    logEntry('2001:db8:86::1');
+    logEntry('2001:db8:86::2');
+
+    $seen = captureWouldHaveBlocked();
+
+    $this->service->run();
+
+    expect($seen)->toHaveCount(1);
+});
+
+it('does not let one rule hold an address for a rule matching the same rows in another scope', function () {
+    config()->set('watchtower.scopes', ['auth']);
+    config()->set('watchtower.auto_block.mode', 'warn');
+    config()->set('watchtower.auto_block.rules', [
+        oneErrorRule(),
+        oneErrorRule(['scope' => 'auth']),
+    ]);
+    logEntry('30.30.30.37');
+
+    $seen = captureWouldHaveBlocked();
+
+    $this->service->run();
+
+    expect($seen)->toHaveCount(2);
+});
+
+it('keeps evaluating warn-mode rules when the hold cache is down, reporting without a hold', function () {
+    config()->set('watchtower.auto_block.mode', 'warn');
+    config()->set('watchtower.auto_block.rules', [
+        oneErrorRule(),
+        oneErrorRule(['window_minutes' => 10]),
+    ]);
+    logEntry('30.30.30.38');
+
+    $hits = Mockery::mock(HitWindow::class);
+    $hits->shouldReceive('notionalHold')->andThrow(new RuntimeException('cache down'));
+    $hits->shouldReceive('openNotionalBlock')->andThrow(new RuntimeException('cache down'));
+
+    $reported = new ArrayObject;
+    $logChannel = Mockery::mock();
+    $logChannel->shouldReceive('warning')->andReturnUsing(function (string $message, array $context) use ($reported): void {
+        $reported[] = $context['rule']['window_minutes'];
+    });
+    $logChannel->shouldReceive('error')
+        ->once()
+        ->withArgs(fn (string $message, array $context): bool => str_contains($message, 'hold')
+            && $context['error'] === 'cache down');
+    Log::shouldReceive('channel')->andReturn($logChannel);
+
+    (new AutoBlockService($this->blacklist, $hits, new OffenceLedger))->run();
+
+    expect($reported->getArrayCopy())->toBe([5, 10]);
+});
+
+it('keeps a rule held across an edit that changes nothing it matches', function () {
+    config()->set('watchtower.auto_block.mode', 'warn');
+    config()->set('watchtower.auto_block.rules', [oneErrorRule(['message_contains' => null])]);
+    logEntry('30.30.30.39');
+
+    $seen = captureWouldHaveBlocked();
+
+    $this->service->run();
+
+    // '' is no filter to applyRule(), exactly as null is.
+    config()->set('watchtower.auto_block.rules', [oneErrorRule(['message_contains' => ''])]);
+    $this->service->run();
+
+    expect($seen)->toHaveCount(1);
+});
+
+it('holds a never_block refusal in block mode, until the address leaves the list', function () {
+    config()->set('watchtower.never_block', ['30.30.30.40']);
+    config()->set('watchtower.auto_block.rules', [oneErrorRule()]);
+    logEntry('30.30.30.40');
+
+    $debug = 0;
+    $logChannel = Mockery::mock();
+    $logChannel->shouldReceive('debug')->andReturnUsing(function () use (&$debug): void {
+        $debug++;
+    });
+    Log::shouldReceive('channel')->andReturn($logChannel);
+
+    $this->service->run();
+    $this->service->run();
+    expect($debug)->toBe(1);
+
+    config()->set('watchtower.never_block', []);
+    $this->service->run();
+
+    $this->assertDatabaseHas('blacklisted_ips', ['ip' => '30.30.30.40']);
+});

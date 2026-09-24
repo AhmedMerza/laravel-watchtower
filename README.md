@@ -663,6 +663,8 @@ Rules run every minute via the scheduler — detectors don't need it, since they
 
 > **Note:** IPs in `WATCHTOWER_NEVER_BLOCK_IPS` are never auto-blocked, even if they match a rule. Those in `WATCHTOWER_NEVER_AUTO_BLOCK_IPS` are skipped by automation but remain blockable by hand.
 
+**A rule held back from blocking reports once per block it predicts, not once per tick** — the same hold the [detectors](#detectors) get. A blocked address drops out of a rule's offenders; in `warn` mode, or for a `never_auto_block` address, nothing blocks, so its rows kept matching and it was re-reported every minute for as long as they stayed in the window. The decision is now held for `block_duration_minutes`, which is also what [`watchtower:simulate`](#backtesting-a-rule-before-you-arm-it) assumes, so a dry run and a backtest of the same rule agree. Arming a rule takes effect on the next tick, a shared-IP warning is re-measured rather than held, and the hold is kept per rule by what it matches and where it blocks rather than by its position in the list — editing a rule's `level`, `message_contains`, `count`, `window_minutes` or `scope` makes it a new rule whose first crossing is reported afresh.
+
 ---
 
 ## 🎯 Scoped Blocks

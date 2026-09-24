@@ -314,7 +314,10 @@ final class RuleSimulator
 
             // Still serving the block the previous crossing earned. The
             // engine skips an address it has already blocked, so a burst
-            // that runs for an hour is one block, not one per tick.
+            // that runs for an hour is one block, not one per tick. In warn
+            // mode it skips one it has already reported, for the same span
+            // — see AutoBlockService::holdDecision() — so this answers for a
+            // dry run too.
             if ($blockedUntil !== null && $at < $blockedUntil) {
                 continue;
             }
