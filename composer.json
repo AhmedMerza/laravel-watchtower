@@ -38,7 +38,7 @@
         "phpstan/phpstan-deprecation-rules": "^1.0|^2.0"
     },
     "suggest": {
-        "ahmedmerza/logscope": "If installed, Watchtower adds a Block-IP button to the LogScope log detail panel and mounts its management routes under LogScope's prefix with LogScope's authorization. Requires >=1.6.1 — earlier versions include the pre-rename `logscope-guard::` partial, which this package no longer registers, so the button never renders. Watchtower is fully functional without it."
+        "ahmedmerza/logscope": "If installed, Watchtower mounts its management routes under LogScope's prefix with LogScope's authorization, and its log-based auto-block rules and watchtower:simulate read LogScope's log table. LogScope 1.6.1 to 2.1.x also show a Block-IP button in the log detail panel; 2.2.0 removed it, so block from Watchtower's management page there. Watchtower is fully functional without it."
     },
     "autoload": {
         "psr-4": {

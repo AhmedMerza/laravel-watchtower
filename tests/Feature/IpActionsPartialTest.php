@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use Composer\InstalledVersions;
 use Illuminate\Http\Request;
 use Illuminate\Routing\RouteCollection;
 use Illuminate\Support\Facades\Route;
@@ -90,4 +91,12 @@ it('reaches the same routes when LogScope renders its own detail panel', functio
 
     expect(Route::getRoutes()->match(Request::create($urls['block'], 'POST'))->getName())
         ->toBe('watchtower.api.block');
-});
+})->skip(
+    // LogScope 2.2.0 stopped embedding the partial (laravel-logscope 50d4adf),
+    // so there is no embedded button left to check. Its own version check,
+    // not InstallCommand's: a test that reused the helper would skip silently
+    // wherever the helper was wrong. prefer-lowest still installs 1.6.1, so CI
+    // keeps covering the include on the versions that have it.
+    fn (): bool => version_compare((string) InstalledVersions::getVersion('ahmedmerza/logscope'), '2.2.0', '>='),
+    'LogScope 2.2.0+ no longer embeds the Block IP button',
+);

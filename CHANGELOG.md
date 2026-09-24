@@ -4,6 +4,12 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **LogScope 2.2.0 no longer shows Watchtower's Block IP button, and Watchtower no longer claims it does.** LogScope 2.2.0 stopped including the `watchtower::partials.ip-actions` partial in its log detail panel on purpose (AhmedMerza/laravel-logscope@50d4adf): blocking belongs on Watchtower's own [management page](docs/management-page.md). On 2.2.0+, `watchtower:install` now points at that page instead of announcing a button, and the `composer.json` suggestion says which LogScope versions have the button. The partial stays, because LogScope 1.6.1–2.1.x still render it. Everything else in the LogScope integration is unchanged on 2.2.0: routes under its prefix with its authorization, log rules and `watchtower:simulate` ([#96](https://github.com/AhmedMerza/laravel-watchtower/issues/96)).
+
+  **The test that renders LogScope's panel now skips on 2.2.0+** with that reason, instead of failing every `prefer-stable` CI job. It reads the installed version itself rather than asking the install command, so a wrong version check in the command can't make the test skip where it should run. `prefer-lowest` still installs LogScope 1.6.1, so CI keeps covering the include on the versions that have it.
+
 ## [0.6.1] - 2026-09-24
 
 ### Fixed
