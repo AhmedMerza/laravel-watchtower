@@ -263,9 +263,7 @@ class AutoBlockService
         // would exempt every address in the prefix, most of which are on no
         // list at all. holdStillSpeaksFor() re-asks the list for the address
         // now asking.
-        $hold = $this->hits->notionalHold($detector, $counted);
-
-        if ($hold !== null && $hold['mode'] === $mode && $this->holdStillSpeaksFor($hold['reason'], $ip)) {
+        if ($this->isHeld($detector, $counted, $ip, $mode)) {
             return false;
         }
 
@@ -321,37 +319,66 @@ class AutoBlockService
             $context,
         );
 
-        // Reported, not enforced. Hold the decision for as long as the block
-        // would have run, so a dry run reads as one entry per block it
-        // predicts rather than one per request, and so an address automation
-        // is refused permission to touch stops costing a decision per probe.
-        //
-        // NOT for the shared-IP guard, which is the one hold-back that is a
-        // live measurement rather than a standing setting. `warn` mode and
-        // never_auto_block are config: they will say the same thing in an
-        // hour, so honouring them for an hour changes nothing. How many
-        // signed-in users an address is showing changes minute to minute, and
-        // holding that answer would convert a guard an attacker has to keep
-        // re-earning — three accounts live in a one-minute window, for
-        // response_bursts — into an hour of immunity bought once. The README
-        // is explicit that this guard is not a control an adversary respects;
-        // that is a reason to leave it re-measured, not to make it stickier.
-        // It also needs no hold: it cannot fire at `count => 1`, where at
-        // most the current request's own user is known, so the detector this
-        // issue is about never reaches it.
-        //
-        // The flat duration, never the escalated one: escalatedMinutes() is
-        // only consulted past every hold-back, because a near miss is not an
-        // offence and must not lengthen anything.
-        //
-        // The reason is stored with the hold because a never_* refusal is
-        // about one address and the key is about a prefix — see
-        // holdStillSpeaksFor(), which is what reads it back.
-        if ($heldBy !== null && $heldBy !== self::HELD_BY_SHARED_IP) {
-            $this->hits->openNotionalBlock($detector, $counted, $mode, $heldBy, max(1, $durationMinutes) * 60);
-        }
+        $this->holdDecision($detector, $counted, $mode, $heldBy, $durationMinutes);
 
         return $heldBy === null;
+    }
+
+    /**
+     * Whether $holder already decided about this address and was held back,
+     * in this mode, by a hold-back that still speaks for $ip. See
+     * holdDecision(), which opens what this reads.
+     */
+    private function isHeld(string $holder, string $counted, string $ip, string $mode): bool
+    {
+        $hold = $this->hits->notionalHold($holder, $counted);
+
+        return $hold !== null && $hold['mode'] === $mode && $this->holdStillSpeaksFor($hold['reason'], $ip);
+    }
+
+    /**
+     * A decision blockOrReport() reported rather than enforced: hold it for as
+     * long as the block would have run.
+     *
+     * Shared by both ends of the engine for the reason blockOrReport() is: a
+     * detector and a rule held back by the same thing must stay held on the
+     * same terms, or `watchtower:simulate` — which models the hold — agrees
+     * with one half and not the other.
+     *
+     * A real block takes the address out of play — the detector returns at
+     * its blocklist check, a rule drops it from its offenders — and nothing
+     * did that for a decision that was only reported. Holding it means a dry
+     * run reads as one entry per block it predicts rather than one per
+     * request or per scheduler tick, and an address automation is refused
+     * permission to touch stops costing a decision each time.
+     *
+     * NOT for the shared-IP guard, which is the one hold-back that is a
+     * live measurement rather than a standing setting. `warn` mode and
+     * never_auto_block are config: they will say the same thing in an
+     * hour, so honouring them for an hour changes nothing. How many
+     * signed-in users an address is showing changes minute to minute, and
+     * holding that answer would convert a guard an attacker has to keep
+     * re-earning — three accounts live in a one-minute window, for
+     * response_bursts — into an hour of immunity bought once. The README
+     * is explicit that this guard is not a control an adversary respects;
+     * that is a reason to leave it re-measured, not to make it stickier.
+     * It also needs no hold: it cannot fire at `count => 1`, where at
+     * most the current request's own user is known, so `scanner_paths` never
+     * reaches it.
+     *
+     * The flat duration, never the escalated one: escalatedMinutes() is
+     * only consulted past every hold-back, because a near miss is not an
+     * offence and must not lengthen anything.
+     *
+     * The reason is stored with the hold because a never_* refusal is
+     * about one address and the key is about a prefix — see
+     * holdStillSpeaksFor(), which is what reads it back.
+     */
+    private function holdDecision(string $holder, string $counted, string $mode, ?string $heldBy, int $durationMinutes): void
+    {
+        if ($heldBy !== null && $heldBy !== self::HELD_BY_SHARED_IP) {
+            $this->hits->openNotionalBlock($holder, $counted, $mode, $heldBy, max(1, $durationMinutes) * 60);
+        }
     }
 
     /**
@@ -364,10 +391,10 @@ class AutoBlockService
      *
      * @param  array<string, mixed>  $context
      * @return string|null why the address did NOT end up blocked, or null if
-     *                     it did. The detector path holds a reported decision
-     *                     for the span the block would have run, and which
-     *                     hold-back produced it decides whether it may — see
-     *                     blockDetected(). A caller that only needs the
+     *                     it did. Both callers hold a reported decision for
+     *                     the span the block would have run, and which
+     *                     hold-back produced it decides whether they may —
+     *                     see holdDecision(). A caller that only needs the
      *                     outcome compares against null.
      */
     private function blockOrReport(
@@ -736,15 +763,24 @@ class AutoBlockService
             $query->where('message', 'like', '%'.$messageContains.'%');
         }
 
+        // Blocked, or already decided and held back — see holdDecision(). A
+        // warn-mode rule never blocks, so without the hold nothing ever takes
+        // an address out of play and it is re-reported on every tick its rows
+        // stay inside the window: ~1,440 lines a day for one address, and a
+        // live dry run that disagrees with `watchtower:simulate` by roughly
+        // the block duration.
+        $holder = $this->ruleHolder($level, $messageContains, $threshold, $windowMinutes, $scope);
+        $settled = fn (string $ip): bool => $this->blacklist->isBlocked($ip)
+            || $this->blockedInScope($ip, $scope)
+            || $this->isHeld($holder, $this->blacklist->normalizeTarget($ip), $ip, $mode);
+
         // Dropped before the user-count query so it isn't computed for
-        // addresses that are already blocked — their rows keep matching for
+        // addresses that are already settled — their rows keep matching for
         // the rest of the window, so they reappear on every tick. Still
-        // re-checked in the loop below, because blocking one IPv6 address
-        // covers its whole prefix and can block a later offender mid-loop.
-        $offenders = $query->pluck('ip_address')
-            ->reject(fn (string $ip): bool => $this->blacklist->isBlocked($ip)
-                || $this->blockedInScope($ip, $scope))
-            ->values();
+        // re-checked in the loop below, because blocking or holding one IPv6
+        // address covers its whole prefix and can settle a later offender
+        // mid-loop.
+        $offenders = $query->pluck('ip_address')->reject($settled)->values();
 
         if ($offenders->isEmpty()) {
             return;
@@ -761,7 +797,7 @@ class AutoBlockService
         );
 
         foreach ($offenders as $ip) {
-            if ($this->blacklist->isBlocked($ip) || $this->blockedInScope($ip, $scope)) {
+            if ($settled($ip)) {
                 continue;
             }
 
@@ -774,8 +810,29 @@ class AutoBlockService
                 'window_minutes' => $windowMinutes,
             ];
 
-            $this->blockOrReport($ip, $reason, $mode, $scope, $users, $sharedIpThreshold, $durationMinutes, $context);
+            $heldBy = $this->blockOrReport($ip, $reason, $mode, $scope, $users, $sharedIpThreshold, $durationMinutes, $context);
+
+            $this->holdDecision($holder, $this->blacklist->normalizeTarget($ip), $mode, $heldBy, $durationMinutes);
         }
+    }
+
+    /**
+     * The name a rule's hold is kept under, from the fields that decide what
+     * it matches and where it would block.
+     *
+     * Not its index: rules have no name, and an index shifts when a rule
+     * above it is added or removed, which would hand one rule's hold to
+     * another. Editing any of these fields makes it a different rule, whose
+     * first crossing is then reported afresh — the right answer for a rule
+     * whose matches may no longer be the same ones. Scope is in it so two
+     * rules matching the same rows for different route groups don't answer
+     * for each other. Mode is deliberately not
+     * part of it: the hold records the mode it was opened under, so arming a
+     * rule takes effect on the next tick. See HitWindow::openNotionalBlock().
+     */
+    private function ruleHolder(mixed $level, mixed $messageContains, int $threshold, int $windowMinutes, string $scope): string
+    {
+        return 'rule:'.hash('xxh128', serialize([$level, $messageContains, $threshold, $windowMinutes, $scope]));
     }
 
     /**

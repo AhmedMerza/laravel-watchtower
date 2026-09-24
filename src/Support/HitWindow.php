@@ -21,7 +21,9 @@ use Illuminate\Support\Facades\Cache;
  * - `{prefix}:notional:{detector}:{ip}` — a block this detector decided on
  *   and did not get to enforce, decaying with the duration that block
  *   would have lasted rather than with the window. The value is the mode
- *   and the hold-back reason, not a flag. See openNotionalBlock().
+ *   and the hold-back reason, not a flag. See openNotionalBlock(). The
+ *   scheduled rules keep theirs here too, under a `rule:{hash}` name in
+ *   place of the detector — see AutoBlockService::ruleHolder().
  *
  * Nothing here is written for traffic that doesn't match a detector: an
  * address only gets a counter once it has already done something a
