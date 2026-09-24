@@ -928,3 +928,41 @@ it('keeps evaluating warn-mode rules when the hold cache is down, reporting with
 
     expect($reported->getArrayCopy())->toBe([5, 10]);
 });
+
+it('keeps a rule held across an edit that changes nothing it matches', function () {
+    config()->set('watchtower.auto_block.mode', 'warn');
+    config()->set('watchtower.auto_block.rules', [oneErrorRule(['message_contains' => null])]);
+    logEntry('30.30.30.39');
+
+    $seen = captureWouldHaveBlocked();
+
+    $this->service->run();
+
+    // '' is no filter to applyRule(), exactly as null is.
+    config()->set('watchtower.auto_block.rules', [oneErrorRule(['message_contains' => ''])]);
+    $this->service->run();
+
+    expect($seen)->toHaveCount(1);
+});
+
+it('holds a never_block refusal in block mode, until the address leaves the list', function () {
+    config()->set('watchtower.never_block', ['30.30.30.40']);
+    config()->set('watchtower.auto_block.rules', [oneErrorRule()]);
+    logEntry('30.30.30.40');
+
+    $debug = 0;
+    $logChannel = Mockery::mock();
+    $logChannel->shouldReceive('debug')->andReturnUsing(function () use (&$debug): void {
+        $debug++;
+    });
+    Log::shouldReceive('channel')->andReturn($logChannel);
+
+    $this->service->run();
+    $this->service->run();
+    expect($debug)->toBe(1);
+
+    config()->set('watchtower.never_block', []);
+    $this->service->run();
+
+    $this->assertDatabaseHas('blacklisted_ips', ['ip' => '30.30.30.40']);
+});

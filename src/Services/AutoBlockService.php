@@ -880,7 +880,9 @@ class AutoBlockService
      */
     private function ruleHolder(mixed $level, mixed $messageContains, int $threshold, int $windowMinutes, string $scope): string
     {
-        return 'rule:'.hash('xxh128', serialize([$level, $messageContains, $threshold, $windowMinutes, $scope]));
+        // `?: null` because applyRule() applies both filters by truthiness, so
+        // unset, '' and 0 all mean "no filter" and must not read as three rules.
+        return 'rule:'.hash('xxh128', serialize([$level ?: null, $messageContains ?: null, $threshold, $windowMinutes, $scope]));
     }
 
     /**
