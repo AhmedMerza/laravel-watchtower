@@ -1,0 +1,54 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&display=block" rel="stylesheet">
+<style>
+  html, body { margin: 0; background: transparent; }
+  body { padding: 40px; display: inline-block; }
+
+  .term {
+    background: #0f141b;
+    border: 1px solid #262d38;
+    border-radius: 12px;
+    box-shadow: 0 1px 0 rgba(255,255,255,.04) inset, 0 18px 40px rgba(0,0,0,.28), 0 4px 10px rgba(0,0,0,.18);
+    overflow: hidden;
+    font-family: 'JetBrains Mono', 'DejaVu Sans Mono', monospace;
+    font-size: 14px;
+    line-height: 1.55;
+    font-variant-ligatures: none;
+    color: #c6cdd8;
+  }
+
+  .bar {
+    display: flex; align-items: center; gap: 8px;
+    padding: 11px 16px;
+    background: #151b24;
+    border-bottom: 1px solid #222935;
+  }
+  .bar i { width: 11px; height: 11px; border-radius: 50%; background: #2c3441; }
+  .bar span { margin-left: 10px; font-size: 12px; color: #6b7686; letter-spacing: .02em; }
+
+  pre { margin: 0; padding: 18px 24px 22px; font: inherit; white-space: pre; }
+
+  .prompt { color: #5eead4; }
+  .cmd { color: #f1f5f9; font-weight: 600; }
+
+  .rule { color: #3b4453; }
+  .b  { font-weight: 600; }
+  .c1 { color: #ff7b72; }
+  .c2 { color: #7ee2a8; }
+  .c3 { color: #f5c26b; }
+  .c4 { color: #79b8ff; }
+  .c6 { color: #5eead4; }
+</style>
+</head>
+<body>
+<div class="term">
+  <div class="bar"><i></i><i></i><i></i><span>~/app</span></div>
+<pre><span class="prompt">$</span> <span class="cmd">{{command}}</span>
+{{output}}</pre>
+</div>
+</body>
+</html>
