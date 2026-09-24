@@ -4,6 +4,8 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-09-24
+
 ### Fixed
 
 - **A detector that decides to block and is held back from doing it now reports once instead of once per request.** A real block takes the address away from the detector completely — `detect()` returns at its blocklist check before counting anything — and nothing did that for a decision that was only *reported*. So a held-back address kept arriving, kept crossing, and kept being re-decided. Closing the hit window on every crossing amortised that, but only by `count`, and **`scanner_paths` ships `count => 1` deliberately**: a single request for `/.env` is not a mistake, and accumulating before blocking would both serve the matched request and hand an attacker room to game the shared-IP guard. A divisor of one is no divisor, so on the detector that fires hardest there was no amortisation at all — the reporter measured ~1,030 `would_have_blocked` lines a day in `warn` mode, each a row in `log_entries` under LogScope ([#71](https://github.com/AhmedMerza/laravel-watchtower/issues/71)).
@@ -224,7 +226,8 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 - **There is no transitional `ahmedmerza/logscope-guard` package.** It has been removed from Packagist. To upgrade, `composer remove ahmedmerza/logscope-guard`, `composer require ahmedmerza/watchtower`, then work through the BREAKING entries under Changed.
 
-[Unreleased]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.3.0...v0.4.0
