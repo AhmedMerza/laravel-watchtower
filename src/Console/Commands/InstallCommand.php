@@ -51,6 +51,8 @@ class InstallCommand extends Command
             $logscopePrefix = (string) config('logscope.routes.prefix', 'logscope');
             $this->line("LogScope detected — Watchtower routes mounted under <info>/{$logscopePrefix}/watchtower</info>");
             $this->line('Block-IP button has been added to your LogScope log detail panel.');
+            $this->line('LogScope\'s own authorization guards those routes; Watchtower\'s <comment>routes.middleware</comment>');
+            $this->line('and <comment>viewWatchtower</comment> Gate apply to standalone installs only and are inert here.');
         } else {
             $prefix = (string) config('watchtower.routes.prefix', 'watchtower');
             $this->line("Standalone mode — Watchtower routes mounted at <info>/{$prefix}</info>");

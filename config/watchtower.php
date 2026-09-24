@@ -21,12 +21,16 @@ return [
     |
     | Where Watchtower mounts its management API. When LogScope is also
     | installed, routes mount under LogScope's prefix as `<prefix>/watchtower`
-    | and use LogScope's authorization. When running standalone, routes mount
-    | at the prefix below, behind the middleware list here.
+    | and use LogScope's authorization — and two settings in this file go
+    | inert, because they belong to the standalone path only: the
+    | `middleware` list below is never consulted, and the `viewWatchtower`
+    | Gate is never evaluated. Tighten access in that case through
+    | LogScope's own middleware and authorization, not here.
     |
-    | Standalone access is decided by the `viewWatchtower` Gate, which only
-    | allows the `local` environment until you define it yourself, e.g. in
-    | AppServiceProvider::boot():
+    | When running standalone, routes mount at the prefix below, behind the
+    | middleware list here, and access is decided by the `viewWatchtower`
+    | Gate, which only allows the `local` environment until you define it
+    | yourself, e.g. in AppServiceProvider::boot():
     |
     |   Gate::define('viewWatchtower', fn ($user) => $user->isAdmin());
     |
