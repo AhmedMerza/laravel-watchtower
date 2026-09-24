@@ -164,7 +164,7 @@ it('blocks a formerly-shared address as soon as its users stop appearing', funct
     // The same address, now anonymous. Holding the shared-IP verdict the way
     // a warn-mode one is held would have left this address untouchable for
     // block_duration_minutes on the strength of three accounts that showed up
-    // once — which is the attack the README says this guard does not stop.
+    // once — which is the attack docs/auto-block.md says this guard does not stop.
     // Re-measuring blocks it on the very next crossing.
     foreach (range(1, 3) as $i) {
         $this->service->record('failed_logins', '198.51.100.12');

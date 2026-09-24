@@ -212,7 +212,7 @@ it('announces nothing for the blocks it pulls', function () {
     $this->artisan('watchtower:sync')->assertSuccessful();
 
     // Each block is announced once, by the environment that received it —
-    // the webhook contract in the README. A satellite firing IpBlocked for
+    // the webhook contract in docs/configuration.md. A satellite firing IpBlocked for
     // what it pulls would post its whole inherited blocklist on first sync.
     Event::assertNotDispatched(IpBlocked::class);
 });
