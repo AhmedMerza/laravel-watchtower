@@ -359,7 +359,7 @@ class AutoBlockService
      * signed-in users an address is showing changes minute to minute, and
      * holding that answer would convert a guard an attacker has to keep
      * re-earning — three accounts live in a one-minute window, for
-     * response_bursts — into an hour of immunity bought once. The README
+     * response_bursts — into an hour of immunity bought once. docs/auto-block.md
      * is explicit that this guard is not a control an adversary respects;
      * that is a reason to leave it re-measured, not to make it stickier.
      * It also needs no hold: it cannot fire at `count => 1`, where at

@@ -72,8 +72,8 @@ class SyncCommand extends Command
                     // deferCache because this run rebuilds once at the end
                     // rather than per record, and announce: false because a
                     // pulled block was already announced by the environment
-                    // that received it. See the webhook contract in the
-                    // README.
+                    // that received it. See the webhook contract in
+                    // docs/configuration.md.
                     $result = $this->service->applySync($block['ip'], [
                         'reason'     => $block['reason'] ?? null,
                         'source_env' => $block['source_env'] ?? 'master',
