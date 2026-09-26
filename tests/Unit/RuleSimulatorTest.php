@@ -174,9 +174,12 @@ it('flags an address the shared-IP guard would have held back', function () {
         ]);
     }
 
-    $result = ($this->run)(['count' => 10, 'window_minutes' => 5], sharedIp: 3);
+    $offender = ($this->run)(['count' => 10, 'window_minutes' => 5], sharedIp: 3)['offenders'][0];
 
-    expect($result['offenders'][0]['held_back_by_shared_ip_guard'])->toBeTrue();
+    // Held back at the crossing and at every tick after it, until the burst
+    // falls out of the window: warnings, and never a block.
+    expect($offender['blocks'])->toBe(0)
+        ->and($offender['warnings'])->toBe(5);
 });
 
 it('does not flag the guard when it is switched off', function () {
@@ -189,8 +192,10 @@ it('does not flag the guard when it is switched off', function () {
         ]);
     }
 
-    expect(($this->run)(['count' => 10, 'window_minutes' => 5], sharedIp: 0)['offenders'][0]['held_back_by_shared_ip_guard'])
-        ->toBeFalse();
+    $offender = ($this->run)(['count' => 10, 'window_minutes' => 5], sharedIp: 0)['offenders'][0];
+
+    expect($offender['blocks'])->toBe(1)
+        ->and($offender['warnings'])->toBe(0);
 });
 
 it('counts signed-in traffic that never matched the rule, as the false-positive signal', function () {
@@ -230,7 +235,7 @@ it('never counts an anonymous address as having users', function () {
 
     expect($offender['distinct_users'])->toBe(0)
         ->and($offender['authenticated_rows_not_matching'])->toBe(0)
-        ->and($offender['held_back_by_shared_ip_guard'])->toBeFalse();
+        ->and($offender['warnings'])->toBe(0);
 });
 
 it('skips rows with no ip address at all', function () {
@@ -344,7 +349,10 @@ it('streams an address whose history spans many keyset pages', function () {
     $pages = 0;
 
     DB::listen(function ($query) use (&$pages): void {
-        if (str_contains($query->sql, 'order by') && str_contains($query->sql, 'limit')) {
+        // The matching rows' pages only, not the shared-IP guard's walk
+        // over the signed-in ones.
+        if (str_contains($query->sql, 'order by') && str_contains($query->sql, 'limit')
+            && ! str_contains($query->sql, 'user_id')) {
             $pages++;
         }
     });
@@ -387,7 +395,8 @@ it('reports a scoped rule as a scoped block, not as a warning, when the shared-I
         'scope'          => 'auth',
     ], sharedIp: 3)['offenders'][0];
 
-    expect($offender['held_back_by_shared_ip_guard'])->toBeFalse()
+    expect($offender['blocks'])->toBe(1)
+        ->and($offender['warnings'])->toBe(0)
         ->and($offender['downgraded_to_scope'])->toBe('auth');
 });
 
@@ -403,8 +412,79 @@ it('still holds a global rule back when the shared-IP guard trips', function () 
 
     $offender = ($this->run)(['count' => 10, 'window_minutes' => 5], sharedIp: 3)['offenders'][0];
 
-    expect($offender['held_back_by_shared_ip_guard'])->toBeTrue()
+    expect($offender['blocks'])->toBe(0)
+        ->and($offender['warnings'])->toBeGreaterThan(0)
         ->and($offender['downgraded_to_scope'])->toBeNull();
+});
+
+it('blocks a later crossing that no longer looks shared, after a first one that did (#92)', function () {
+    // Two hours ago the address carried three signed-in users and was held
+    // back; half an hour ago it crossed again with nobody signed in. The
+    // engine re-measures the guard on every tick, so the second crossing is
+    // a block — judging the guard once, at the first, called it a warning.
+    burst('10.0.0.1', 10, 120);
+
+    foreach ([1, 2, 3] as $i => $userId) {
+        logEntry('10.0.0.1', [
+            'user_id'     => $userId,
+            'occurred_at' => now()->copy()->subMinutes(120)->addSeconds($i),
+        ]);
+    }
+
+    burst('10.0.0.1', 10, 30);
+
+    $offender = ($this->run)(['count' => 10, 'window_minutes' => 5], sharedIp: 3)['offenders'][0];
+
+    expect($offender['blocks'])->toBe(1)
+        ->and($offender['warnings'])->toBeGreaterThan(0)
+        ->and($offender['last_block_at'])->toBe(now()->copy()->subMinutes(30)->addSeconds(9)->toIso8601String());
+});
+
+it('does not let a held-back crossing hide the crossings after it (#92)', function () {
+    // The users sign in at the start of an attack that keeps going. A
+    // held-back crossing opens no hold, so once they age out of the window
+    // the engine blocks — well inside block_duration_minutes of the first
+    // crossing, which the old replay treated as already served.
+    foreach ([1, 2, 3] as $i => $userId) {
+        logEntry('10.0.0.1', [
+            'level'       => 'info',
+            'user_id'     => $userId,
+            'occurred_at' => now()->copy()->subMinutes(30)->addSeconds($i),
+        ]);
+    }
+
+    for ($i = 0; $i < 45; $i++) {
+        logEntry('10.0.0.1', [
+            'level'       => 'error',
+            'occurred_at' => now()->copy()->subMinutes(30)->addSeconds($i * 20),
+        ]);
+    }
+
+    $offender = ($this->run)(['level' => 'error', 'count' => 10, 'window_minutes' => 5], sharedIp: 3)['offenders'][0];
+
+    expect($offender['blocks'])->toBe(1)
+        ->and($offender['warnings'])->toBeGreaterThan(0);
+});
+
+it('blocks on a later tick once the users age out, with no new row to prompt it (#92)', function () {
+    // The users were seen three minutes before the burst, so the crossing is
+    // held back, and two ticks later they have left the window while the
+    // burst has not. Nothing is logged then; the engine blocks anyway.
+    foreach ([1, 2, 3] as $i => $userId) {
+        logEntry('10.0.0.1', [
+            'level'       => 'info',
+            'user_id'     => $userId,
+            'occurred_at' => now()->copy()->subMinutes(33)->addSeconds($i),
+        ]);
+    }
+
+    burst('10.0.0.1', 10, 30, ['level' => 'error']);
+
+    $offender = ($this->run)(['level' => 'error', 'count' => 10, 'window_minutes' => 5], sharedIp: 3)['offenders'][0];
+
+    expect($offender['warnings'])->toBe(2)
+        ->and($offender['blocks'])->toBe(1)
+        ->and($offender['last_block_at'])->toBe(now()->copy()->subMinutes(30)->addSeconds(9 + 120)->toIso8601String());
 });
 
 it('simulates nothing for a rule whose scope no route declares', function () {

@@ -199,7 +199,12 @@ it('warns when the shared-IP guard would have downgraded a block', function () {
 
     $this->artisan('watchtower:simulate')
         ->assertSuccessful()
-        ->expectsOutputToContain('held back by the shared-IP guard');
+        // Held back at every tick until the users and the burst age out
+        // together, so the address is listed for its warnings but not
+        // counted as blocked.
+        ->expectsOutputToContain('0 address(es) would have been blocked, 0 block(s) in total.')
+        ->expectsOutputToContain('5 held back')
+        ->expectsOutputToContain('1 would have been held back by the shared-IP guard (>= 3 signed-in users): 5 warning(s)');
 });
 
 it('honours a custom logscope table name', function () {

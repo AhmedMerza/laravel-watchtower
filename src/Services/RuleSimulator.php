@@ -63,6 +63,9 @@ final class RuleSimulator
     /** Rows per keyset page while streaming one address's history. */
     private const CHUNK = 1000;
 
+    /** The engine's scheduler tick: how soon a held-back address is looked at again. */
+    private const TICK_SECONDS = 60;
+
     /**
      * Replay one rule across `[$from, $to]`.
      *
@@ -86,12 +89,12 @@ final class RuleSimulator
      *     offenders: list<array{
      *         ip: string,
      *         blocks: int,
+     *         warnings: int,
      *         first_block_at: string,
      *         last_block_at: string,
      *         distinct_users: int,
      *         users_at_first_block: int,
      *         authenticated_rows_not_matching: int,
-     *         held_back_by_shared_ip_guard: bool,
      *         downgraded_to_scope: string|null
      *     }>
      * }
@@ -154,12 +157,13 @@ final class RuleSimulator
         $neverBlocked = [];
 
         foreach ($this->candidates($table, $level, $messageContains, $readFrom, $to, $threshold) as $ip) {
-            $blockedAt = $this->replay(
+            $replayed = $this->replay(
                 $table, $level, $messageContains, $ip, $readFrom, $to,
                 $windowMinutes, $threshold, $durationMinutes, $from,
+                $scope === null ? $sharedIpThreshold : 0,
             );
 
-            if ($blockedAt === []) {
+            if ($replayed['span'] === null) {
                 continue;
             }
 
@@ -175,24 +179,22 @@ final class RuleSimulator
                 continue;
             }
 
-            $first = $blockedAt[0];
+            [$first, $last] = $replayed['span'];
             $usersAtFirstBlock = $this->distinctUsers(
                 $table, $ip, $first->copy()->subMinutes($windowMinutes), $first,
             );
 
-            // Mirrors blockOrReport()'s `$downgraded`: the shared-IP guard
-            // only turns a match into a warning for a GLOBAL rule. On a
-            // scoped rule a shared address is the case scopes exist for, so
-            // the engine blocks it in scope instead — saying "warning, not
-            // block" there would be precisely backwards.
-            $guardCrossed = $sharedIpThreshold > 0 && $usersAtFirstBlock >= $sharedIpThreshold;
-            $isGlobal = $scope === null;
-
             $offenders[] = [
-                'ip'                   => $ip,
-                'blocks'               => count($blockedAt),
+                'ip'     => $ip,
+                'blocks' => $replayed['blocks'],
+
+                // Crossings the shared-IP guard held back on a global rule:
+                // one per simulated tick, as the engine logs one per tick.
+                'warnings' => $replayed['warnings'],
+
+                // The first and last crossing reported, block or warning.
                 'first_block_at'       => $first->toIso8601String(),
-                'last_block_at'        => $blockedAt[count($blockedAt) - 1]->toIso8601String(),
+                'last_block_at'        => $last->toIso8601String(),
                 'distinct_users'       => $this->distinctUsers($table, $ip, $from, $to),
                 'users_at_first_block' => $usersAtFirstBlock,
 
@@ -203,12 +205,17 @@ final class RuleSimulator
                 'authenticated_rows_not_matching' => $this->authenticatedRows($table, $ip, $from, $to, null, null)
                     - $this->authenticatedRows($table, $ip, $from, $to, $level, $messageContains),
 
-                // Computed against the window the LIVE guard would have read
-                // at the moment of the first block, not the period-wide
-                // figure — the period-wide count is an upper bound and would
-                // predict downgrades that never happen.
-                'held_back_by_shared_ip_guard' => $guardCrossed && $isGlobal,
-                'downgraded_to_scope'          => $guardCrossed && ! $isGlobal ? $scope : null,
+                // Mirrors blockOrReport()'s `$downgraded`: on a scoped rule a
+                // shared address is the case scopes exist for, so the engine
+                // blocks it in scope rather than holding it back. A label
+                // only — every crossing of a scoped rule is already counted
+                // as a block either way. Computed against the window the
+                // LIVE guard would have read, not the period-wide figure,
+                // which is an upper bound and would predict downgrades that
+                // never happen.
+                'downgraded_to_scope' => $scope !== null && $sharedIpThreshold > 0 && $usersAtFirstBlock >= $sharedIpThreshold
+                    ? $scope
+                    : null,
             ];
         }
 
@@ -217,6 +224,7 @@ final class RuleSimulator
         // The address tie-break keeps two equally-busy addresses in a stable
         // order, so `--json` diffs cleanly run to run.
         usort($offenders, static fn (array $a, array $b): int => $b['blocks'] <=> $a['blocks']
+            ?: $b['warnings'] <=> $a['warnings']
             ?: strcmp($a['ip'], $b['ip']));
 
         sort($neverBlocked);
@@ -258,7 +266,7 @@ final class RuleSimulator
 
     /**
      * Slide the rule's window along one address's history and record every
-     * moment the engine would have blocked it.
+     * moment the engine would have blocked it, or held a block back.
      *
      * The buffer holds at most `$threshold` timestamps, which is the whole
      * trick behind the memory criterion: the only question ever asked of it
@@ -271,12 +279,25 @@ final class RuleSimulator
      * after a block. Clearing here would under-report any rule whose window
      * is longer than the block duration.
      *
+     * The shared-IP guard is judged at every crossing, against the window
+     * that crossing would have read, because the engine re-measures it on
+     * every tick and a held-back crossing opens no hold (#71, #86). So a
+     * held-back crossing starts no block clock: the address is looked at
+     * again one tick later, and again, until its rows fall out of the window
+     * or it stops looking shared — at which point it is blocked, even if no
+     * new row arrived to prompt it. Judging the guard once, at the first
+     * crossing, reported "warnings, not blocks" for addresses the armed
+     * engine blocks (#92). `$sharedIpThreshold` is 0 for a scoped rule: the
+     * guard narrows that block rather than holding it back, so every
+     * crossing is a block and the user count is never needed.
+     *
      * `$reportFrom` is where the REQUESTED period starts. Rows before it are
      * read and counted — they are what makes a crossing at the boundary
      * visible at all — but a crossing before it belongs to the week the
      * operator didn't ask about, so it is not reported.
      *
-     * @return list<CarbonInterface>
+     * @return array{blocks: int, warnings: int, span: array{CarbonInterface, CarbonInterface}|null}
+     *                                                                                               span is the first and last crossing reported, block or warning
      */
     private function replay(
         string $table,
@@ -289,10 +310,12 @@ final class RuleSimulator
         int $threshold,
         int $durationMinutes,
         CarbonInterface $reportFrom,
+        int $sharedIpThreshold,
     ): array {
         $windowSeconds = $windowMinutes * 60;
         $durationSeconds = $durationMinutes * 60;
         $reportFromAt = $reportFrom->getTimestamp();
+        $moment = static fn (int $at): CarbonInterface => $from->copy()->setTimestamp($at);
 
         // A true fixed-size circular buffer rather than an array plus
         // array_shift(): shift reindexes the whole array on every row, which
@@ -304,10 +327,100 @@ final class RuleSimulator
         $seen = 0;
 
         $blockedUntil = null;
-        $blockedAt = [];
+        // The next moment the engine would evaluate this address: the row
+        // that just reached the threshold, or the tick after a held-back
+        // crossing. Null when nothing is pending.
+        $evaluateAt = null;
+        $blocks = 0;
+        $warnings = 0;
+        $firstAt = null;
+        $lastAt = null;
 
-        foreach ($this->stream($table, $level, $messageContains, $ip, $from, $to) as $occurredAt) {
-            $at = $occurredAt->getTimestamp();
+        // The guard's user count at each tick, from this address's signed-in
+        // rows read once in time order and slid along with the ticks, which
+        // only move forward. A query per tick cost one per simulated minute
+        // for as long as an address kept looking shared — ten thousand a week
+        // for one busy office gateway. Holds one window of rows at a time.
+        $signedIn = null;
+        $inWindow = new \SplQueue;
+        $users = [];
+        $usersAt = function (int $tick) use (&$signedIn, $inWindow, &$users, $table, $ip, $to, $windowSeconds, $moment): int {
+            $signedIn ??= $this->stream(
+                DB::table($table)->whereNotNull('user_id'), $ip, $moment($tick - $windowSeconds), $to, ['user_id'],
+            );
+
+            for (; $signedIn->valid(); $signedIn->next()) {
+                $row = $signedIn->current();
+                $at = Carbon::parse($row->occurred_at)->getTimestamp();
+
+                if ($at > $tick) {
+                    break;
+                }
+
+                $inWindow->enqueue([$at, $row->user_id]);
+                $users[$row->user_id] = ($users[$row->user_id] ?? 0) + 1;
+            }
+
+            while (! $inWindow->isEmpty() && $inWindow->bottom()[0] < $tick - $windowSeconds) {
+                [, $user] = $inWindow->dequeue();
+
+                if (--$users[$user] === 0) {
+                    unset($users[$user]);
+                }
+            }
+
+            return count($users);
+        };
+
+        // A trailing null, so the evaluations still pending after the last
+        // row — a held-back address re-checked until its window drains —
+        // run through the same loop as the ones between rows.
+        $rows = (function () use ($table, $level, $messageContains, $ip, $from, $to): \Generator {
+            foreach ($this->stream($this->matching($table, $level, $messageContains), $ip, $from, $to) as $row) {
+                yield Carbon::parse($row->occurred_at);
+            }
+
+            yield null;
+        })();
+
+        foreach ($rows as $occurredAt) {
+            $at = $occurredAt?->getTimestamp() ?? $to->getTimestamp();
+
+            // Evaluate before this row joins the buffer: a tick earlier than
+            // it could not have seen it.
+            while ($evaluateAt !== null && $evaluateAt <= $at) {
+                $tick = $evaluateAt;
+                $evaluateAt = null;
+
+                // Still crossing? The oldest of the last $threshold rows sits
+                // at this index, and every one of them must be inside the
+                // window ending here.
+                if (($tick - $recent[$seen % $threshold]) > $windowSeconds) {
+                    break;
+                }
+
+                $shared = $sharedIpThreshold > 0 && $usersAt($tick) >= $sharedIpThreshold;
+
+                if ($shared) {
+                    $evaluateAt = $tick + self::TICK_SECONDS;
+                } else {
+                    $blockedUntil = $tick + $durationSeconds;
+                }
+
+                // The crossing is real either way — it is what sets the block
+                // clock above, so a pre-period burst still suppresses a
+                // duplicate report just inside the period, exactly as the
+                // engine's own live block would have.
+                if ($tick >= $reportFromAt) {
+                    $shared ? $warnings++ : $blocks++;
+                    $firstAt ??= $tick;
+                    $lastAt = $tick;
+                }
+            }
+
+            if ($occurredAt === null) {
+                break;
+            }
 
             $recent[$seen % $threshold] = $at;
             $seen++;
@@ -322,32 +435,23 @@ final class RuleSimulator
                 continue;
             }
 
-            if ($seen < $threshold) {
-                continue;
-            }
-
-            // After the increment, the oldest of the last $threshold rows
-            // sits at exactly this index.
-            if (($at - $recent[$seen % $threshold]) > $windowSeconds) {
-                continue;
-            }
-
-            $blockedUntil = $at + $durationSeconds;
-
-            // The crossing is real either way — it is what sets the block
-            // clock above, so a pre-period burst still suppresses a
-            // duplicate report just inside the period, exactly as the
-            // engine's own live block would have.
-            if ($at >= $reportFromAt) {
-                $blockedAt[] = $occurredAt;
+            // `??=`: a held-back address waits for its next tick rather than
+            // being judged again at every row, which is what the engine does
+            // and what keeps the user count to one a minute.
+            if ($seen >= $threshold) {
+                $evaluateAt ??= $at;
             }
         }
 
-        return $blockedAt;
+        return [
+            'blocks'   => $blocks,
+            'warnings' => $warnings,
+            'span'     => $firstAt === null || $lastAt === null ? null : [$moment($firstAt), $moment($lastAt)],
+        ];
     }
 
     /**
-     * One address's matching rows, oldest first, a page at a time.
+     * One address's rows from `$query`, oldest first, a page at a time.
      *
      * Keyset rather than `offset`, and on `(occurred_at, id)` rather than
      * `occurred_at` alone: log rows share a timestamp constantly — a burst
@@ -356,21 +460,21 @@ final class RuleSimulator
      * is a ULID, so it breaks the tie in insertion order and the pair is
      * unique.
      *
-     * @return \Generator<int, CarbonInterface>
+     * @param  list<string>  $columns
+     * @return \Generator<int, \stdClass>
      */
     private function stream(
-        string $table,
-        ?string $level,
-        ?string $messageContains,
+        Builder $query,
         string $ip,
         CarbonInterface $from,
         CarbonInterface $to,
+        array $columns = [],
     ): \Generator {
         $lastAt = null;
         $lastId = null;
 
         while (true) {
-            $query = $this->matching($table, $level, $messageContains)
+            $page = (clone $query)
                 ->where('ip_address', $ip)
                 ->where('occurred_at', '>=', $from)
                 ->where('occurred_at', '<=', $to)
@@ -379,7 +483,7 @@ final class RuleSimulator
                 ->limit(self::CHUNK);
 
             if ($lastAt !== null) {
-                $query->where(function (Builder $q) use ($lastAt, $lastId): void {
+                $page->where(function (Builder $q) use ($lastAt, $lastId): void {
                     $q->where('occurred_at', '>', $lastAt)
                         ->orWhere(fn (Builder $tie): Builder => $tie
                             ->where('occurred_at', '=', $lastAt)
@@ -387,15 +491,13 @@ final class RuleSimulator
                 });
             }
 
-            $rows = $query->get(['id', 'occurred_at']);
+            $rows = $page->get(['id', 'occurred_at', ...$columns]);
 
             if ($rows->isEmpty()) {
                 return;
             }
 
-            foreach ($rows as $row) {
-                yield Carbon::parse($row->occurred_at);
-            }
+            yield from $rows;
 
             $last = $rows->last();
             $lastAt = $last->occurred_at;
