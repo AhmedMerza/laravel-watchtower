@@ -121,6 +121,32 @@ it('does not count a response outside the configured statuses', function () {
     $this->assertDatabaseMissing('blacklisted_ips', ['ip' => '203.0.113.11']);
 });
 
+it('does not count a 404 or 429 on an excepted path, whatever its case or encoding', function () {
+    config()->set('watchtower.auto_block.detectors.response_bursts.count', 1);
+    config()->set('watchtower.auto_block.detectors.response_bursts.except_paths', ['/lookup/*']);
+
+    Route::get('/lookup/busy', fn () => abort(429));
+
+    foreach (['/lookup/a', '/LOOKUP/b', '/%6Cookup/c', '/lookup/busy'] as $path) {
+        $this->withServerVariables(['REMOTE_ADDR' => '203.0.113.12'])->get($path);
+    }
+
+    $this->assertDatabaseMissing('blacklisted_ips', ['ip' => '203.0.113.12']);
+});
+
+it('still counts a 404 on a path the except list does not name', function () {
+    config()->set('watchtower.auto_block.detectors.response_bursts.count', 2);
+    config()->set('watchtower.auto_block.detectors.response_bursts.except_paths', ['/lookup/*']);
+
+    foreach (['/lookups', '/other/lookup/a'] as $path) {
+        $this->withServerVariables(['REMOTE_ADDR' => '203.0.113.13'])
+            ->get($path)
+            ->assertNotFound();
+    }
+
+    $this->assertDatabaseHas('blacklisted_ips', ['ip' => '203.0.113.13']);
+});
+
 it('warn mode reports the scanner probe instead of blocking it', function () {
     config()->set('watchtower.auto_block.mode', 'warn');
 

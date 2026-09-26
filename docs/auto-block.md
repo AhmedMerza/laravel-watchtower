@@ -83,6 +83,17 @@ A few things worth knowing before you arm any of these:
 
 - **`scanner_paths` answers the matching request itself.** A probe for `/.env` gets the block response rather than your 404, so a pattern that overlaps a real route never serves it even once. That cuts both ways: **a pattern that overlaps a route your users need will lock them out of it**, so keep the list to paths nothing legitimate asks for. Matching runs against the *decoded* path, so `/%2Eenv` is caught too. The threshold of `1` is deliberate — a single request for `/.env` is not a mistake.
 - **`response_bursts` is the loosest and most likely to catch a real person.** It reads the status after the response is sent, so it costs the request nothing, but a broken deploy that 404s its own assets looks exactly like enumeration. Leave it in `warn` mode for a full traffic cycle and raise the count to whatever your own logs say is normal.
+
+  **A route whose 404 means "found nothing" trips it too.** A search, a lookup by a code someone typed, or a front end polling for a record that doesn't exist yet can produce dozens of 404s a minute from one signed-in user. The real fix is to return `200` with an empty result from those routes. Until you can, list them in `except_paths`, using the same pattern syntax as `scanner_paths` and matched against the decoded path, case-insensitively. Their 404s and 429s are then never counted:
+
+  ```php
+  'response_bursts' => [
+      // ...
+      'except_paths' => ['/api/lookup/*', '/search'],
+  ],
+  ```
+
+  Keep the list to routes like these. A route that takes an ID is exactly what enumeration walks, so excepting it hides the burst this detector exists to catch. Skipping signed-in users instead would not be safer: a stolen session enumerating IDs is a signed-in user.
 - **`bad_user_agent` only sees what the filter already rejected**, so it does nothing unless `user_agents` is on, and a `never_block` address never reaches it. Its threshold is `5` rather than `scanner_paths`' `1` because a `User-Agent` is one header anyone can set to anything — see [Attack-Tool User-Agents](user-agents.md).
 - **`login_lockouts` builds on a limit you already set.** It counts the throttle your login form already applies, so one lockout is someone fumbling a password and several is someone working through a list.
 - **The counter resets on every decision**, so a block that lapses doesn't re-fire on the next signal.
