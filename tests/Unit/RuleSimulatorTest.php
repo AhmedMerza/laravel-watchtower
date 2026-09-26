@@ -487,6 +487,29 @@ it('blocks on a later tick once the users age out, with no new row to prompt it 
         ->and($offender['last_block_at'])->toBe(now()->copy()->subMinutes(30)->addSeconds(9 + 120)->toIso8601String());
 });
 
+it('keeps counting a user whose earlier row ages out while a later one is still in the window (#92)', function () {
+    // User 1's second row arrives after the address is first held back. At
+    // the next tick it enters the window as the first one leaves, so user 1
+    // is still signed in there. Forgetting them with their oldest row would
+    // drop the count to two and block a minute early.
+    foreach ([[1, 34], [2, 31], [3, 31], [1, 29]] as [$userId, $minutesAgo]) {
+        logEntry('10.0.0.1', [
+            'level'       => 'info',
+            'user_id'     => $userId,
+            'occurred_at' => now()->copy()->subMinutes($minutesAgo),
+        ]);
+    }
+
+    burst('10.0.0.1', 10, 30, ['level' => 'error']);
+
+    $offender = ($this->run)(['level' => 'error', 'count' => 10, 'window_minutes' => 5], sharedIp: 3)['offenders'][0];
+
+    // Held back until users 2 and 3 age out four ticks later.
+    expect($offender['warnings'])->toBe(4)
+        ->and($offender['blocks'])->toBe(1)
+        ->and($offender['last_block_at'])->toBe(now()->copy()->subMinutes(30)->addSeconds(9 + 240)->toIso8601String());
+});
+
 it('simulates nothing for a rule whose scope no route declares', function () {
     // AutoBlockService::run() skips such a rule outright, so a report of
     // what it "would have caught" describes a rule that never runs.
@@ -580,10 +603,12 @@ it('keeps counting through a block when the window is longer than the block', fu
 
     $result = ($this->run)(['count' => 4, 'window_minutes' => 30], duration: 5);
 
-    // Rows at 28, 20, 12 and 4 minutes ago each re-cross a 30-minute window
-    // that still holds its three predecessors, so the block re-arms every
-    // time the 5-minute one lapses.
-    expect($result['offenders'][0]['blocks'])->toBe(5);
+    // Blocks at 36, 31, 26, 20, 15, 10 and 4 minutes ago. Each new row
+    // re-crosses a window that still holds its three predecessors, and the
+    // lapses at 31, 26, 15 and 10 re-block with nothing new logged, because
+    // four rows are still inside the window. The lapses at 21 and 5 find
+    // only three.
+    expect($result['offenders'][0]['blocks'])->toBe(7);
 });
 
 /**

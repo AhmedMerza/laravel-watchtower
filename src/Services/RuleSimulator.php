@@ -332,8 +332,8 @@ final class RuleSimulator
 
         $blockedUntil = null;
         // The next moment the engine would evaluate this address: the row
-        // that just reached the threshold, or the tick after a held-back
-        // crossing. Null when nothing is pending.
+        // that just reached the threshold, the tick after a held-back
+        // crossing, or the moment a block lapses. Null when nothing is pending.
         $evaluateAt = null;
         $blocks = 0;
         $warnings = 0;
@@ -409,6 +409,9 @@ final class RuleSimulator
                     $evaluateAt = $tick + self::TICK_SECONDS;
                 } else {
                     $blockedUntil = $tick + $durationSeconds;
+                    // The engine re-reads its window when the block lapses, so
+                    // rows still inside it block again with nothing new logged.
+                    $evaluateAt = $blockedUntil;
                 }
 
                 // The crossing is real either way — it is what sets the block
