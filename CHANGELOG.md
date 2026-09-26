@@ -4,6 +4,10 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **`response_bursts.except_paths` stops chosen routes' 404s and 429s from counting toward a burst.** A route where 404 means "found nothing", such as a search, a lookup or a poll for a record that doesn't exist yet, could block a busy signed-in user. List it here, in `scanner_paths`' pattern syntax, matched against the decoded path, case-insensitively. It is empty by default, so nothing changes until you set it. Returning `200` from those routes is still the better fix. See [Auto-block](docs/auto-block.md) ([#101](https://github.com/AhmedMerza/laravel-watchtower/issues/101)).
+
 ### Fixed
 
 - **LogScope 2.2.0 no longer shows Watchtower's Block IP button, and Watchtower no longer claims it does.** LogScope 2.2.0 stopped including the `watchtower::partials.ip-actions` partial in its log detail panel on purpose (AhmedMerza/laravel-logscope@50d4adf): blocking belongs on Watchtower's own [management page](docs/management-page.md). On 2.2.0+, `watchtower:install` now points at that page instead of announcing a button, and the `composer.json` suggestion says which LogScope versions have the button. The partial stays, because LogScope 1.6.1–2.1.x still render it. Everything else in the LogScope integration is unchanged on 2.2.0: routes under its prefix with its authorization, log rules and `watchtower:simulate` ([#96](https://github.com/AhmedMerza/laravel-watchtower/issues/96)).

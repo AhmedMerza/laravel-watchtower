@@ -82,9 +82,18 @@ class SignalDetectorMiddleware
 
         $statuses = array_map(intval(...), (array) ($settings['statuses'] ?? [404, 429]));
 
-        if (in_array($response->getStatusCode(), $statuses, true)) {
-            $this->record('response_bursts', $request);
+        if (! in_array($response->getStatusCode(), $statuses, true)) {
+            return;
         }
+
+        // Routes whose 404 means "searched, found nothing" rather than "no
+        // such thing". Checked after the status, so the common case — a 200
+        // — never pays for the match.
+        if (PathMatcher::matchesAny((array) ($settings['except_paths'] ?? []), $request->decodedPath())) {
+            return;
+        }
+
+        $this->record('response_bursts', $request);
     }
 
     /**

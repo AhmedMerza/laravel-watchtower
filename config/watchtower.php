@@ -590,6 +590,15 @@ return [
                 'count'          => 40,
                 'window_minutes' => 1,
                 'statuses'       => [404, 429],
+                // Paths whose 404 or 429 is never counted, in the same
+                // pattern syntax as scanner_paths. For routes where a 404
+                // is an ordinary answer — a lookup or search that found
+                // nothing — and a real user can produce forty a minute.
+                // Returning 200 with an empty result from those routes is
+                // the better fix; this is for when you can't yet. Don't
+                // list a route that takes an ID: enumerating IDs is the
+                // burst this detector exists to see.
+                'except_paths'   => [],
                 'scope'          => null,
             ],
 
