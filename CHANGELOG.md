@@ -4,6 +4,8 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-09-26
+
 ### Added
 
 - **`response_bursts.except_paths` stops chosen routes' 404s and 429s from counting toward a burst.** A route where 404 means "found nothing", such as a search, a lookup or a poll for a record that doesn't exist yet, could block a busy signed-in user. List it here, in `scanner_paths`' pattern syntax, matched against the decoded path, case-insensitively. It is empty by default, so nothing changes until you set it. Returning `200` from those routes is still the better fix. See [Auto-block](docs/auto-block.md) ([#101](https://github.com/AhmedMerza/laravel-watchtower/issues/101)).
@@ -240,7 +242,8 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 - **There is no transitional `ahmedmerza/logscope-guard` package.** It has been removed from Packagist. To upgrade, `composer remove ahmedmerza/logscope-guard`, `composer require ahmedmerza/watchtower`, then work through the BREAKING entries under Changed.
 
-[Unreleased]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.6.2...HEAD
+[0.6.2]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.4.0...v0.5.0
