@@ -75,6 +75,10 @@ final class RuleSimulator
      * the block lifetime would report a number of blocks no operator would
      * ever have seen.
      *
+     * `first_block_at` and `last_block_at` span every crossing reported,
+     * warnings included: for an address the shared-IP guard held back each
+     * time (`blocks` 0), both are warnings' timestamps.
+     *
      * @param  array<string, mixed>  $rule
      * @return array{
      *     rule_index: int,

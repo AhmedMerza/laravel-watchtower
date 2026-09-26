@@ -413,7 +413,7 @@ it('still holds a global rule back when the shared-IP guard trips', function () 
     $offender = ($this->run)(['count' => 10, 'window_minutes' => 5], sharedIp: 3)['offenders'][0];
 
     expect($offender['blocks'])->toBe(0)
-        ->and($offender['warnings'])->toBeGreaterThan(0)
+        ->and($offender['warnings'])->toBe(5)
         ->and($offender['downgraded_to_scope'])->toBeNull();
 });
 
@@ -436,7 +436,7 @@ it('blocks a later crossing that no longer looks shared, after a first one that 
     $offender = ($this->run)(['count' => 10, 'window_minutes' => 5], sharedIp: 3)['offenders'][0];
 
     expect($offender['blocks'])->toBe(1)
-        ->and($offender['warnings'])->toBeGreaterThan(0)
+        ->and($offender['warnings'])->toBe(5)
         ->and($offender['last_block_at'])->toBe(now()->copy()->subMinutes(30)->addSeconds(9)->toIso8601String());
 });
 
@@ -463,7 +463,7 @@ it('does not let a held-back crossing hide the crossings after it (#92)', functi
     $offender = ($this->run)(['level' => 'error', 'count' => 10, 'window_minutes' => 5], sharedIp: 3)['offenders'][0];
 
     expect($offender['blocks'])->toBe(1)
-        ->and($offender['warnings'])->toBeGreaterThan(0);
+        ->and($offender['warnings'])->toBe(3);
 });
 
 it('blocks on a later tick once the users age out, with no new row to prompt it (#92)', function () {
@@ -603,4 +603,29 @@ it('orders two equally busy addresses by address, so --json diffs cleanly', func
 
     expect(array_column(($this->run)(['count' => 10, 'window_minutes' => 5])['offenders'], 'ip'))
         ->toBe(['10.0.0.2', '10.0.0.9']);
+});
+
+it('orders addresses with no blocks by warnings before address', function () {
+    // Both held back at every crossing. 10.0.0.9's burst stays over the
+    // threshold for five ticks, 10.0.0.2's for one, so the busier address
+    // leads even though it sorts second by name.
+    foreach (['10.0.0.9' => 1, '10.0.0.2' => 30] as $ip => $spacing) {
+        foreach ([1, 2, 3] as $i => $userId) {
+            logEntry($ip, [
+                'level'       => 'info',
+                'user_id'     => $userId,
+                'occurred_at' => now()->copy()->subMinutes(30)->addSeconds($i),
+            ]);
+        }
+
+        for ($i = 0; $i < 10; $i++) {
+            logEntry($ip, ['occurred_at' => now()->copy()->subMinutes(30)->addSeconds($i * $spacing)]);
+        }
+    }
+
+    $offenders = ($this->run)(['level' => 'error', 'count' => 10, 'window_minutes' => 5], sharedIp: 3)['offenders'];
+
+    expect(array_column($offenders, 'ip'))->toBe(['10.0.0.9', '10.0.0.2'])
+        ->and(array_column($offenders, 'warnings'))->toBe([5, 1])
+        ->and(array_column($offenders, 'blocks'))->toBe([0, 0]);
 });
