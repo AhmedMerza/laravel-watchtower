@@ -215,20 +215,24 @@ already kept the history the rule would have read:
 ```
 Rule #0 — level=error, 10 hit(s) in 5 min [block]
   1 address(es) would have been blocked, 1 block(s) in total.
-+--------------+--------+------------------+------------------+-------+-----------------+-----------+
-| IP           | Blocks | First            | Last             | Users | Clean signed-in | Guard     |
-+--------------+--------+------------------+------------------+-------+-----------------+-----------+
-| 198.51.100.4 | 1      | 2026-09-21 10:30 | 2026-09-21 10:30 | 4     | 4               | held back |
-+--------------+--------+------------------+------------------+-------+-----------------+-----------+
++--------------+--------+------------------+------------------+-------+-----------------+-------------+
+| IP           | Blocks | First            | Last             | Users | Clean signed-in | Guard       |
++--------------+--------+------------------+------------------+-------+-----------------+-------------+
+| 198.51.100.4 | 1      | 2026-09-21 10:30 | 2026-09-21 10:32 | 4     | 4               | 2 held back |
++--------------+--------+------------------+------------------+-------+-----------------+-------------+
   1 of these also sent signed-in traffic that never matched the rule — a block would have taken that away too.
-  1 would have been held back by the shared-IP guard (>= 3 signed-in users), so they would have been warnings, not blocks.
+  1 would have been held back by the shared-IP guard (>= 3 signed-in users): 2 warning(s), one a minute while it looked shared.
 ```
 
 The two warning lines are the point. **Clean signed-in** counts requests from
 that address that carried a signed-in user and never matched the rule — people
-who were doing nothing wrong and would have lost access anyway. **Guard** says
-whether the shared-IP guard would have stepped in, computed against the window
-the live guard would actually have read at that moment, not the whole period.
+who were doing nothing wrong and would have lost access anyway. **Guard** counts
+the minutes the shared-IP guard would have held a block back, each computed
+against the window the live guard would actually have read at that moment, not
+the whole period. The guard is re-measured every minute, as the engine does it,
+so an address can be held back and then blocked once its signed-in users age
+out of the window — as `198.51.100.4` was at 10:32. **First** and **Last** are
+its first and last crossing either way.
 
 It needs LogScope's log table and reports on whatever history is there, so a
 fresh install has nothing to say until logs accumulate. It reports every
@@ -251,7 +255,10 @@ lasts `block_duration_minutes`, so an address that would have earned a
 longer second block shows slightly more blocks here than it got. Rules are
 also replayed independently, while the live engine skips an address another
 rule has already blocked, so two overlapping rules can both claim the same
-address.
+address. Nor is a block's reach modelled: the engine blocks an IPv6 address's
+whole `/64`, which keeps its siblings out for the duration, while the replay
+judges each address on its own rows — so a sibling that kept going shows
+blocks the live `/64` block would already have covered.
 
 ### Cost, honestly
 
@@ -265,7 +272,10 @@ rows *anywhere in the period* — a much weaker filter than "`count` inside one
 window" — so on busy traffic it admits many addresses that never actually
 trip the rule, and each one is then streamed individually. LogScope has no
 `(ip_address, occurred_at)` index, so those per-address reads have no ideal
-plan.
+plan. An address that crosses the threshold while the shared-IP guard is on
+is read once more — its signed-in rows, streamed alongside the replay to keep
+a running count of users in the window — so the guard adds one walk per
+address, not one query per simulated minute.
 
 If you run this regularly against a large `log_entries`, add the composite
 index:

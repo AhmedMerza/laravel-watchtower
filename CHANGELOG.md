@@ -10,6 +10,10 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
   **The test that renders LogScope's panel now skips on 2.2.0+** with that reason, instead of failing every `prefer-stable` CI job. It reads the installed version itself rather than asking the install command, so a wrong version check in the command can't make the test skip where it should run. `prefer-lowest` still installs LogScope 1.6.1, so CI keeps covering the include on the versions that have it.
 
+- **`watchtower:simulate` no longer reports "warnings, not blocks" for an address the engine would block.** It judged the shared-IP guard once, at an address's first crossing, and applied that verdict to the whole period — while the engine re-measures the guard every minute. So an office gateway that looked shared on Monday hid a clean attack from the same address on Thursday, and a held-back crossing started a simulated block clock that swallowed every crossing in the next `block_duration_minutes`, although a shared-IP hold-back holds nothing (#71). The replay now judges the guard at every crossing, and re-checks a held-back address once a simulated minute until its rows leave the window or it stops looking shared — in which case it is blocked, even with no new row to prompt it. It also re-checks an address the moment a simulated block lapses, as the engine does, so rows still inside a window longer than `block_duration_minutes` block again rather than going uncounted until the next row ([#92](https://github.com/AhmedMerza/laravel-watchtower/issues/92)).
+
+  **`--json` changes shape:** each offender's `held_back_by_shared_ip_guard` boolean is replaced by `warnings`, the number of held-back minutes, and `blocks` now counts real blocks only. An address held back at every crossing is still listed, with `blocks: 0`. `first_block_at` and `last_block_at` span its crossings either way. The table's **Guard** column shows the count (`3 held back`) and the headline counts only addresses with a block.
+
 ## [0.6.1] - 2026-09-24
 
 ### Fixed

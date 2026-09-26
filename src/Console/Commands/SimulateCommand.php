@@ -176,12 +176,14 @@ class SimulateCommand extends Command
                 continue;
             }
 
-            $blocks = array_sum(array_column($offenders, 'blocks'));
+            // An address the guard held back at every crossing is in the list
+            // for its warnings, not counted here as blocked.
+            $blocked = array_filter($offenders, static fn (array $o): bool => $o['blocks'] > 0);
 
             $this->line(sprintf(
                 '  %d address(es) would have been blocked, %d block(s) in total.',
-                count($offenders),
-                $blocks,
+                count($blocked),
+                array_sum(array_column($offenders, 'blocks')),
             ));
 
             $this->table(
@@ -213,7 +215,8 @@ class SimulateCommand extends Command
      * What the shared-IP guard would have done to this address.
      *
      * Three outcomes, not two. On a GLOBAL rule the guard holds the block
-     * back and the address is only warned about. On a SCOPED rule it does
+     * back and the address is only warned about — for as long as it looks
+     * shared, so the same address can show blocks and hold-backs both. On a SCOPED rule it does
      * the opposite of holding back — `AutoBlockService::blockOrReport()`
      * converts the hold-back into a real block narrowed to that scope, which
      * is the entire reason scopes exist. Printing "held back" for both would
@@ -228,7 +231,7 @@ class SimulateCommand extends Command
             return 'scoped: '.$offender['downgraded_to_scope'];
         }
 
-        return $offender['held_back_by_shared_ip_guard'] ? 'held back' : '—';
+        return $offender['warnings'] > 0 ? $offender['warnings'].' held back' : '—';
     }
 
     /**
@@ -273,16 +276,14 @@ class SimulateCommand extends Command
             ));
         }
 
-        $heldBack = count(array_filter(
-            $offenders,
-            static fn (array $o): bool => $o['held_back_by_shared_ip_guard'],
-        ));
+        $heldBack = array_filter($offenders, static fn (array $o): bool => $o['warnings'] > 0);
 
-        if ($heldBack > 0) {
+        if ($heldBack !== []) {
             $this->warn(sprintf(
-                '  %d would have been held back by the shared-IP guard (>= %d signed-in users), so they would have been warnings, not blocks.',
-                $heldBack,
+                '  %d would have been held back by the shared-IP guard (>= %d signed-in users): %d warning(s), one a minute while it looked shared.',
+                count($heldBack),
                 $sharedIpThreshold,
+                array_sum(array_column($heldBack, 'warnings')),
             ));
         }
 

@@ -174,9 +174,12 @@ it('flags an address the shared-IP guard would have held back', function () {
         ]);
     }
 
-    $result = ($this->run)(['count' => 10, 'window_minutes' => 5], sharedIp: 3);
+    $offender = ($this->run)(['count' => 10, 'window_minutes' => 5], sharedIp: 3)['offenders'][0];
 
-    expect($result['offenders'][0]['held_back_by_shared_ip_guard'])->toBeTrue();
+    // Held back at the crossing and at every tick after it, until the burst
+    // falls out of the window: warnings, and never a block.
+    expect($offender['blocks'])->toBe(0)
+        ->and($offender['warnings'])->toBe(5);
 });
 
 it('does not flag the guard when it is switched off', function () {
@@ -189,8 +192,10 @@ it('does not flag the guard when it is switched off', function () {
         ]);
     }
 
-    expect(($this->run)(['count' => 10, 'window_minutes' => 5], sharedIp: 0)['offenders'][0]['held_back_by_shared_ip_guard'])
-        ->toBeFalse();
+    $offender = ($this->run)(['count' => 10, 'window_minutes' => 5], sharedIp: 0)['offenders'][0];
+
+    expect($offender['blocks'])->toBe(1)
+        ->and($offender['warnings'])->toBe(0);
 });
 
 it('counts signed-in traffic that never matched the rule, as the false-positive signal', function () {
@@ -230,7 +235,7 @@ it('never counts an anonymous address as having users', function () {
 
     expect($offender['distinct_users'])->toBe(0)
         ->and($offender['authenticated_rows_not_matching'])->toBe(0)
-        ->and($offender['held_back_by_shared_ip_guard'])->toBeFalse();
+        ->and($offender['warnings'])->toBe(0);
 });
 
 it('skips rows with no ip address at all', function () {
@@ -344,7 +349,10 @@ it('streams an address whose history spans many keyset pages', function () {
     $pages = 0;
 
     DB::listen(function ($query) use (&$pages): void {
-        if (str_contains($query->sql, 'order by') && str_contains($query->sql, 'limit')) {
+        // The matching rows' pages only, not the shared-IP guard's walk
+        // over the signed-in ones.
+        if (str_contains($query->sql, 'order by') && str_contains($query->sql, 'limit')
+            && ! str_contains($query->sql, 'user_id')) {
             $pages++;
         }
     });
@@ -387,7 +395,8 @@ it('reports a scoped rule as a scoped block, not as a warning, when the shared-I
         'scope'          => 'auth',
     ], sharedIp: 3)['offenders'][0];
 
-    expect($offender['held_back_by_shared_ip_guard'])->toBeFalse()
+    expect($offender['blocks'])->toBe(1)
+        ->and($offender['warnings'])->toBe(0)
         ->and($offender['downgraded_to_scope'])->toBe('auth');
 });
 
@@ -403,8 +412,102 @@ it('still holds a global rule back when the shared-IP guard trips', function () 
 
     $offender = ($this->run)(['count' => 10, 'window_minutes' => 5], sharedIp: 3)['offenders'][0];
 
-    expect($offender['held_back_by_shared_ip_guard'])->toBeTrue()
+    expect($offender['blocks'])->toBe(0)
+        ->and($offender['warnings'])->toBe(5)
         ->and($offender['downgraded_to_scope'])->toBeNull();
+});
+
+it('blocks a later crossing that no longer looks shared, after a first one that did (#92)', function () {
+    // Two hours ago the address carried three signed-in users and was held
+    // back; half an hour ago it crossed again with nobody signed in. The
+    // engine re-measures the guard on every tick, so the second crossing is
+    // a block — judging the guard once, at the first, called it a warning.
+    burst('10.0.0.1', 10, 120);
+
+    foreach ([1, 2, 3] as $i => $userId) {
+        logEntry('10.0.0.1', [
+            'user_id'     => $userId,
+            'occurred_at' => now()->copy()->subMinutes(120)->addSeconds($i),
+        ]);
+    }
+
+    burst('10.0.0.1', 10, 30);
+
+    $offender = ($this->run)(['count' => 10, 'window_minutes' => 5], sharedIp: 3)['offenders'][0];
+
+    expect($offender['blocks'])->toBe(1)
+        ->and($offender['warnings'])->toBe(5)
+        ->and($offender['last_block_at'])->toBe(now()->copy()->subMinutes(30)->addSeconds(9)->toIso8601String());
+});
+
+it('does not let a held-back crossing hide the crossings after it (#92)', function () {
+    // The users sign in at the start of an attack that keeps going. A
+    // held-back crossing opens no hold, so once they age out of the window
+    // the engine blocks — well inside block_duration_minutes of the first
+    // crossing, which the old replay treated as already served.
+    foreach ([1, 2, 3] as $i => $userId) {
+        logEntry('10.0.0.1', [
+            'level'       => 'info',
+            'user_id'     => $userId,
+            'occurred_at' => now()->copy()->subMinutes(30)->addSeconds($i),
+        ]);
+    }
+
+    for ($i = 0; $i < 45; $i++) {
+        logEntry('10.0.0.1', [
+            'level'       => 'error',
+            'occurred_at' => now()->copy()->subMinutes(30)->addSeconds($i * 20),
+        ]);
+    }
+
+    $offender = ($this->run)(['level' => 'error', 'count' => 10, 'window_minutes' => 5], sharedIp: 3)['offenders'][0];
+
+    expect($offender['blocks'])->toBe(1)
+        ->and($offender['warnings'])->toBe(3);
+});
+
+it('blocks on a later tick once the users age out, with no new row to prompt it (#92)', function () {
+    // The users were seen three minutes before the burst, so the crossing is
+    // held back, and two ticks later they have left the window while the
+    // burst has not. Nothing is logged then; the engine blocks anyway.
+    foreach ([1, 2, 3] as $i => $userId) {
+        logEntry('10.0.0.1', [
+            'level'       => 'info',
+            'user_id'     => $userId,
+            'occurred_at' => now()->copy()->subMinutes(33)->addSeconds($i),
+        ]);
+    }
+
+    burst('10.0.0.1', 10, 30, ['level' => 'error']);
+
+    $offender = ($this->run)(['level' => 'error', 'count' => 10, 'window_minutes' => 5], sharedIp: 3)['offenders'][0];
+
+    expect($offender['warnings'])->toBe(2)
+        ->and($offender['blocks'])->toBe(1)
+        ->and($offender['last_block_at'])->toBe(now()->copy()->subMinutes(30)->addSeconds(9 + 120)->toIso8601String());
+});
+
+it('keeps counting a user whose earlier row ages out while a later one is still in the window (#92)', function () {
+    // User 1's second row arrives after the address is first held back. At
+    // the next tick it enters the window as the first one leaves, so user 1
+    // is still signed in there. Forgetting them with their oldest row would
+    // drop the count to two and block a minute early.
+    foreach ([[1, 34], [2, 31], [3, 31], [1, 29]] as [$userId, $minutesAgo]) {
+        logEntry('10.0.0.1', [
+            'level'       => 'info',
+            'user_id'     => $userId,
+            'occurred_at' => now()->copy()->subMinutes($minutesAgo),
+        ]);
+    }
+
+    burst('10.0.0.1', 10, 30, ['level' => 'error']);
+
+    $offender = ($this->run)(['level' => 'error', 'count' => 10, 'window_minutes' => 5], sharedIp: 3)['offenders'][0];
+
+    // Held back until users 2 and 3 age out four ticks later.
+    expect($offender['warnings'])->toBe(4)
+        ->and($offender['blocks'])->toBe(1)
+        ->and($offender['last_block_at'])->toBe(now()->copy()->subMinutes(30)->addSeconds(9 + 240)->toIso8601String());
 });
 
 it('simulates nothing for a rule whose scope no route declares', function () {
@@ -500,11 +603,27 @@ it('keeps counting through a block when the window is longer than the block', fu
 
     $result = ($this->run)(['count' => 4, 'window_minutes' => 30], duration: 5);
 
-    // Rows at 28, 20, 12 and 4 minutes ago each re-cross a 30-minute window
-    // that still holds its three predecessors, so the block re-arms every
-    // time the 5-minute one lapses.
-    expect($result['offenders'][0]['blocks'])->toBe(5);
+    // Blocks at 36, 31, 26, 20, 15, 10 and 4 minutes ago. Each new row
+    // re-crosses a window that still holds its three predecessors, and the
+    // lapses at 31, 26, 15 and 10 re-block with nothing new logged, because
+    // four rows are still inside the window. The lapses at 21 and 5 find
+    // only three.
+    expect($result['offenders'][0]['blocks'])->toBe(7)
+        ->and($result['offenders'][0]['first_block_at'])->toBe(now()->copy()->subMinutes(36)->toIso8601String())
+        ->and($result['offenders'][0]['last_block_at'])->toBe(now()->copy()->subMinutes(4)->toIso8601String());
 });
+
+it('re-checks once a minute rather than hanging when the block duration is not positive', function (int $duration) {
+    // A lapse at or before the tick that set it would re-evaluate that same
+    // moment forever. The engine can't re-check sooner than its next
+    // once-a-minute run, so neither does the simulator: blocks at +9s, +69s,
+    // +129s, +189s and +249s, and at +309s the first row has left the window.
+    burst('10.0.0.1', 10, 30);
+
+    $result = ($this->run)(['count' => 10, 'window_minutes' => 5], duration: $duration);
+
+    expect($result['offenders'][0]['blocks'])->toBe(5);
+})->with([0, -5]);
 
 /**
  * Pins the OUTPUT contract, not the tie-break that implements it.
@@ -523,4 +642,29 @@ it('orders two equally busy addresses by address, so --json diffs cleanly', func
 
     expect(array_column(($this->run)(['count' => 10, 'window_minutes' => 5])['offenders'], 'ip'))
         ->toBe(['10.0.0.2', '10.0.0.9']);
+});
+
+it('orders addresses with no blocks by warnings before address', function () {
+    // Both held back at every crossing. 10.0.0.9's burst stays over the
+    // threshold for five ticks, 10.0.0.2's for one, so the busier address
+    // leads even though it sorts second by name.
+    foreach (['10.0.0.9' => 1, '10.0.0.2' => 30] as $ip => $spacing) {
+        foreach ([1, 2, 3] as $i => $userId) {
+            logEntry($ip, [
+                'level'       => 'info',
+                'user_id'     => $userId,
+                'occurred_at' => now()->copy()->subMinutes(30)->addSeconds($i),
+            ]);
+        }
+
+        for ($i = 0; $i < 10; $i++) {
+            logEntry($ip, ['occurred_at' => now()->copy()->subMinutes(30)->addSeconds($i * $spacing)]);
+        }
+    }
+
+    $offenders = ($this->run)(['level' => 'error', 'count' => 10, 'window_minutes' => 5], sharedIp: 3)['offenders'];
+
+    expect(array_column($offenders, 'ip'))->toBe(['10.0.0.9', '10.0.0.2'])
+        ->and(array_column($offenders, 'warnings'))->toBe([5, 1])
+        ->and(array_column($offenders, 'blocks'))->toBe([0, 0]);
 });
