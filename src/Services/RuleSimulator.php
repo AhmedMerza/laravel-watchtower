@@ -411,7 +411,10 @@ final class RuleSimulator
                     $blockedUntil = $tick + $durationSeconds;
                     // The engine re-reads its window when the block lapses, so
                     // rows still inside it block again with nothing new logged.
-                    $evaluateAt = $blockedUntil;
+                    // Never sooner than the next tick: the engine runs once a
+                    // minute, and a block_duration_minutes of 0 or less would
+                    // otherwise re-evaluate this same moment forever.
+                    $evaluateAt = max($blockedUntil, $tick + self::TICK_SECONDS);
                 }
 
                 // The crossing is real either way — it is what sets the block

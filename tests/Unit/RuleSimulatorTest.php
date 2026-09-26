@@ -611,6 +611,18 @@ it('keeps counting through a block when the window is longer than the block', fu
     expect($result['offenders'][0]['blocks'])->toBe(7);
 });
 
+it('re-checks once a minute rather than hanging when the block duration is not positive', function (int $duration) {
+    // A lapse at or before the tick that set it would re-evaluate that same
+    // moment forever. The engine can't re-check sooner than its next
+    // once-a-minute run, so neither does the simulator: blocks at +9s, +69s,
+    // +129s, +189s and +249s, and at +309s the first row has left the window.
+    burst('10.0.0.1', 10, 30);
+
+    $result = ($this->run)(['count' => 10, 'window_minutes' => 5], duration: $duration);
+
+    expect($result['offenders'][0]['blocks'])->toBe(5);
+})->with([0, -5]);
+
 /**
  * Pins the OUTPUT contract, not the tie-break that implements it.
  *
