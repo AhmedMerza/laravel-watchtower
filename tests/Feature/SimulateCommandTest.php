@@ -116,7 +116,7 @@ it('emits json with --json', function () {
     expect($decoded['days'])->toBe(7)
         ->and($decoded['table'])->toBe('log_entries')
         ->and($decoded['rules'][0]['offenders'][0])
-        ->toMatchArray(['ip' => '10.0.0.1', 'blocks' => 1, 'distinct_users' => 1]);
+        ->toMatchArray(['ip' => '10.0.0.1', 'blocks' => 1, 'warnings' => 0, 'distinct_users' => 1, 'downgraded_to_scope' => null]);
 });
 
 it('narrows to one rule with --rule', function () {
@@ -185,7 +185,7 @@ it('warns about signed-in traffic a block would have taken down with it', functi
         ->expectsOutputToContain('also sent signed-in traffic that never matched the rule');
 });
 
-it('warns when the shared-IP guard would have downgraded a block', function () {
+it('warns when the shared-IP guard would have held a block back', function () {
     seedBurst('10.0.0.1', 10, 30);
 
     foreach ([1, 2, 3] as $i => $userId) {
