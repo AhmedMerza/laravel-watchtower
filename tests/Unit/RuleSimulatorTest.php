@@ -608,7 +608,9 @@ it('keeps counting through a block when the window is longer than the block', fu
     // lapses at 31, 26, 15 and 10 re-block with nothing new logged, because
     // four rows are still inside the window. The lapses at 21 and 5 find
     // only three.
-    expect($result['offenders'][0]['blocks'])->toBe(7);
+    expect($result['offenders'][0]['blocks'])->toBe(7)
+        ->and($result['offenders'][0]['first_block_at'])->toBe(now()->copy()->subMinutes(36)->toIso8601String())
+        ->and($result['offenders'][0]['last_block_at'])->toBe(now()->copy()->subMinutes(4)->toIso8601String());
 });
 
 it('re-checks once a minute rather than hanging when the block duration is not positive', function (int $duration) {
