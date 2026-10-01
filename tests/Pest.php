@@ -3,11 +3,16 @@
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Watchtower\Support\SyncSignature;
+use Watchtower\Tests\InstallTestCase;
 use Watchtower\Tests\StandaloneTestCase;
 use Watchtower\Tests\SyncTestCase;
 use Watchtower\Tests\TestCase;
 
 uses(TestCase::class)->in(__DIR__.'/Feature', __DIR__.'/Unit');
+
+// A genuinely empty app: TestCase pre-creates every table directly, which
+// would hide a migration double-registering (#104).
+uses(InstallTestCase::class)->in(__DIR__.'/Install');
 
 // A master environment. Sync routes are registered from config at boot, so
 // these need the secret in place before the app comes up — which is what

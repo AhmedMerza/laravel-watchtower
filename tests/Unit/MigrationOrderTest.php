@@ -7,16 +7,13 @@ use Watchtower\WatchtowerServiceProvider;
 
 /**
  * The package declares migrations by bare name, with no timestamp prefix.
- *
- * `runsMigrations()` passes each one to `loadMigrationsFrom()`, and Laravel's
- * migrator sorts the files it collects by migration name — it does not run
- * them in the order `configurePackage()` declares. So on any install that
- * doesn't publish migrations, a new migration whose file name sorts before an
- * existing one runs first, against a table that doesn't exist yet.
- *
- * Publishing is unaffected (it stamps them in declaration order), which is
- * exactly why this is easy to miss: it breaks only the installs nobody tests
- * by hand.
+ * Publishing is the only way they ever run (#104), and spatie/package-tools
+ * stamps each one with an incrementing timestamp in the order
+ * `configurePackage()` declares them — not the order their file names sort
+ * into. Keeping the two in sync is just readability now, but older installs
+ * from before #104 may still have one of these recorded under its bare name
+ * via the removed `runsMigrations()` load path, which is why renaming an
+ * existing migration is still off-limits.
  */
 it('declares migrations in the order their file names sort', function () {
     $package = new Package;

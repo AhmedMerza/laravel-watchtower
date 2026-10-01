@@ -47,17 +47,16 @@ class WatchtowerServiceProvider extends PackageServiceProvider
         $package
             ->name('watchtower')
             ->hasConfigFile()
-            // ⚠️ Migration file names must sort in the order they have to run.
-            // runsMigrations() hands each file to loadMigrationsFrom(), and
-            // Laravel's migrator sorts by migration name — it does not honour
-            // the order they're declared in here. These names carry no
-            // timestamp, so a new migration whose name sorts before an earlier
-            // one runs first and fails on any install that doesn't publish
-            // migrations. MigrationOrderTest pins this.
+            // ⚠️ No runsMigrations() here (#104): package-tools' loadMigrationsFrom()
+            // runs alongside vendor:publish unconditionally, with no check for
+            // whether the migration was already published — so every app that
+            // publishes these (InstallCommand does) got the table created twice
+            // and crashed. Publishing is the only load path now; declaration
+            // order here still becomes the publish timestamp order, so keep
+            // these sorted the order they have to run. MigrationOrderTest pins it.
             ->hasMigration('create_blacklisted_ips_table')
             ->hasMigration('create_ip_offences_table')
             ->hasMigration('update_blacklisted_ips_table_add_scope')
-            ->runsMigrations()
             ->hasViews()
             ->hasCommands([InstallCommand::class, SyncCommand::class, CleanupCommand::class, SimulateCommand::class]);
     }
