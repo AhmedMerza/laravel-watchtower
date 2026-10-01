@@ -7,7 +7,7 @@ What to check when you upgrade an existing install. The [CHANGELOG](../CHANGELOG
 **1. Run the migrations.** Recent releases added the `scope` column on `blacklisted_ips` and the `ip_offences` table that escalating durations use:
 
 ```bash
-# only if you publish migrations — re-publish so the new ones land
+# re-publish so the new ones land — this is the only way they run (#104)
 php artisan vendor:publish --tag=watchtower-migrations
 
 php artisan migrate
