@@ -27,8 +27,8 @@ it('declares migrations in the order their file names sort', function () {
         $sorted,
         'Migration file names must sort into the order they have to run. '.
         'Rename the new migration so it sorts after the one it depends on — '.
-        'do NOT rename an existing migration, because installs using '.
-        'runsMigrations() record the old name and would re-run it.'
+        'do NOT rename an existing migration, because installs from before '.
+        '#104 may still have it recorded under its old, bare name.'
     );
 });
 

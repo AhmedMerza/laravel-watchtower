@@ -9,6 +9,7 @@ it('installs cleanly against a genuinely fresh app, without a double-registered 
 
     expect(Schema::hasTable('blacklisted_ips'))->toBeTrue();
     expect(Schema::hasTable('ip_offences'))->toBeTrue();
+    expect(Schema::hasColumn('blacklisted_ips', 'scope'))->toBeTrue();
 });
 
 it('runs a second time without error, as a repeated watchtower:install would', function () {

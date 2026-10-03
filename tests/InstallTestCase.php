@@ -66,14 +66,21 @@ class InstallTestCase extends Orchestra
 
     /**
      * vendor:publish writes real files into the testbench skeleton app's
-     * database/migrations, which is shared across every test run — unlike
-     * the in-memory sqlite connection, it does not reset itself.
+     * database/migrations and config directories, which are shared across
+     * every test run — unlike the in-memory sqlite connection, neither
+     * resets itself. A stray published config is the worse of the two:
+     * vendor:publish --force=false no-ops once it exists, and
+     * mergeConfigFrom() only fills in keys ABSENT from it, so a key whose
+     * default changed between versions would silently keep the stale value
+     * for the whole run.
      */
     protected function tearDown(): void
     {
         foreach (File::glob(database_path('migrations/*_{create_blacklisted_ips_table,create_ip_offences_table,update_blacklisted_ips_table_add_scope}.php'), GLOB_BRACE) as $published) {
             File::delete($published);
         }
+
+        File::delete(config_path('watchtower.php'));
 
         parent::tearDown();
     }
