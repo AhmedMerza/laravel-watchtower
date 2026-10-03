@@ -679,6 +679,24 @@ return [
     |                has no enabled flag of its own, since it's already
     |                fully controlled by 'sync.master_url' being set.
     |
+    | 'cloudflare' — account-level IP Access Rules (not an IP List — see
+    |                docs/block-targets.md for why). Needs an API token
+    |                scoped to Account → Firewall Access Rules → Edit, and
+    |                the account id both are under. Every rule Watchtower
+    |                creates is tagged in its `notes` field, so reconcile
+    |                only ever touches rules it created itself — never one
+    |                you added by hand in the dashboard. If a rule for the
+    |                same address already exists and isn't tagged, apply()
+    |                fails loudly (logged) rather than silently overwriting
+    |                it.
+    |
+    |                Cloudflare's IP Access Rules only accept specific CIDR
+    |                prefix lengths for a range (IPv4 /16 or /24; IPv6 /32,
+    |                /48, /64). This repo's IPv6 default (ipv6_block_prefix
+    |                above, /64) fits; a wider admin-forced range or an odd
+    |                IPv4 CIDR does not and is skipped with a logged reason
+    |                instead of pushed.
+    |
     | `watchtower:reconcile` pushes the full active blocklist to every
     | enabled target, to repair anything a live push missed (a job that
     | exhausted its retries, a target that was down). It is not scheduled by
@@ -692,7 +710,11 @@ return [
     */
 
     'block_targets' => [
-        // 'cloudflare' => [...],  // added when the cloudflare target ships
+        'cloudflare' => [
+            'enabled'    => env('WATCHTOWER_CLOUDFLARE_ENABLED', false),
+            'account_id' => env('WATCHTOWER_CLOUDFLARE_ACCOUNT_ID'),
+            'api_token'  => env('WATCHTOWER_CLOUDFLARE_API_TOKEN'),
+        ],
         // 'nginx_file' => [...], // added when the nginx_file target ships
     ],
 

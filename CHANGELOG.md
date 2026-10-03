@@ -8,6 +8,8 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 - **`php artisan watchtower:reconcile`** re-pushes every active global block to the master environment, repairing drift a live push missed (a job that exhausted its retries, a target that was down). It's the first piece of a `BlockTarget` interface that will let a block reach places besides other Laravel environments — Cloudflare and an nginx deny file are next. See [Cross-Environment Sync](docs/sync.md#repairing-drift) and [Artisan Commands](docs/commands.md) ([#25](https://github.com/AhmedMerza/laravel-watchtower/issues/25)).
 
+- **A `cloudflare` block target** pushes a global block to Cloudflare as an account-level IP Access Rule, and removes it on unblock — so a flood is turned away at Cloudflare's edge instead of tying up a PHP worker for every request. Set `WATCHTOWER_CLOUDFLARE_ENABLED=true` plus an account id and an API token scoped to Account → Firewall Access Rules → Edit. Every rule it creates is tagged, so `watchtower:reconcile` and a later unblock only ever touch rules Watchtower created — never one added by hand in the dashboard. See [Block Targets](docs/block-targets.md) ([#25](https://github.com/AhmedMerza/laravel-watchtower/issues/25)).
+
 ## [0.7.0] - 2026-10-03
 
 ### Fixed

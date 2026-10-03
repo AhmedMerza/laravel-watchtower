@@ -83,3 +83,8 @@ automatically retries a push whose queued job exhausted its 3 tries; this is
 how you catch those up without waiting for the next time each address is
 blocked again. Not scheduled by default — add it to the satellite's schedule
 on whatever cadence suits you. See [Artisan Commands](commands.md).
+
+The same command repairs every other enabled [block target](block-targets.md)
+the same way — a satellite running the Cloudflare target in particular relies
+on it, since a block learned only through this page's pull never reaches
+Cloudflare live.

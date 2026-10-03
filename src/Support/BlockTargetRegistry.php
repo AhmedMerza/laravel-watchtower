@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Watchtower\Support;
 
 use Watchtower\Contracts\BlockTarget;
+use Watchtower\Targets\CloudflareTarget;
 use Watchtower\Targets\LaravelTarget;
 
 /**
@@ -35,8 +36,18 @@ final class BlockTargetRegistry
             $targets['laravel'] = app(LaravelTarget::class);
         }
 
-        // `cloudflare` and `nginx_file` join here, each gated on its own
-        // watchtower.block_targets.{key}.enabled, once they exist.
+        // Unlike `laravel`, `cloudflare` has its own enabled flag — nothing
+        // else implies it — plus both credentials it needs to call the API
+        // at all. Missing either one just leaves the target absent, not a
+        // boot-time error.
+        if (config('watchtower.block_targets.cloudflare.enabled')
+            && config('watchtower.block_targets.cloudflare.account_id')
+            && config('watchtower.block_targets.cloudflare.api_token')) {
+            $targets['cloudflare'] = app(CloudflareTarget::class);
+        }
+
+        // `nginx_file` joins here, gated on its own
+        // watchtower.block_targets.nginx_file.enabled, once it exists.
 
         return $targets;
     }
