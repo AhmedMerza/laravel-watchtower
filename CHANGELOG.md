@@ -10,6 +10,8 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 - **A `cloudflare` block target** pushes a global block to Cloudflare as an account-level IP Access Rule, and removes it on unblock — so a flood is turned away at Cloudflare's edge instead of tying up a PHP worker for every request. Set `WATCHTOWER_CLOUDFLARE_ENABLED=true` plus an account id and an API token scoped to Account → Firewall Access Rules → Edit. Every rule it creates is tagged, so `watchtower:reconcile` and a later unblock only ever touch rules Watchtower created — never one added by hand in the dashboard. See [Block Targets](docs/block-targets.md) ([#25](https://github.com/AhmedMerza/laravel-watchtower/issues/25)).
 
+- **An `nginx_file` block target** writes a `deny {ip};` line per active block to a plain file, atomically, then runs a configured reload command so nginx picks it up — a blocked request is rejected by nginx itself and never boots Laravel. Set `WATCHTOWER_NGINX_FILE_ENABLED=true` plus a `path`; `reload_command` is optional (a systemd path unit watching the file works too). #25 is now closed — `laravel`, `cloudflare`, and `nginx_file` are all shipped. See [Block Targets](docs/block-targets.md) ([#25](https://github.com/AhmedMerza/laravel-watchtower/issues/25)).
+
 ## [0.7.0] - 2026-10-03
 
 ### Fixed

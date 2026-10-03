@@ -697,6 +697,45 @@ return [
     |                IPv4 CIDR does not and is skipped with a logged reason
     |                instead of pushed.
     |
+    | 'nginx_file' — writes a `deny {ip};` line per active block to 'path',
+    |                atomically (a crash mid-write never leaves a
+    |                half-written file), then runs 'reload_command' so nginx
+    |                picks it up. Add ONE line to your nginx config:
+    |
+    |                    include /path/to/the/same/file;
+    |
+    |                inside whichever http/server/location block should
+    |                enforce it — no `allow all;` needed afterward, since
+    |                nginx's access module defaults to allow when nothing
+    |                matches. `allow`/`deny` are NOT inherited into a
+    |                context that defines its own, so place the include
+    |                relative to any rules of your own in the same context
+    |                deliberately, not assuming they layer together.
+    |
+    |                The file must already exist before nginx first loads
+    |                that include line, or `nginx -t`/reload fails outright.
+    |                Run `php artisan watchtower:reconcile` once (or `touch`
+    |                the path) before adding the include.
+    |
+    |                'reload_command' is optional — leave it unset if a
+    |                systemd path unit watches the file and reloads nginx
+    |                itself instead. If set, it runs as this process's user,
+    |                which usually can't reload nginx directly; grant just
+    |                that one command via a sudoers entry, e.g.:
+    |
+    |                    www-data ALL=(root) NOPASSWD: /usr/sbin/nginx -s reload
+    |
+    |                    WATCHTOWER_NGINX_FILE_RELOAD_COMMAND="sudo /usr/sbin/nginx -s reload"
+    |
+    |                Every block/unblock reloads nginx unless nothing in the
+    |                file actually changed — on a host blocking frequently,
+    |                weigh that reload cost.
+    |
+    |                The directory holding 'path' must already exist and be
+    |                writable by this process's user; this package does not
+    |                create it. nginx's own user needs read access to the
+    |                file itself.
+    |
     | `watchtower:reconcile` pushes the full active blocklist to every
     | enabled target, to repair anything a live push missed (a job that
     | exhausted its retries, a target that was down). It is not scheduled by
@@ -715,7 +754,11 @@ return [
             'account_id' => env('WATCHTOWER_CLOUDFLARE_ACCOUNT_ID'),
             'api_token'  => env('WATCHTOWER_CLOUDFLARE_API_TOKEN'),
         ],
-        // 'nginx_file' => [...], // added when the nginx_file target ships
+        'nginx_file' => [
+            'enabled'        => env('WATCHTOWER_NGINX_FILE_ENABLED', false),
+            'path'           => env('WATCHTOWER_NGINX_FILE_PATH'),
+            'reload_command' => env('WATCHTOWER_NGINX_FILE_RELOAD_COMMAND'),
+        ],
     ],
 
     /*

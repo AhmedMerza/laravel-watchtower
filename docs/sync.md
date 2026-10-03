@@ -85,6 +85,6 @@ blocked again. Not scheduled by default — add it to the satellite's schedule
 on whatever cadence suits you. See [Artisan Commands](commands.md).
 
 The same command repairs every other enabled [block target](block-targets.md)
-the same way — a satellite running the Cloudflare target in particular relies
-on it, since a block learned only through this page's pull never reaches
-Cloudflare live.
+the same way — a satellite running the Cloudflare or nginx_file target in
+particular relies on it, since a block learned only through this page's pull
+never reaches either target live.

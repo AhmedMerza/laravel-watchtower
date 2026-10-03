@@ -53,7 +53,7 @@ class CleanupCommand extends Command
         // row for the same reason remove() itself batches its cache work —
         // cleanup can lapse many rows at once and a per-row rebuild would
         // multiply that cost by however many expired. IpUnblocked still has
-        // to fire for each GLOBAL one, or a future BlockTarget (cloudflare,
+        // to fire for each GLOBAL one, or an enabled BlockTarget (cloudflare,
         // nginx_file) never learns a temporary block lapsed and keeps
         // enforcing it at the edge until the next watchtower:reconcile.
         //

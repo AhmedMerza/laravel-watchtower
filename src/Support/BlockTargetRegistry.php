@@ -7,6 +7,7 @@ namespace Watchtower\Support;
 use Watchtower\Contracts\BlockTarget;
 use Watchtower\Targets\CloudflareTarget;
 use Watchtower\Targets\LaravelTarget;
+use Watchtower\Targets\NginxFileTarget;
 
 /**
  * Every BlockTarget this node should apply/remove/reconcile against right
@@ -46,8 +47,14 @@ final class BlockTargetRegistry
             $targets['cloudflare'] = app(CloudflareTarget::class);
         }
 
-        // `nginx_file` joins here, gated on its own
-        // watchtower.block_targets.nginx_file.enabled, once it exists.
+        // Like `cloudflare`, `nginx_file` has its own enabled flag plus the
+        // one setting it actually needs to do anything: a path to write.
+        // `reload_command` is NOT required here — leaving it unset is valid
+        // (e.g. a systemd path unit handles the reload out of band).
+        if (config('watchtower.block_targets.nginx_file.enabled')
+            && config('watchtower.block_targets.nginx_file.path')) {
+            $targets['nginx_file'] = app(NginxFileTarget::class);
+        }
 
         return $targets;
     }
