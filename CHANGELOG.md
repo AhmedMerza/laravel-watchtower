@@ -4,6 +4,8 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-03
+
 ### Fixed
 
 - **`watchtower:install` no longer crashes on a fresh install with `table "blacklisted_ips" already exists`.** `WatchtowerServiceProvider` chained `hasMigration()` with `runsMigrations()`, and spatie/laravel-package-tools' `ProcessMigrations::bootPackageMigrations()` calls `loadMigrationsFrom()` unconditionally — it never checks whether the migration was already published. `InstallCommand` both publishes the migrations and runs `migrate`, so every fresh install registered each migration twice: the published, timestamped copy and the vendor-loaded bare-name copy. The published copy created the table first; the vendor copy then failed on the same table, leaving the install half-finished and every later `php artisan migrate` failing on the still-pending vendor copies ([#104](https://github.com/AhmedMerza/laravel-watchtower/issues/104)).
@@ -248,7 +250,8 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 - **There is no transitional `ahmedmerza/logscope-guard` package.** It has been removed from Packagist. To upgrade, `composer remove ahmedmerza/logscope-guard`, `composer require ahmedmerza/watchtower`, then work through the BREAKING entries under Changed.
 
-[Unreleased]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.6.2...HEAD
+[Unreleased]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.6.2...v0.7.0
 [0.6.2]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.5.0...v0.6.0
