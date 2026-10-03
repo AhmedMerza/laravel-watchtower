@@ -24,7 +24,7 @@ beforeEach(function () {
 
 afterEach(function () {
     foreach (glob($this->dir.'/*') ?: [] as $leftover) {
-        unlink($leftover);
+        is_dir($leftover) ? rmdir($leftover) : unlink($leftover);
     }
     rmdir($this->dir);
 });
@@ -134,14 +134,42 @@ it('creates the file on a fresh install even when there is nothing active to wri
     Process::assertRanTimes('nginx -s reload', 1);
 });
 
-it('skips write and reload when the computed set already matches — the idempotency criterion', function () {
+it('skips the rewrite but still reloads when the computed set already matches', function () {
+    // The idempotency criterion is "no needless rewrite", not "no reload":
+    // reload still has to run every time reconcile() is invoked, even with
+    // nothing to rewrite, or a PRIOR reload that failed after a successful
+    // write would never get retried (see the "repairs a previously failed
+    // reload" test below). fileinode() unchanged proves no rename() ran —
+    // content alone can't, since identical content written twice would look
+    // the same either way.
     Process::fake();
 
     $this->file->replaceAll(['1.2.3.4', '5.6.7.8']);
+    $inodeBefore = fileinode($this->path);
 
     $this->file->replaceAll(['5.6.7.8', '1.2.3.4']); // same set, different order
 
-    Process::assertRanTimes('nginx -s reload', 1);
+    expect(fileinode($this->path))->toBe($inodeBefore);
+    Process::assertRanTimes('nginx -s reload', 2);
+});
+
+it('repairs a previously failed reload on the next reconcile, even with nothing to rewrite', function () {
+    // The gap this guards: commit() writes successfully, then its own
+    // reload() throws. The file is now correct but nginx was never told —
+    // without this, the very next reconcile() would see content already
+    // matching and skip retrying the reload forever.
+    Process::fake(['nginx -s reload' => Process::result(exitCode: 1, errorOutput: 'nginx: [error] invalid config')]);
+
+    expect(fn () => $this->file->replaceAll(['1.2.3.4']))->toThrow(RuntimeException::class);
+
+    Process::fake(); // bare call replaces the handler map — reload now succeeds
+
+    $this->file->replaceAll(['1.2.3.4']); // same set — would be a no-op content-wise
+
+    // assertRanTimes, not assertRan: the first call's own (failed) attempt
+    // already satisfies "ran at least once" on its own, so only a count
+    // proves the second call retried rather than skipping the reload too.
+    Process::assertRanTimes('nginx -s reload', 2);
 });
 
 it('skips one unparseable value and still writes the rest of the batch', function () {
@@ -164,11 +192,16 @@ it('skips one unparseable value and still writes the rest of the batch', functio
 
 // --- reload() ------------------------------------------------------------------
 
-it('throws with the captured stderr when the reload command fails', function () {
+it('throws with the captured stderr when the reload command fails, but still leaves the write durable', function () {
     Process::fake(['nginx -s reload' => Process::result(exitCode: 1, errorOutput: 'nginx: [error] invalid config')]);
 
     expect(fn () => $this->file->add('1.2.3.4'))
         ->toThrow(RuntimeException::class, 'invalid config');
+
+    // commit() writes before it reloads — an admin should be able to trust
+    // the file reflects the last attempted block even when nginx was never
+    // told to pick it up.
+    expect(file_get_contents($this->path))->toContain('deny 1.2.3.4;');
 });
 
 it('skips the reload entirely when no reload_command is configured', function () {
@@ -179,6 +212,58 @@ it('skips the reload entirely when no reload_command is configured', function ()
 
     Process::assertNothingRan();
     expect(file_get_contents($this->path))->toContain('deny 1.2.3.4;');
+});
+
+// --- directory/lock errors raise OUR message, not a raw ErrorException -----------
+
+it('throws its own message, not a raw ErrorException, when the lock file cannot be opened', function () {
+    // Laravel's error handler converts fopen()'s warning on failure into a
+    // thrown ErrorException before the `=== false` check below can ever
+    // run — unless the call is @-suppressed. Forcing that failure here (the
+    // lock path already exists as a directory, so fopen(..., 'c+') fails)
+    // proves the suppression is actually in place, not just commented as
+    // intent.
+    mkdir($this->path.'.lock');
+
+    expect(fn () => $this->file->add('1.2.3.4'))
+        ->toThrow(RuntimeException::class, 'Could not open the lock file');
+});
+
+// --- permissions and locking -----------------------------------------------------
+
+it('preserves the file\'s existing permissions across a rewrite', function () {
+    // writeValues() always writes through a brand-new temp file, so without
+    // this, a permission an admin set by hand (e.g. to give nginx's group
+    // read access beyond this process's own umask) would be silently
+    // reverted to the umask default on the very next block or unblock.
+    Process::fake();
+
+    $this->file->add('1.2.3.4');
+    chmod($this->path, 0640);
+
+    $this->file->add('5.6.7.8');
+
+    expect(fileperms($this->path) & 0777)->toBe(0640);
+});
+
+it('locks the dedicated .lock file, never the data file itself', function () {
+    // The concurrency-safety claim in withLock()'s docblock, proven rather
+    // than just asserted: if NginxDenyFile locked the data file instead of
+    // a dedicated sibling, holding an independent exclusive lock on the
+    // data file here would make the add() below contend for it too.
+    Process::fake();
+
+    $this->file->add('1.2.3.4');
+
+    $dataHandle = fopen($this->path, 'r+');
+    flock($dataHandle, LOCK_EX);
+
+    $this->file->add('5.6.7.8');
+
+    flock($dataHandle, LOCK_UN);
+    fclose($dataHandle);
+
+    expect(file_get_contents($this->path))->toContain('deny 5.6.7.8;');
 });
 
 // --- directory errors ------------------------------------------------------------

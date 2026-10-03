@@ -119,6 +119,18 @@ class NginxDenyFile
             // active blocks yet. Without this, that first reconcile would
             // silently do nothing.
             if ($target === $current && is_file($this->path())) {
+                // Nothing to rewrite, but still reload rather than returning
+                // outright: a PRIOR commit() can have written successfully
+                // and then had its own reload() throw (nginx transiently
+                // down, a bad reload command). That leaves the file correct
+                // but nginx not enforcing it, and nothing else ever retries
+                // the reload once the content stops changing — this is
+                // reconcile()'s one job the content check alone can't cover
+                // (see BlockTarget::reconcile()'s own contract: repair drift
+                // "independent of whatever apply()/remove() has made or
+                // failed to make").
+                $this->reload();
+
                 return;
             }
 
@@ -138,10 +150,11 @@ class NginxDenyFile
     }
 
     /**
-     * Writes $values (already canonical) if they differ from what's on
-     * disk, then reloads — both skipped when nothing actually changed, which
-     * is what makes replaceAll() idempotent and keeps watchtower:reconcile
-     * from reloading nginx on every tick that found no drift.
+     * Writes $values (already canonical) to disk, then reloads. Callers
+     * only reach this when there's an actual change to make; see
+     * replaceAll()'s own reload-without-rewrite branch for the "content
+     * already matches" case, which still needs the reload to repair a
+     * previous one that may have failed.
      *
      * @param  array<string>  $values
      */
@@ -193,11 +206,27 @@ class NginxDenyFile
 
         $tmp = $dir.'/.'.basename($path).'.'.bin2hex(random_bytes(6)).'.tmp';
 
-        if (file_put_contents($tmp, $content) === false) {
+        // @-suppressed: Laravel's own error handler converts the warning
+        // these raise on failure into a thrown ErrorException before it can
+        // ever return false, which would make the checks below dead code —
+        // same reasoning as the existing @unlink() a few lines down.
+        if (@file_put_contents($tmp, $content) === false) {
+            @unlink($tmp);
+
             throw new \RuntimeException("Could not write a temp file in {$dir} for the nginx deny file.");
         }
 
-        if (! rename($tmp, $path)) {
+        if (is_file($path)) {
+            // The temp file is a brand-new inode every time, so without
+            // this, a rewrite would silently revert the file to this
+            // process's umask instead of whatever permissions were already
+            // there — including a chmod/chgrp an admin made by hand to
+            // give nginx's user read access (see docs/block-targets.md).
+            // Best-effort: a failed chmod here shouldn't stop the write.
+            @chmod($tmp, fileperms($path) & 0777);
+        }
+
+        if (! @rename($tmp, $path)) {
             @unlink($tmp);
 
             throw new \RuntimeException("Could not move the written temp file into place at {$path}.");
@@ -243,7 +272,7 @@ class NginxDenyFile
             );
         }
 
-        $handle = fopen($lockPath, 'c+');
+        $handle = @fopen($lockPath, 'c+'); // see writeValues()'s @ for why
 
         if ($handle === false) {
             throw new \RuntimeException("Could not open the lock file at {$lockPath}.");

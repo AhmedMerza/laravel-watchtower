@@ -122,6 +122,18 @@ its exit code and captured stderr.
 Every block and unblock reloads nginx — unless the write turns out to be a no-op (the value was
 already in, or already out). nginx's reload is a worker-process restart, not free; on a host
 auto-blocking frequently, that's a real cost per block. There's no batching here: each block
-reloads once, same as the issue's own proposal asked for. `watchtower:reconcile`'s own write is
-also skipped (no rewrite, no reload) when it finds no drift, which is what keeps a scheduled
-`watchtower:reconcile` from reloading nginx every time it runs and nothing has moved.
+reloads once, same as the issue's own proposal asked for. `watchtower:reconcile`'s own rewrite is
+skipped when it finds no drift, but the reload still runs every time it's invoked, even with
+nothing to rewrite — that's deliberate: it's the only way to repair a previous block/unblock
+whose write succeeded but whose reload then failed (nginx transiently down, a bad reload
+command), which would otherwise look identical to "already in sync" forever. Schedule
+`watchtower:reconcile` on a cadence where one reload per run is an acceptable cost, not every
+few seconds.
+
+A single `{path}.lock` file (see Permissions above) serializes every block, unblock, and
+reconcile for this target across your whole deployment — including the reload command itself,
+held for up to its timeout. Adding queue workers doesn't add nginx_file throughput: a burst of
+blocks processes one at a time, gated by (rewrite + reload) time per block. On a host expecting
+sustained high-frequency blocking, this is the ceiling to watch — see
+[#108](https://github.com/AhmedMerza/laravel-watchtower/issues/108) for the broader
+`watchtower:reconcile`/target scaling story this is part of.
