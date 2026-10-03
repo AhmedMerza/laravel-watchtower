@@ -7,9 +7,9 @@ namespace Watchtower\Services;
 use Illuminate\Support\Collection;
 use Watchtower\Enums\BlockSource;
 use Watchtower\Events\IpBlocked;
+use Watchtower\Events\IpUnblocked;
 use Watchtower\Exceptions\NeverAutoBlockException;
 use Watchtower\Exceptions\NeverBlockException;
-use Watchtower\Jobs\PushBlockToMaster;
 use Watchtower\Models\BlacklistedIp;
 use Watchtower\Support\BlockScope;
 use Watchtower\Support\IpRange;
@@ -21,9 +21,10 @@ class BlacklistService
 
     /**
      * Block an IP or CIDR range. Normalizes the target, enforces the
-     * never-block whitelist, writes to DB, writes the cache entry, fires the
-     * IpBlocked event, and dispatches a push job to the master environment
-     * (if configured).
+     * never-block whitelist, writes to DB, writes the cache entry, and fires
+     * the IpBlocked event. DispatchBlockToTargets (listening for it) is what
+     * decides whether this reaches the master environment, Cloudflare, or
+     * anywhere else (#25) — block() itself no longer knows.
      *
      * A single IPv6 address is stored as its configured prefix
      * (`ipv6_block_prefix`, /64 by default), since the client can hop to
@@ -95,17 +96,6 @@ class BlacklistService
         $this->cache->write($record);
 
         event(new IpBlocked($record));
-
-        // Scoped blocks stay on the node that made them. The sync payload has
-        // no scope field, so the master would store this as a global block
-        // and push an app-wide block to every satellite that nobody asked
-        // for — a scoped block silently becoming a global one is the worst
-        // thing this feature could do. `scope` joins the payload in #37,
-        // which changes the wire format anyway.
-        if ($record->scope === BlockScope::GLOBAL && config('watchtower.sync.master_url')) {
-            PushBlockToMaster::dispatch($record)
-                ->onQueue(config('watchtower.sync.queue', 'default'));
-        }
 
         return $record;
     }
@@ -293,6 +283,16 @@ class BlacklistService
         }
 
         $this->cache->rebuild();
+
+        // Only when the global block is among what was actually cleared — a
+        // scope-only unblock (unblockRecord() on a scoped row) must not tell
+        // an edge/infrastructure target to lift a global block that is still
+        // in force. Firing this even when no global row existed is harmless:
+        // every BlockTarget::remove() must already no-op for an address it
+        // never applied anything for.
+        if (in_array(BlockScope::GLOBAL, $scopes, true)) {
+            event(new IpUnblocked($this->normalizeTarget($ip)));
+        }
 
         return $deleted > 0;
     }

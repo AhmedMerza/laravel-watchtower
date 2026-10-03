@@ -4,6 +4,10 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **`php artisan watchtower:reconcile`** re-pushes every active global block to the master environment, repairing drift a live push missed (a job that exhausted its retries, a target that was down). It's the first piece of a `BlockTarget` interface that will let a block reach places besides other Laravel environments — Cloudflare and an nginx deny file are next. See [Cross-Environment Sync](docs/sync.md#repairing-drift) and [Artisan Commands](docs/commands.md) ([#25](https://github.com/AhmedMerza/laravel-watchtower/issues/25)).
+
 ## [0.7.0] - 2026-10-03
 
 ### Fixed

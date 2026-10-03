@@ -668,6 +668,36 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Block Targets
+    |--------------------------------------------------------------------------
+    |
+    | Where a block is pushed besides this node's own DB and cache (#25). A
+    | global block fires a queued listener that applies it to every target
+    | below that's enabled; an unblock does the same in reverse.
+    |
+    | 'laravel' — today's master/satellite sync above. Not listed here: it
+    |                has no enabled flag of its own, since it's already
+    |                fully controlled by 'sync.master_url' being set.
+    |
+    | `watchtower:reconcile` pushes the full active blocklist to every
+    | enabled target, to repair anything a live push missed (a job that
+    | exhausted its retries, a target that was down). It is not scheduled by
+    | default — run it on whatever cadence your targets need, e.g.:
+    |   $schedule->command('watchtower:reconcile')->everyFiveMinutes();
+    | This matters most on a satellite: a block it only learned about via
+    | watchtower:sync's pull never reaches cloudflare/nginx_file live (the
+    | pull is deliberately not announced — see "Webhook Notification" in
+    | docs/configuration.md), so reconcile is how it catches up.
+    |
+    */
+
+    'block_targets' => [
+        // 'cloudflare' => [...],  // added when the cloudflare target ships
+        // 'nginx_file' => [...], // added when the nginx_file target ships
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
     | Notifications
     |--------------------------------------------------------------------------
     |

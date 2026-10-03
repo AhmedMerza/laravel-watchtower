@@ -5,9 +5,11 @@ declare(strict_types=1);
 namespace Watchtower\Console\Commands;
 
 use Illuminate\Console\Command;
+use Watchtower\Events\IpUnblocked;
 use Watchtower\Models\BlacklistedIp;
 use Watchtower\Services\BlacklistCache;
 use Watchtower\Services\OffenceLedger;
+use Watchtower\Support\BlockScope;
 
 class CleanupCommand extends Command
 {
@@ -45,9 +47,38 @@ class CleanupCommand extends Command
             $this->info("Forgot {$pruned} decayed offence ledger(s).");
         }
 
+        // Fetched before the bulk delete below: this is the OTHER path a
+        // blacklisted_ips row disappears by (BlacklistService::remove() is
+        // the other), and it's a raw query rather than a remove() call per
+        // row for the same reason remove() itself batches its cache work —
+        // cleanup can lapse many rows at once and a per-row rebuild would
+        // multiply that cost by however many expired. IpUnblocked still has
+        // to fire for each GLOBAL one, or a future BlockTarget (cloudflare,
+        // nginx_file) never learns a temporary block lapsed and keeps
+        // enforcing it at the edge until the next watchtower:reconcile.
+        //
+        // $now is captured ONCE and reused in both queries below: now()
+        // returns a fresh, later timestamp on each call, and a row whose
+        // expires_at falls between two separate calls would be deleted
+        // without ever appearing in $expiring — so it's deleted but the
+        // event that tells a target it lapsed never fires. /mr-review
+        // caught this (PR #107); only ip/scope are selected since that's
+        // all the loop below reads.
+        $now = now();
+
+        $expiring = BlacklistedIp::whereNotNull('expires_at')
+            ->where('expires_at', '<', $now)
+            ->get(['ip', 'scope']);
+
         $deleted = BlacklistedIp::whereNotNull('expires_at')
-            ->where('expires_at', '<', now())
+            ->where('expires_at', '<', $now)
             ->delete();
+
+        foreach ($expiring as $record) {
+            if ($record->scope === BlockScope::GLOBAL) {
+                event(new IpUnblocked($record->ip));
+            }
+        }
 
         if ($deleted > 0) {
             // A failed rebuild here leaves IPs cached as blocked that the DB no

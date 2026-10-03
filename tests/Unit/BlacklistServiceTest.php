@@ -9,11 +9,13 @@ use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Queue;
 use Watchtower\Enums\BlockSource;
 use Watchtower\Events\IpBlocked;
+use Watchtower\Events\IpUnblocked;
 use Watchtower\Exceptions\NeverBlockException;
 use Watchtower\Jobs\PushBlockToMaster;
 use Watchtower\Models\BlacklistedIp;
 use Watchtower\Services\BlacklistCache;
 use Watchtower\Services\BlacklistService;
+use Watchtower\Support\BlockScope;
 
 beforeEach(function () {
     $this->cache = Mockery::mock(BlacklistCache::class);
@@ -54,26 +56,10 @@ it('fires the IpBlocked event on block', function () {
     Event::assertDispatched(IpBlocked::class, fn ($e) => $e->record->ip === '1.2.3.4');
 });
 
-it('dispatches PushBlockToMaster when master URL is configured', function () {
-    Event::fake();
-    Queue::fake();
-    config()->set('watchtower.sync.master_url', 'https://master.example.com');
-
-    $this->service->block('1.2.3.4');
-
-    Queue::assertPushed(PushBlockToMaster::class);
-});
-
-it('pushes to master on the queue sync.queue names', function () {
-    Event::fake();
-    Queue::fake();
-    config()->set('watchtower.sync.master_url', 'https://master.example.com');
-    config()->set('watchtower.sync.queue', 'sync');
-
-    $this->service->block('1.2.3.4');
-
-    Queue::assertPushedOn('sync', PushBlockToMaster::class);
-});
+// Whether block() causes a push to master is now LaravelTarget::apply()'s
+// decision, reached through DispatchBlockToTargets — not block()'s own, so
+// that coverage lives in tests/Unit/Targets/LaravelTargetTest.php. block()
+// itself only needs to prove it fires IpBlocked (above) and nothing more.
 
 // The push job read watchtower.notifications.queue until #50 moved it to its
 // own key. Without this fallback an app that had set the notification queue —
@@ -91,16 +77,6 @@ it('falls back to the notification queue when no sync queue is named', function 
     }
 });
 
-it('does not dispatch PushBlockToMaster when master URL is not configured', function () {
-    Event::fake();
-    Queue::fake();
-    config()->set('watchtower.sync.master_url', null);
-
-    $this->service->block('1.2.3.4');
-
-    Queue::assertNotPushed(PushBlockToMaster::class);
-});
-
 it('throws when blocking a never-block whitelisted IP', function () {
     config()->set('watchtower.never_block', ['1.2.3.4']);
 
@@ -109,6 +85,8 @@ it('throws when blocking a never-block whitelisted IP', function () {
 });
 
 it('unblocks an IP and removes the DB record', function () {
+    Event::fake();
+
     BlacklistedIp::create([
         'ip'         => '1.2.3.4',
         'source'     => BlockSource::Manual,
@@ -119,12 +97,63 @@ it('unblocks an IP and removes the DB record', function () {
 
     expect($result)->toBeTrue();
     $this->assertDatabaseMissing('blacklisted_ips', ['ip' => '1.2.3.4']);
+
+    // A full unblock always clears the global scope (see remove()), so it
+    // always fires this — the signal every BlockTarget's remove() rides on.
+    Event::assertDispatched(IpUnblocked::class, fn ($e) => $e->ip === '1.2.3.4');
 });
 
 it('returns false when unblocking a non-existent IP', function () {
     $result = $this->service->unblock('9.9.9.9');
 
     expect($result)->toBeFalse();
+});
+
+it('fires IpUnblocked even for an address that was never blocked', function () {
+    // Harmless: every BlockTarget::remove() must already no-op for an
+    // address it has no record of blocking. Not firing here would require
+    // an extra query just to decide, for no correctness gain.
+    Event::fake();
+
+    $this->service->unblock('9.9.9.9');
+
+    Event::assertDispatched(IpUnblocked::class, fn ($e) => $e->ip === '9.9.9.9');
+});
+
+it('does not fire IpUnblocked when only a non-global scope is lifted', function () {
+    Event::fake();
+    config()->set('watchtower.scopes', ['auth']);
+
+    $record = BlacklistedIp::create([
+        'ip'         => '1.2.3.4',
+        'scope'      => 'auth',
+        'source'     => BlockSource::Manual,
+        'source_env' => 'testing',
+    ]);
+
+    $this->service->unblockRecord($record);
+
+    // The global block, if any, is untouched — a target must not be told to
+    // lift it just because one scoped rule's block was cleared.
+    Event::assertNotDispatched(IpUnblocked::class);
+});
+
+it('fires IpUnblocked when unblockRecord lifts the global row itself', function () {
+    Event::fake();
+
+    // scope set explicitly: create() hydrates the model from the given
+    // attributes, not from the column's DB-side default, and remove() reads
+    // $record->scope straight off the in-memory model.
+    $record = BlacklistedIp::create([
+        'ip'         => '1.2.3.4',
+        'scope'      => BlockScope::GLOBAL,
+        'source'     => BlockSource::Manual,
+        'source_env' => 'testing',
+    ]);
+
+    $this->service->unblockRecord($record);
+
+    Event::assertDispatched(IpUnblocked::class, fn ($e) => $e->ip === '1.2.3.4');
 });
 
 it('normalizes IPv4-mapped IPv6 addresses', function () {
