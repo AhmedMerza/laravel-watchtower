@@ -119,6 +119,21 @@ it('replaces the whole set in one write', function () {
         ->and($contents)->not->toContain('deny 9.9.9.9;');
 });
 
+it('creates the file on a fresh install even when there is nothing active to write', function () {
+    // Without this, "run watchtower:reconcile once ... before adding the
+    // include" (docs/block-targets.md) does nothing on the single most
+    // common first run — zero active blocks — and nginx's include then
+    // fails to load because the file was never created.
+    Process::fake();
+
+    expect(is_file($this->path))->toBeFalse();
+
+    $this->file->replaceAll([]);
+
+    expect(is_file($this->path))->toBeTrue();
+    Process::assertRanTimes('nginx -s reload', 1);
+});
+
 it('skips write and reload when the computed set already matches — the idempotency criterion', function () {
     Process::fake();
 

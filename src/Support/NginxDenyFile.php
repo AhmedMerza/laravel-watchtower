@@ -110,7 +110,15 @@ class NginxDenyFile
             $target = array_values(array_unique($canonical));
             sort($target);
 
-            if ($target === $current) {
+            // is_file(), not just the content comparison: a never-created
+            // file and an empty-but-present one both read back as [] from
+            // currentValues(), but they're not the same state — nginx needs
+            // the file to literally exist before its `include` can load, and
+            // "run watchtower:reconcile once" (see docs/block-targets.md) is
+            // the documented way to create it on a fresh install that has no
+            // active blocks yet. Without this, that first reconcile would
+            // silently do nothing.
+            if ($target === $current && is_file($this->path())) {
                 return;
             }
 
