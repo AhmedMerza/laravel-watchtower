@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use Illuminate\Support\Facades\Log;
 use Watchtower\Enums\BlockSource;
 use Watchtower\Models\BlacklistedIp;
 use Watchtower\Support\CloudflareApi;
@@ -168,4 +169,47 @@ it('includes Sync-sourced records during reconcile, unlike LaravelTarget', funct
     $this->mockApi->shouldReceive('create')->once()->with('ip', '1.2.3.4');
 
     $this->target->reconcile([$synced]);
+});
+
+it('keeps creating the rest of the batch when one create fails', function () {
+    // Without per-item isolation, one conflicting/foreign rule anywhere in
+    // the active set would abort every later create AND the whole delete
+    // loop below it for the entire reconcile run.
+    config()->set('watchtower.log_channel', 'stack');
+
+    $conflicting = BlacklistedIp::create(['ip' => '1.2.3.4', 'source' => BlockSource::Manual]);
+    $fine = BlacklistedIp::create(['ip' => '5.6.7.8', 'source' => BlockSource::Manual]);
+    $staleManaged = ['9.9.9.9' => 'stale-rule'];
+
+    $this->mockApi->shouldReceive('listManaged')->once()->andReturn($staleManaged);
+    $this->mockApi->shouldReceive('create')->once()->with('ip', '1.2.3.4')->andThrow(new RuntimeException('conflict'));
+    $this->mockApi->shouldReceive('create')->once()->with('ip', '5.6.7.8');
+    $this->mockApi->shouldReceive('delete')->once()->with('stale-rule');
+
+    Log::shouldReceive('channel')->with('stack')->andReturnSelf();
+    Log::shouldReceive('warning')->once()->with(
+        Mockery::pattern('/\[cloudflare\] could not reconcile one record/'),
+        Mockery::on(fn ($ctx) => $ctx['ip'] === '1.2.3.4' && $ctx['error'] === 'conflict')
+    );
+
+    $this->target->reconcile([$conflicting, $fine]);
+});
+
+it('keeps deleting the rest of the batch when one delete fails', function () {
+    config()->set('watchtower.log_channel', 'stack');
+
+    $this->mockApi->shouldReceive('listManaged')->once()->andReturn([
+        '9.9.9.9'  => 'gone-already',
+        '9.9.9.10' => 'stale-rule',
+    ]);
+    $this->mockApi->shouldReceive('delete')->once()->with('gone-already')->andThrow(new RuntimeException('not found'));
+    $this->mockApi->shouldReceive('delete')->once()->with('stale-rule');
+
+    Log::shouldReceive('channel')->with('stack')->andReturnSelf();
+    Log::shouldReceive('warning')->once()->with(
+        Mockery::pattern('/\[cloudflare\] could not reconcile one record/'),
+        Mockery::on(fn ($ctx) => $ctx['ip'] === '9.9.9.9' && $ctx['error'] === 'not found')
+    );
+
+    $this->target->reconcile([]);
 });

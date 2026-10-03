@@ -92,14 +92,37 @@ class CloudflareTarget implements BlockTarget
         }
 
         foreach ($active as $value => $target) {
-            if (! array_key_exists($value, $managed)) {
+            if (array_key_exists($value, $managed)) {
+                continue;
+            }
+
+            try {
                 $this->api->create($target, $value);
+            } catch (\RuntimeException $e) {
+                // One item's failure (a foreign rule already occupying this
+                // value, a transient Cloudflare error, a rate limit) must not
+                // abort the rest of the batch — that would also skip the
+                // delete loop below entirely, undermining reconcile's own
+                // purpose for every other record in this run.
+                Log::channel(config('watchtower.log_channel', 'stack'))->warning(
+                    'Watchtower: [cloudflare] could not reconcile one record',
+                    ['ip' => $value, 'error' => $e->getMessage()]
+                );
             }
         }
 
         foreach ($managed as $value => $ruleId) {
-            if (! array_key_exists($value, $active)) {
+            if (array_key_exists($value, $active)) {
+                continue;
+            }
+
+            try {
                 $this->api->delete($ruleId);
+            } catch (\RuntimeException $e) {
+                Log::channel(config('watchtower.log_channel', 'stack'))->warning(
+                    'Watchtower: [cloudflare] could not reconcile one record',
+                    ['ip' => $value, 'error' => $e->getMessage()]
+                );
             }
         }
     }
