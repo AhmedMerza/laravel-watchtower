@@ -3,7 +3,7 @@
 [![License](https://img.shields.io/github/license/AhmedMerza/laravel-watchtower?style=flat-square)](LICENSE.md)
 [![PHP Version](https://img.shields.io/badge/php-%3E%3D8.2-blue?style=flat-square)](https://php.net)
 
-**IP blocking for Laravel apps, shared across every environment you run.** Block a bad actor in one place and the rest see it within minutes. It runs on any Laravel cache driver, with no Cloudflare, no WAF and no infrastructure changes.
+**Bans brute-forcers and scanners automatically, stays correct behind a proxy or load balancer, and keeps answering requests even if the cache goes down.** Block an address in one click from your logs with [LogScope](https://github.com/AhmedMerza/laravel-logscope), or let detectors and rules catch it on their own — either way it reaches every environment you run within minutes, with no Cloudflare, no WAF and no infrastructure changes required.
 
 <p align="center">
   <img src=".github/demo/simulate.png" alt="watchtower:simulate replaying two auto-block rules over a week of log history: one address would have been blocked for credential stuffing, an office gateway held back by the shared-IP guard, and a scanner caught by a warn-mode rule" width="100%">
