@@ -56,12 +56,22 @@ class CleanupCommand extends Command
         // to fire for each GLOBAL one, or a future BlockTarget (cloudflare,
         // nginx_file) never learns a temporary block lapsed and keeps
         // enforcing it at the edge until the next watchtower:reconcile.
+        //
+        // $now is captured ONCE and reused in both queries below: now()
+        // returns a fresh, later timestamp on each call, and a row whose
+        // expires_at falls between two separate calls would be deleted
+        // without ever appearing in $expiring — so it's deleted but the
+        // event that tells a target it lapsed never fires. /mr-review
+        // caught this (PR #107); only ip/scope are selected since that's
+        // all the loop below reads.
+        $now = now();
+
         $expiring = BlacklistedIp::whereNotNull('expires_at')
-            ->where('expires_at', '<', now())
-            ->get();
+            ->where('expires_at', '<', $now)
+            ->get(['ip', 'scope']);
 
         $deleted = BlacklistedIp::whereNotNull('expires_at')
-            ->where('expires_at', '<', now())
+            ->where('expires_at', '<', $now)
             ->delete();
 
         foreach ($expiring as $record) {

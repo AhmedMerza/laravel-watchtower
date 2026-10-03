@@ -7,9 +7,11 @@ namespace Watchtower\Events;
 /**
  * The global block on $ip is gone.
  *
- * Fired by BlacklistService::remove() only when BlockScope::GLOBAL is among
- * the scopes it removed — never for a scope-only unblock, which must not
- * touch a target that has no notion of scope. $ip is a plain string, not the
+ * Fired from two places, both only for a GLOBAL-scope row — never for a
+ * scope-only unblock, which must not touch a target that has no notion of
+ * scope: BlacklistService::remove() (an explicit unblock, when GLOBAL is
+ * among the scopes it removed) and CleanupCommand's expiry sweep (a
+ * temporary block lapsing on its own). $ip is a plain string, not the
  * deleted BlacklistedIp row: by the time this fires the row is gone, and a
  * target only ever needs the address to undo whatever it did for it.
  */
