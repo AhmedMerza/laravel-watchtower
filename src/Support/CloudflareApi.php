@@ -39,6 +39,11 @@ class CloudflareApi
      * exist for a given target+value: Cloudflare rejects a second rule for
      * the same configuration regardless of mode or notes.
      *
+     * The returned page is scanned for an exact match rather than trusting
+     * `$rules[0]` — the query params narrow server-side, but correctness
+     * doesn't depend on that narrowing being exact, same reasoning as
+     * listManaged()'s own client-side re-check below.
+     *
      * @return array{id: string, mode: string, notes: ?string}|null
      */
     public function findRule(string $target, string $value): ?array
@@ -53,21 +58,24 @@ class CloudflareApi
 
         $rules = $response->json('result') ?? [];
 
-        if ($rules === []) {
-            return null;
+        foreach ($rules as $rule) {
+            if (($rule['configuration']['target'] ?? null) === $target
+                && ($rule['configuration']['value'] ?? null) === $value) {
+                return [
+                    'id'    => $rule['id'],
+                    'mode'  => $rule['mode'],
+                    'notes' => $rule['notes'] ?? null,
+                ];
+            }
         }
 
-        return [
-            'id'    => $rules[0]['id'],
-            'mode'  => $rules[0]['mode'],
-            'notes' => $rules[0]['notes'] ?? null,
-        ];
+        return null;
     }
 
     /**
      * Every rule Watchtower has ever tagged, across every page.
      *
-     * @return array<string, string> value => rule id
+     * @return array<string, array{id: string, mode: string}> value => rule
      */
     public function listManaged(): array
     {
@@ -90,7 +98,10 @@ class CloudflareApi
 
             foreach ($rules as $rule) {
                 if (($rule['notes'] ?? null) === self::NOTE) {
-                    $managed[$rule['configuration']['value']] = $rule['id'];
+                    $managed[$rule['configuration']['value']] = [
+                        'id'   => $rule['id'],
+                        'mode' => $rule['mode'],
+                    ];
                 }
             }
 
@@ -110,7 +121,13 @@ class CloudflareApi
 
         $this->throwUnlessSuccessful($response, "create a rule for {$value}");
 
-        return (string) $response->json('result.id');
+        $id = $response->json('result.id');
+
+        if (! is_string($id) || $id === '') {
+            throw new \RuntimeException("Cloudflare did not return a rule id while creating a rule for {$value}.");
+        }
+
+        return $id;
     }
 
     public function delete(string $ruleId): void

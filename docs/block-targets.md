@@ -59,7 +59,8 @@ every other target, but is skipped on Cloudflare with a logged reason instead of
 
 ### Rate limits
 
-Cloudflare's account-wide API limit is 1,200 requests per 5 minutes — generous for the single
-call a live block or unblock makes. `watchtower:reconcile` can make many more on a large
+Cloudflare's account-wide API limit is 1,200 requests per 5 minutes — generous for the two
+calls (a lookup, then a create/delete) a live block or unblock makes. `watchtower:reconcile`
+can make many more on a large
 blocklist; see [#108](https://github.com/AhmedMerza/laravel-watchtower/issues/108) for the
 general `watchtower:reconcile` scaling work that applies here too.

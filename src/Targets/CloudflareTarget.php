@@ -37,17 +37,27 @@ class CloudflareTarget implements BlockTarget
             return;
         }
 
-        if ($existing['notes'] === CloudflareApi::NOTE && $existing['mode'] === 'block') {
-            // Already applied — this is what makes a retried apply() or a
-            // reconcile() replay idempotent.
-            return;
+        if ($existing['notes'] === CloudflareApi::NOTE) {
+            if ($existing['mode'] === 'block') {
+                // Already applied — this is what makes a retried apply() or
+                // a reconcile() replay idempotent.
+                return;
+            }
+
+            // Watchtower's own rule, drifted out of block mode (e.g. changed
+            // by hand in the dashboard). Cloudflare allows at most one rule
+            // per target+value regardless of mode, so create() would just
+            // fail as a duplicate — raise our own message instead, and keep
+            // it distinct from the foreign-rule case below: this rule IS
+            // ours, it's just wrong, which is a different fix for whoever
+            // reads the log.
+            throw new \RuntimeException(
+                "Cloudflare has a rule Watchtower created for {$value}, but it's in mode '{$existing['mode']}' instead of 'block' — refusing to overwrite it."
+            );
         }
 
-        // Cloudflare allows at most one rule per target+value regardless of
-        // mode or notes, so attempting create() here would just fail as a
-        // duplicate. Raising our own message is clearer than letting that
-        // surface — and this case matters: a rule for this value exists but
-        // Watchtower didn't create it, which must not look like success.
+        // A rule for this value exists that Watchtower did not create, which
+        // must not look like success.
         throw new \RuntimeException(
             "Cloudflare already has a rule for {$value} (mode: {$existing['mode']}) that Watchtower did not create — refusing to replace it."
         );
@@ -84,47 +94,61 @@ class CloudflareTarget implements BlockTarget
                 // A record Cloudflare's ip_range can't express (see
                 // resolveTarget()) — skip just this one so the rest of the
                 // set still reconciles, rather than aborting the whole run.
-                Log::channel(config('watchtower.log_channel', 'stack'))->warning(
-                    'Watchtower: [cloudflare] could not reconcile one record',
-                    ['ip' => $record->ip, 'error' => $e->getMessage()]
-                );
+                $this->logSkip($record->ip, $e->getMessage());
             }
         }
 
         foreach ($active as $value => $target) {
-            if (array_key_exists($value, $managed)) {
+            $existing = $managed[$value] ?? null;
+
+            if ($existing !== null) {
+                if ($existing['mode'] === 'block') {
+                    continue; // already correctly applied
+                }
+
+                // Watchtower's own rule, drifted out of block mode — the
+                // same conflict apply() refuses to overwrite (see apply()),
+                // just non-fatal here: flag it and move on to the rest of
+                // the batch rather than silently treating it as in sync.
+                $this->logSkip($value, "its own rule is in mode '{$existing['mode']}' instead of 'block'");
+
                 continue;
             }
 
             try {
                 $this->api->create($target, $value);
-            } catch (\RuntimeException $e) {
+            } catch (\Throwable $e) {
                 // One item's failure (a foreign rule already occupying this
-                // value, a transient Cloudflare error, a rate limit) must not
-                // abort the rest of the batch — that would also skip the
-                // delete loop below entirely, undermining reconcile's own
-                // purpose for every other record in this run.
-                Log::channel(config('watchtower.log_channel', 'stack'))->warning(
-                    'Watchtower: [cloudflare] could not reconcile one record',
-                    ['ip' => $value, 'error' => $e->getMessage()]
-                );
+                // value, a transient Cloudflare error, a rate limit, a real
+                // connection failure) must not abort the rest of the batch —
+                // that would also skip the delete loop below entirely,
+                // undermining reconcile's own purpose for every other record
+                // in this run. \Throwable, not \RuntimeException: a network
+                // failure from the HTTP client is an Exception, not a
+                // RuntimeException, and must be caught here too.
+                $this->logSkip($value, $e->getMessage());
             }
         }
 
-        foreach ($managed as $value => $ruleId) {
+        foreach ($managed as $value => $info) {
             if (array_key_exists($value, $active)) {
                 continue;
             }
 
             try {
-                $this->api->delete($ruleId);
-            } catch (\RuntimeException $e) {
-                Log::channel(config('watchtower.log_channel', 'stack'))->warning(
-                    'Watchtower: [cloudflare] could not reconcile one record',
-                    ['ip' => $value, 'error' => $e->getMessage()]
-                );
+                $this->api->delete($info['id']);
+            } catch (\Throwable $e) {
+                $this->logSkip($value, $e->getMessage());
             }
         }
+    }
+
+    private function logSkip(string $ip, string $reason): void
+    {
+        Log::channel(config('watchtower.log_channel', 'stack'))->warning(
+            'Watchtower: [cloudflare] could not reconcile one record',
+            ['ip' => $ip, 'error' => $reason]
+        );
     }
 
     /**

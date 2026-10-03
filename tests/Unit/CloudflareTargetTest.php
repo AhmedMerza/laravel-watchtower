@@ -44,7 +44,8 @@ it('refuses to replace a rule for the same address that it did not create', func
     ]);
     $this->mockApi->shouldNotReceive('create');
 
-    expect(fn () => $this->target->apply($record))->toThrow(RuntimeException::class);
+    expect(fn () => $this->target->apply($record))
+        ->toThrow(RuntimeException::class, 'that Watchtower did not create');
 });
 
 it('refuses when its own rule exists in a mode other than block', function () {
@@ -55,7 +56,12 @@ it('refuses when its own rule exists in a mode other than block', function () {
     ]);
     $this->mockApi->shouldNotReceive('create');
 
-    expect(fn () => $this->target->apply($record))->toThrow(RuntimeException::class);
+    // Distinct from the foreign-rule message above: this rule IS
+    // Watchtower's own, so the message must say so rather than claiming it
+    // "did not create" it — a wrong message sends an operator looking for
+    // the wrong thing.
+    expect(fn () => $this->target->apply($record))
+        ->toThrow(RuntimeException::class, "Watchtower created for 1.2.3.4, but it's in mode 'challenge'");
 });
 
 it('applies to a Sync-sourced record, unlike LaravelTarget', function () {
@@ -81,6 +87,27 @@ it('resolves a supported CIDR range to the ip_range target', function () {
 
 it('throws on a CIDR prefix Cloudflare does not support, without calling the API', function () {
     $record = BlacklistedIp::create(['ip' => '203.0.113.0/20', 'source' => BlockSource::Manual]);
+
+    $this->mockApi->shouldNotReceive('findRule');
+    $this->mockApi->shouldNotReceive('create');
+
+    expect(fn () => $this->target->apply($record))->toThrow(RuntimeException::class);
+});
+
+it('resolves an accepted IPv4 CIDR range to the ip_range target', function () {
+    // Without this, a typo in resolveTarget()'s IPv4 $accepted array (e.g.
+    // [16, 25] instead of [16, 24]) would go undetected — the only other
+    // IPv4 case tested is a rejection, which would still pass unchanged.
+    $record = BlacklistedIp::create(['ip' => '203.0.113.0/24', 'source' => BlockSource::Manual]);
+
+    $this->mockApi->shouldReceive('findRule')->once()->with('ip_range', '203.0.113.0/24')->andReturn(null);
+    $this->mockApi->shouldReceive('create')->once()->with('ip_range', '203.0.113.0/24');
+
+    $this->target->apply($record);
+});
+
+it('throws on an IPv6 CIDR prefix Cloudflare does not support', function () {
+    $record = BlacklistedIp::create(['ip' => '2001:db8::/40', 'source' => BlockSource::Manual]);
 
     $this->mockApi->shouldNotReceive('findRule');
     $this->mockApi->shouldNotReceive('create');
@@ -121,7 +148,7 @@ it('creates whatever is active but not yet managed, and leaves matches alone', f
     $a = BlacklistedIp::create(['ip' => '1.2.3.4', 'source' => BlockSource::Manual]);
     $b = BlacklistedIp::create(['ip' => '5.6.7.8', 'source' => BlockSource::Manual]);
 
-    $this->mockApi->shouldReceive('listManaged')->once()->andReturn(['1.2.3.4' => 'rule1']);
+    $this->mockApi->shouldReceive('listManaged')->once()->andReturn(['1.2.3.4' => ['id' => 'rule1', 'mode' => 'block']]);
     $this->mockApi->shouldReceive('create')->once()->with('ip', '5.6.7.8');
     $this->mockApi->shouldNotReceive('delete');
 
@@ -132,8 +159,8 @@ it('deletes whatever is managed but no longer active', function () {
     $a = BlacklistedIp::create(['ip' => '1.2.3.4', 'source' => BlockSource::Manual]);
 
     $this->mockApi->shouldReceive('listManaged')->once()->andReturn([
-        '1.2.3.4' => 'rule1',
-        '9.9.9.9' => 'stale-rule',
+        '1.2.3.4' => ['id' => 'rule1', 'mode' => 'block'],
+        '9.9.9.9' => ['id' => 'stale-rule', 'mode' => 'block'],
     ]);
     $this->mockApi->shouldNotReceive('create');
     $this->mockApi->shouldReceive('delete')->once()->with('stale-rule');
@@ -145,19 +172,48 @@ it('is a no-op on a second run once state already matches', function () {
     // The idempotency acceptance criterion, exercised directly.
     $a = BlacklistedIp::create(['ip' => '1.2.3.4', 'source' => BlockSource::Manual]);
 
-    $this->mockApi->shouldReceive('listManaged')->once()->andReturn(['1.2.3.4' => 'rule1']);
+    $this->mockApi->shouldReceive('listManaged')->once()->andReturn(['1.2.3.4' => ['id' => 'rule1', 'mode' => 'block']]);
     $this->mockApi->shouldNotReceive('create');
     $this->mockApi->shouldNotReceive('delete');
 
     $this->target->reconcile([$a]);
 });
 
+it('flags, rather than silently accepting, its own managed rule that drifted out of block mode', function () {
+    // listManaged() keeps mode specifically so this can't be mistaken for
+    // "already applied" — the same drift apply() refuses to overwrite live
+    // (see the apply() test above) must not look like success in a batch.
+    config()->set('watchtower.log_channel', 'stack');
+
+    $a = BlacklistedIp::create(['ip' => '1.2.3.4', 'source' => BlockSource::Manual]);
+
+    $this->mockApi->shouldReceive('listManaged')->once()->andReturn(['1.2.3.4' => ['id' => 'rule1', 'mode' => 'challenge']]);
+    $this->mockApi->shouldNotReceive('create');
+    $this->mockApi->shouldNotReceive('delete');
+
+    Log::shouldReceive('channel')->with('stack')->andReturnSelf();
+    Log::shouldReceive('warning')->once()->with(
+        Mockery::pattern('/\[cloudflare\] could not reconcile one record/'),
+        Mockery::on(fn ($ctx) => $ctx['ip'] === '1.2.3.4' && str_contains($ctx['error'], "mode 'challenge'"))
+    );
+
+    $this->target->reconcile([$a]);
+});
+
 it('skips a record with an unsupported CIDR prefix during reconcile instead of aborting', function () {
+    config()->set('watchtower.log_channel', 'stack');
+
     $bad = BlacklistedIp::create(['ip' => '203.0.113.0/20', 'source' => BlockSource::Manual]);
     $good = BlacklistedIp::create(['ip' => '1.2.3.4', 'source' => BlockSource::Manual]);
 
     $this->mockApi->shouldReceive('listManaged')->once()->andReturn([]);
     $this->mockApi->shouldReceive('create')->once()->with('ip', '1.2.3.4');
+
+    Log::shouldReceive('channel')->with('stack')->andReturnSelf();
+    Log::shouldReceive('warning')->once()->with(
+        Mockery::pattern('/\[cloudflare\] could not reconcile one record/'),
+        Mockery::on(fn ($ctx) => $ctx['ip'] === '203.0.113.0/20')
+    );
 
     $this->target->reconcile([$bad, $good]);
 });
@@ -179,7 +235,7 @@ it('keeps creating the rest of the batch when one create fails', function () {
 
     $conflicting = BlacklistedIp::create(['ip' => '1.2.3.4', 'source' => BlockSource::Manual]);
     $fine = BlacklistedIp::create(['ip' => '5.6.7.8', 'source' => BlockSource::Manual]);
-    $staleManaged = ['9.9.9.9' => 'stale-rule'];
+    $staleManaged = ['9.9.9.9' => ['id' => 'stale-rule', 'mode' => 'block']];
 
     $this->mockApi->shouldReceive('listManaged')->once()->andReturn($staleManaged);
     $this->mockApi->shouldReceive('create')->once()->with('ip', '1.2.3.4')->andThrow(new RuntimeException('conflict'));
@@ -199,8 +255,8 @@ it('keeps deleting the rest of the batch when one delete fails', function () {
     config()->set('watchtower.log_channel', 'stack');
 
     $this->mockApi->shouldReceive('listManaged')->once()->andReturn([
-        '9.9.9.9'  => 'gone-already',
-        '9.9.9.10' => 'stale-rule',
+        '9.9.9.9'  => ['id' => 'gone-already', 'mode' => 'block'],
+        '9.9.9.10' => ['id' => 'stale-rule', 'mode' => 'block'],
     ]);
     $this->mockApi->shouldReceive('delete')->once()->with('gone-already')->andThrow(new RuntimeException('not found'));
     $this->mockApi->shouldReceive('delete')->once()->with('stale-rule');
@@ -212,4 +268,28 @@ it('keeps deleting the rest of the batch when one delete fails', function () {
     );
 
     $this->target->reconcile([]);
+});
+
+it('isolates a real connection failure too, not just a RuntimeException', function () {
+    // Laravel's HTTP client throws Illuminate\Http\Client\ConnectionException
+    // for a genuine network failure (timeout, DNS, connection reset) — it
+    // extends Exception, NOT RuntimeException. The isolation above must
+    // catch \Throwable, not just \RuntimeException, or a real outage on one
+    // record still takes out the rest of the batch.
+    config()->set('watchtower.log_channel', 'stack');
+
+    $a = BlacklistedIp::create(['ip' => '1.2.3.4', 'source' => BlockSource::Manual]);
+    $b = BlacklistedIp::create(['ip' => '5.6.7.8', 'source' => BlockSource::Manual]);
+
+    $this->mockApi->shouldReceive('listManaged')->once()->andReturn([]);
+    $this->mockApi->shouldReceive('create')->once()->with('ip', '1.2.3.4')->andThrow(new Exception('connection refused'));
+    $this->mockApi->shouldReceive('create')->once()->with('ip', '5.6.7.8');
+
+    Log::shouldReceive('channel')->with('stack')->andReturnSelf();
+    Log::shouldReceive('warning')->once()->with(
+        Mockery::pattern('/\[cloudflare\] could not reconcile one record/'),
+        Mockery::on(fn ($ctx) => $ctx['ip'] === '1.2.3.4' && $ctx['error'] === 'connection refused')
+    );
+
+    $this->target->reconcile([$a, $b]);
 });
