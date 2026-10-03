@@ -10,6 +10,7 @@ use Watchtower\Jobs\PushBlockToMaster;
 use Watchtower\Listeners\DispatchBlockToTargets;
 use Watchtower\Models\BlacklistedIp;
 use Watchtower\Support\BlockScope;
+use Watchtower\Targets\CloudflareTarget;
 use Watchtower\Targets\LaravelTarget;
 
 it('applies to the enabled target for a GLOBAL-scope block', function () {
@@ -60,4 +61,29 @@ it('catches a target that throws and logs instead of propagating', function () {
 
     expect(fn () => app(DispatchBlockToTargets::class)->handle(new IpBlocked($record)))
         ->not->toThrow(RuntimeException::class);
+});
+
+it('still applies to a second target when the first one throws', function () {
+    // The proof flagged when PR1 only had one real target to test against:
+    // one failing target must not stop the others from running.
+    config()->set('watchtower.log_channel', 'stack');
+    config()->set('watchtower.sync.master_url', 'https://master.example.com');
+    config()->set('watchtower.block_targets.cloudflare.enabled', true);
+    config()->set('watchtower.block_targets.cloudflare.account_id', 'acct123');
+    config()->set('watchtower.block_targets.cloudflare.api_token', 'token123');
+
+    $laravelMock = Mockery::mock(LaravelTarget::class);
+    $laravelMock->shouldReceive('apply')->once()->andThrow(new RuntimeException('boom'));
+    app()->instance(LaravelTarget::class, $laravelMock);
+
+    $cloudflareMock = Mockery::mock(CloudflareTarget::class);
+    $cloudflareMock->shouldReceive('apply')->once();
+    app()->instance(CloudflareTarget::class, $cloudflareMock);
+
+    Log::shouldReceive('channel')->with('stack')->andReturnSelf();
+    Log::shouldReceive('warning')->once();
+
+    $record = BlacklistedIp::create(['ip' => '1.2.3.4', 'scope' => BlockScope::GLOBAL, 'source' => BlockSource::Manual]);
+
+    app(DispatchBlockToTargets::class)->handle(new IpBlocked($record));
 });
