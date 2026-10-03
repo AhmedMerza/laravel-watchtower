@@ -128,6 +128,18 @@ describe('the block list', function () {
             ->assertJsonPath('total', 2);
     });
 
+    it('exposes hits and last_hit_at on each row', function () use ($make) {
+        // Not in $fillable — they're server-maintained, so set directly
+        // rather than through the mass-assignment $make() uses.
+        $block = $make();
+        $block->forceFill(['hits' => 4, 'last_hit_at' => now()->subMinutes(5)])->save();
+
+        $this->getJson('/logscope/watchtower/api/blocks')
+            ->assertOk()
+            ->assertJsonPath('data.0.hits', 4)
+            ->assertJsonPath('data.0.last_hit_at', fn ($value) => $value !== null);
+    });
+
     it('does not return expired blocks', function () use ($make) {
         $make(['expires_at' => now()->subHour()]);
         $make(['expires_at' => now()->addHour()]);

@@ -95,6 +95,16 @@ class BlacklistCache
     }
 
     /**
+     * `:blockhits:`, not `:hits:` — HitWindow already owns `{prefix}:hits:
+     * {detector}:{ip}` for the auto-block detectors, a different counter
+     * entirely, and the two must not collide on one key.
+     */
+    private function hitsKey(string $target, string $scope = BlockScope::GLOBAL): string
+    {
+        return $this->prefix($scope).':blockhits:'.$target;
+    }
+
+    /**
      * Check whether an already-normalized IP is currently blocked, in one
      * scope. Two cache reads, no DB hit — unless the cache is cold, in which
      * case it's warmed from the DB first.
@@ -142,6 +152,47 @@ class BlacklistCache
 
         // ISO-8601 string = temporary block, check if still active
         return now()->lt(Carbon::parse($value));
+    }
+
+    /**
+     * Count one rejected request against an address that is already
+     * blocked, in cache only — watchtower:cleanup moves the total into the
+     * `hits`/`last_hit_at` columns on its own schedule.
+     *
+     * `add()` opens the counter's TTL the same way HitWindow::hit() does, so
+     * it decays if cleanup never runs rather than growing forever; a counter
+     * that outlives its block is harmless either way, since cleanup attributes
+     * whatever it finds to the row that still exists for that (ip, scope).
+     */
+    public function recordHit(string $ip, string $scope = BlockScope::GLOBAL): void
+    {
+        $cache = $this->cache();
+        $key = $this->hitsKey($ip, $scope);
+
+        $cache->add($key, 0, $this->ttlSeconds);
+        $cache->increment($key);
+    }
+
+    /**
+     * Read and clear one address's pending hit count, for the flush that
+     * moves it into the DB.
+     *
+     * Read-then-forget, not atomic: a hit landing in the gap between the two
+     * is lost rather than double-counted. These are advisory stats for
+     * finding dead blocks, not a security control, so that narrow miss costs
+     * less than a lock on the request path would.
+     */
+    public function pullHits(string $ip, string $scope = BlockScope::GLOBAL): int
+    {
+        $cache = $this->cache();
+        $key = $this->hitsKey($ip, $scope);
+        $hits = (int) $cache->get($key, 0);
+
+        if ($hits > 0) {
+            $cache->forget($key);
+        }
+
+        return $hits;
     }
 
     /**

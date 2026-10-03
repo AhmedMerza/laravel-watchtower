@@ -20,6 +20,8 @@ use Watchtower\Enums\BlockSource;
  * @property Carbon|null $expires_at
  * @property string|null $blocked_by
  * @property string|null $log_entry_id
+ * @property int $hits
+ * @property Carbon|null $last_hit_at
  * @property Carbon|null $created_at
  * @property Carbon|null $updated_at
  */
@@ -41,8 +43,10 @@ class BlacklistedIp extends Model
     ];
 
     protected $casts = [
-        'expires_at' => 'datetime',
-        'source'     => BlockSource::class,
+        'expires_at'  => 'datetime',
+        'source'      => BlockSource::class,
+        'hits'        => 'integer',
+        'last_hit_at' => 'datetime',
     ];
 
     public function isExpired(): bool

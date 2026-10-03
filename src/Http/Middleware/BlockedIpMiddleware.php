@@ -122,6 +122,18 @@ class BlockedIpMiddleware
         $request->attributes->set(self::BLOCKED, $blocked);
 
         if ($blocked) {
+            // Only here, not inside BlockResponse::make(): that's shared with
+            // the User-Agent filter (no block row exists) and auto-block's own
+            // triggering request (no row yet), neither of which is a hit on
+            // an existing block. Caught on its own: the verdict above already
+            // succeeded, and a stats write failing must not turn an enforced
+            // block into a 500.
+            try {
+                $this->cache->recordHit($normalized);
+            } catch (\Throwable) {
+                // Advisory stats; the block is enforced either way.
+            }
+
             return BlockResponse::make($request);
         }
 

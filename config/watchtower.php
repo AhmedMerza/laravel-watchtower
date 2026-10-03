@@ -107,8 +107,12 @@ return [
     |                the detector's own window. Search-bot verification,
     |                when on, caches its verdict at
     |                `{key}:ua:bot:{bot}:{target}` and counts its lookup
-    |                budget at `{key}:ua:bot:lookups`. Change the prefix only
-    |                if it conflicts with another package's cache keys.
+    |                budget at `{key}:ua:bot:lookups`. A rejected request
+    |                against an existing block counts at
+    |                `{key}:blockhits:{ip}` — `watchtower:cleanup` moves the
+    |                total into that block's `hits`/`last_hit_at` columns.
+    |                Change the prefix only if it conflicts with another
+    |                package's cache keys.
     |
     | 'ttl_hours'  - Safety-net TTL on every cache entry. The cache is
     |                explicitly rebuilt on every block/unblock and on

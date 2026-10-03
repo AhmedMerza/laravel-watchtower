@@ -47,6 +47,8 @@ class CleanupCommand extends Command
             $this->info("Forgot {$pruned} decayed offence ledger(s).");
         }
 
+        $this->flushHits();
+
         // Fetched before the bulk delete below: this is the OTHER path a
         // blacklisted_ips row disappears by (BlacklistService::remove() is
         // the other), and it's a raw query rather than a remove() call per
@@ -96,5 +98,32 @@ class CleanupCommand extends Command
         }
 
         return self::SUCCESS;
+    }
+
+    /**
+     * Move every block's pending cache hit count into its `hits` and
+     * `last_hit_at` columns.
+     *
+     * Runs before the expired-block deletion above so a block that took a
+     * last hit just before lapsing still gets that hit recorded, even though
+     * the row disappears moments later anyway.
+     */
+    private function flushHits(): void
+    {
+        $blocks = BlacklistedIp::all(['id', 'ip', 'scope', 'hits']);
+        $flushed = 0;
+
+        foreach ($blocks as $block) {
+            $hits = $this->cache->pullHits($block->ip, $block->scope);
+
+            if ($hits > 0) {
+                $block->increment('hits', $hits, ['last_hit_at' => now()]);
+                $flushed++;
+            }
+        }
+
+        if ($flushed > 0) {
+            $this->info("Flushed hit counts for {$flushed} block(s).");
+        }
     }
 }

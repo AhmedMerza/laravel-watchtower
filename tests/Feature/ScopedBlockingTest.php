@@ -160,6 +160,17 @@ it('blocks on a route naming several scopes when the address is blocked in eithe
         ->assertForbidden();
 });
 
+it('counts a hit against the scoped block, not the global namespace', function () {
+    blockScoped('203.0.113.9', 'auth');
+
+    $this->withServerVariables(['REMOTE_ADDR' => '203.0.113.9'])
+        ->get('/login')
+        ->assertForbidden();
+
+    expect(app(BlacklistCache::class)->pullHits('203.0.113.9', 'auth'))->toBe(1)
+        ->and(app(BlacklistCache::class)->pullHits('203.0.113.9'))->toBe(0);
+});
+
 it('lets an address through a multi-scope route when it is blocked in neither', function () {
     config()->set('watchtower.scopes', ['auth', 'admin']);
     Route::get('/panel', fn () => 'ok')->middleware('watchtower:auth,admin');

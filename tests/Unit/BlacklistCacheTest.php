@@ -498,3 +498,39 @@ describe('write', function () {
         expect($this->cache->isBlocked('198.18.4.4'))->toBeTrue();
     });
 });
+
+describe('hit counting', function () {
+    it('counts repeated hits against the same address', function () {
+        $this->cache->recordHit('203.0.113.9');
+        $this->cache->recordHit('203.0.113.9');
+        $this->cache->recordHit('203.0.113.9');
+
+        expect($this->cache->pullHits('203.0.113.9'))->toBe(3);
+    });
+
+    it('reads zero and writes nothing for an address with no hits', function () {
+        expect($this->cache->pullHits('203.0.113.9'))->toBe(0);
+    });
+
+    it('clears the counter once pulled, so the next flush starts from zero', function () {
+        $this->cache->recordHit('203.0.113.9');
+        $this->cache->pullHits('203.0.113.9');
+
+        expect($this->cache->pullHits('203.0.113.9'))->toBe(0);
+    });
+
+    it('keeps a scoped address hit count separate from the global one', function () {
+        $this->cache->recordHit('203.0.113.9');
+        $this->cache->recordHit('203.0.113.9', 'auth');
+        $this->cache->recordHit('203.0.113.9', 'auth');
+
+        expect($this->cache->pullHits('203.0.113.9'))->toBe(1)
+            ->and($this->cache->pullHits('203.0.113.9', 'auth'))->toBe(2);
+    });
+
+    it('keeps the block-hit counter under its own key, apart from HitWindow\'s detector counters', function () {
+        $this->cache->recordHit('203.0.113.9');
+
+        expect(Cache::store('array')->get('watchtower:blacklist:blockhits:203.0.113.9'))->toBe(1);
+    });
+});
