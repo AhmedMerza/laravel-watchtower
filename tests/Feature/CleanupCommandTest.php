@@ -3,9 +3,12 @@
 declare(strict_types=1);
 
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Event;
 use Watchtower\Enums\BlockSource;
+use Watchtower\Events\IpUnblocked;
 use Watchtower\Models\BlacklistedIp;
 use Watchtower\Services\BlacklistCache;
+use Watchtower\Support\BlockScope;
 
 beforeEach(function () {
     config()->set('cache.default', 'array');
@@ -26,6 +29,55 @@ it('deletes expired temporary blocks', function () {
         ->expectsOutputToContain('Removed 1 expired block');
 
     $this->assertDatabaseMissing('blacklisted_ips', ['ip' => '1.2.3.4']);
+});
+
+it('fires IpUnblocked for an expired global block, so a block target learns it lapsed', function () {
+    Event::fake();
+
+    BlacklistedIp::create([
+        'ip'         => '1.2.3.4',
+        'scope'      => BlockScope::GLOBAL,
+        'source'     => BlockSource::Auto,
+        'source_env' => 'testing',
+        'expires_at' => now()->subHour(),
+    ]);
+
+    $this->artisan('watchtower:cleanup')->assertSuccessful();
+
+    Event::assertDispatched(IpUnblocked::class, fn ($e) => $e->ip === '1.2.3.4');
+});
+
+it('does not fire IpUnblocked for an expired SCOPED block', function () {
+    Event::fake();
+    config()->set('watchtower.scopes', ['auth']);
+
+    BlacklistedIp::create([
+        'ip'         => '1.2.3.4',
+        'scope'      => 'auth',
+        'source'     => BlockSource::Auto,
+        'source_env' => 'testing',
+        'expires_at' => now()->subHour(),
+    ]);
+
+    $this->artisan('watchtower:cleanup')->assertSuccessful();
+
+    Event::assertNotDispatched(IpUnblocked::class);
+});
+
+it('fires no events when nothing expired', function () {
+    Event::fake();
+
+    BlacklistedIp::create([
+        'ip'         => '2.2.2.2',
+        'scope'      => BlockScope::GLOBAL,
+        'source'     => BlockSource::Auto,
+        'source_env' => 'testing',
+        'expires_at' => now()->addHour(),
+    ]);
+
+    $this->artisan('watchtower:cleanup')->assertSuccessful();
+
+    Event::assertNotDispatched(IpUnblocked::class);
 });
 
 it('does not delete blocks that have not expired yet', function () {
