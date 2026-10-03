@@ -6,7 +6,6 @@ use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Queue;
 use LogScope\Http\Middleware\Authorize;
-use Watchtower\Jobs\PushBlockToMaster;
 use Watchtower\Models\BlacklistedIp;
 use Watchtower\Support\BlockScope;
 
@@ -86,24 +85,13 @@ it('unblocks only the named scope when one is given', function () {
         ->toBe([BlockScope::GLOBAL]);
 });
 
-it('does not push a scoped block to the master', function () {
-    config()->set('watchtower.sync.master_url', 'https://master.example.com');
-
-    $this->postJson('/logscope/watchtower/api/block', ['ip' => '10.0.0.1', 'scope' => 'auth'])->assertOk();
-
-    // The sync payload carries no scope, so the master would store this as a
-    // global block and hand every satellite an app-wide block nobody asked
-    // for. Until #37 widens the wire format, scoped blocks stay local.
-    Queue::assertNotPushed(PushBlockToMaster::class);
-});
-
-it('still pushes a global block to the master', function () {
-    config()->set('watchtower.sync.master_url', 'https://master.example.com');
-
-    $this->postJson('/logscope/watchtower/api/block', ['ip' => '10.0.0.1'])->assertOk();
-
-    Queue::assertPushed(PushBlockToMaster::class);
-});
+// Whether a block reaches the master (and that a scoped one doesn't — the
+// sync payload carries no scope, so the master would store it as global and
+// hand every satellite an app-wide block nobody asked for, until #37 widens
+// the wire format) is DispatchBlockToTargets's decision now, not block()'s —
+// Event::fake() here would stop that queued listener from ever running, so
+// that coverage moved to tests/Unit/DispatchBlockToTargetsTest.php, which
+// exercises the real listener directly instead of faking the event away.
 
 it('reports only the scopes an address is actually blocked in', function () {
     config()->set('watchtower.scopes', ['auth', 'admin']);

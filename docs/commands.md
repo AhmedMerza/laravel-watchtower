@@ -2,7 +2,7 @@
 
 [← Back to the README](../README.md) · [All docs](README.md)
 
-The four commands Watchtower adds.
+The five commands Watchtower adds.
 
 ```bash
 # First-time setup (publish config + run migration)
@@ -16,6 +16,11 @@ php artisan watchtower:sync
 # Runs automatically every day — set WATCHTOWER_CLEANUP_ENABLED=false to manage manually
 # Permanent blocks (no expiry) are never touched
 php artisan watchtower:cleanup
+
+# Push the full active (global) blocklist to every enabled block target —
+# today that's the master environment, if WATCHTOWER_MASTER_URL is set.
+# Repairs drift a live push missed; not scheduled by default.
+php artisan watchtower:reconcile
 
 # Backtest the auto-block rules against the log history you already have.
 # Read-only — it writes nothing, whatever mode the rules are in.

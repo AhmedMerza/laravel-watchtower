@@ -74,3 +74,12 @@ Both directions apply the same two rules, from one implementation:
   or this satellite pulled it from the master — `watchtower:sync` reports
   those as `refused by never_block`. `never_auto_block` is a different case
   and does *not* survive sync — see the caveat under [Auto-Block](auto-block.md).
+
+## Repairing Drift
+
+`php artisan watchtower:reconcile` re-pushes every active global block to the
+master — the push-side complement to `watchtower:sync`'s pull. Nothing
+automatically retries a push whose queued job exhausted its 3 tries; this is
+how you catch those up without waiting for the next time each address is
+blocked again. Not scheduled by default — add it to the satellite's schedule
+on whatever cadence suits you. See [Artisan Commands](commands.md).

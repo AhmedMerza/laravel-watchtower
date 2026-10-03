@@ -17,9 +17,11 @@ use Spatie\LaravelPackageTools\Package;
 use Spatie\LaravelPackageTools\PackageServiceProvider;
 use Watchtower\Console\Commands\CleanupCommand;
 use Watchtower\Console\Commands\InstallCommand;
+use Watchtower\Console\Commands\ReconcileCommand;
 use Watchtower\Console\Commands\SimulateCommand;
 use Watchtower\Console\Commands\SyncCommand;
 use Watchtower\Events\IpBlocked;
+use Watchtower\Events\IpUnblocked;
 use Watchtower\Http\Controllers\BlockController;
 use Watchtower\Http\Controllers\ManagementController;
 use Watchtower\Http\Controllers\SyncController;
@@ -30,6 +32,8 @@ use Watchtower\Http\Middleware\SignalDetectorMiddleware;
 use Watchtower\Http\Middleware\UserAgentMiddleware;
 use Watchtower\Http\Middleware\VerifySyncSignature;
 use Watchtower\Listeners\DetectAuthFailures;
+use Watchtower\Listeners\DispatchBlockToTargets;
+use Watchtower\Listeners\DispatchUnblockToTargets;
 use Watchtower\Listeners\NotifyOnBlock;
 use Watchtower\Services\AutoBlockService;
 use Watchtower\Services\BlacklistCache;
@@ -58,7 +62,7 @@ class WatchtowerServiceProvider extends PackageServiceProvider
             ->hasMigration('create_ip_offences_table')
             ->hasMigration('update_blacklisted_ips_table_add_scope')
             ->hasViews()
-            ->hasCommands([InstallCommand::class, SyncCommand::class, CleanupCommand::class, SimulateCommand::class]);
+            ->hasCommands([InstallCommand::class, SyncCommand::class, CleanupCommand::class, SimulateCommand::class, ReconcileCommand::class]);
     }
 
     public function registeringPackage(): void
@@ -93,6 +97,8 @@ class WatchtowerServiceProvider extends PackageServiceProvider
         $this->registerSyncRoutes();
 
         Event::listen(IpBlocked::class, NotifyOnBlock::class);
+        Event::listen(IpBlocked::class, DispatchBlockToTargets::class);
+        Event::listen(IpUnblocked::class, DispatchUnblockToTargets::class);
 
         $this->registerDetectorListeners();
 
