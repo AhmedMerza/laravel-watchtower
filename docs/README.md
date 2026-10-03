@@ -8,7 +8,7 @@
 | [Management API](api.md) | The JSON endpoints, who can reach them, and listing blocks page by page |
 | [Management Page](management-page.md) | The built-in page for listing, blocking and unblocking by hand |
 | [Cross-Environment Sync](sync.md) | Sharing blocks between production, staging and the rest |
-| [Block Targets](block-targets.md) | Pushing a block to Cloudflare, so it's turned away before Laravel boots |
+| [Block Targets](block-targets.md) | Pushing a block to Cloudflare or an nginx deny file, so it's turned away before Laravel boots |
 | [Attack-Tool User-Agents](user-agents.md) | Rejecting sqlmap, Nikto and friends, and verifying search bots |
 | [Auto-Block](auto-block.md) | Detectors, log rules, modes, the shared-IP guard, escalation, and backtesting with `watchtower:simulate` |
 | [Scoped Blocks](scoped-blocks.md) | Blocking an address from some routes only |
