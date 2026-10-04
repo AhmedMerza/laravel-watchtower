@@ -47,7 +47,16 @@ class CleanupCommand extends Command
             $this->info("Forgot {$pruned} decayed offence ledger(s).");
         }
 
-        $this->flushHits();
+        // Caught for the same reason prune() above is: this is housekeeping
+        // for the hits/last_hit_at columns, and a transient cache or DB
+        // fault partway through it must not abort the expired-block
+        // deletion and cache rebuild below, which are what this command is
+        // actually for.
+        try {
+            $this->flushHits();
+        } catch (\Throwable $e) {
+            $this->warn('Could not flush hit counts, carrying on with the blocks: '.$e->getMessage());
+        }
 
         // Fetched before the bulk delete below: this is the OTHER path a
         // blacklisted_ips row disappears by (BlacklistService::remove() is
@@ -107,20 +116,29 @@ class CleanupCommand extends Command
      * Runs before the expired-block deletion above so a block that took a
      * last hit just before lapsing still gets that hit recorded, even though
      * the row disappears moments later anyway.
+     *
+     * Chunked rather than one `all()`: unlike the expired-block query above,
+     * this reads every row in the table, including every permanent block
+     * that will never be deleted — so it grows with the table's lifetime
+     * total, not with how much is currently active, and needs a bound on
+     * memory independent of how large that gets.
      */
     private function flushHits(): void
     {
-        $blocks = BlacklistedIp::all(['id', 'ip', 'scope', 'hits']);
         $flushed = 0;
 
-        foreach ($blocks as $block) {
-            $hits = $this->cache->pullHits($block->ip, $block->scope);
+        BlacklistedIp::query()
+            ->select(['id', 'ip', 'scope', 'hits'])
+            ->chunkById(500, function ($blocks) use (&$flushed) {
+                foreach ($blocks as $block) {
+                    $hits = $this->cache->pullHits($block->ip, $block->scope);
 
-            if ($hits > 0) {
-                $block->increment('hits', $hits, ['last_hit_at' => now()]);
-                $flushed++;
-            }
-        }
+                    if ($hits > 0) {
+                        $block->increment('hits', $hits, ['last_hit_at' => now()]);
+                        $flushed++;
+                    }
+                }
+            });
 
         if ($flushed > 0) {
             $this->info("Flushed hit counts for {$flushed} block(s).");

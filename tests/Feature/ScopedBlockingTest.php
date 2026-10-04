@@ -171,6 +171,21 @@ it('counts a hit against the scoped block, not the global namespace', function (
         ->and(app(BlacklistCache::class)->pullHits('203.0.113.9'))->toBe(0);
 });
 
+it('still rejects a scoped request when recording the hit throws', function () {
+    blockScoped('203.0.113.9', 'auth');
+
+    // Wraps a REAL, already-warmed BlacklistCache so isBlocked() answers
+    // normally; only recordHit() is made to fail, the same fault
+    // BlockedIpMiddleware already has a dedicated test for.
+    $cache = Mockery::mock(new BlacklistCache);
+    $cache->shouldReceive('recordHit')->once()->andThrow(new RuntimeException('cache down'));
+    $this->app->instance(BlacklistCache::class, $cache);
+
+    $this->withServerVariables(['REMOTE_ADDR' => '203.0.113.9'])
+        ->get('/login')
+        ->assertForbidden();
+});
+
 it('lets an address through a multi-scope route when it is blocked in neither', function () {
     config()->set('watchtower.scopes', ['auth', 'admin']);
     Route::get('/panel', fn () => 'ok')->middleware('watchtower:auth,admin');

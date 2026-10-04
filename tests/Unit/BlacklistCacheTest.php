@@ -500,7 +500,10 @@ describe('write', function () {
 });
 
 describe('hit counting', function () {
-    it('counts repeated hits against the same address', function () {
+    it('counts repeated hits against the same blocked address', function () {
+        blacklistRow('203.0.113.9');
+        $this->cache->rebuild();
+
         $this->cache->recordHit('203.0.113.9');
         $this->cache->recordHit('203.0.113.9');
         $this->cache->recordHit('203.0.113.9');
@@ -512,7 +515,16 @@ describe('hit counting', function () {
         expect($this->cache->pullHits('203.0.113.9'))->toBe(0);
     });
 
+    it('does not record a hit for an address that is not actually blocked', function () {
+        $this->cache->recordHit('203.0.113.9');
+
+        expect($this->cache->pullHits('203.0.113.9'))->toBe(0);
+    });
+
     it('clears the counter once pulled, so the next flush starts from zero', function () {
+        blacklistRow('203.0.113.9');
+        $this->cache->rebuild();
+
         $this->cache->recordHit('203.0.113.9');
         $this->cache->pullHits('203.0.113.9');
 
@@ -520,6 +532,15 @@ describe('hit counting', function () {
     });
 
     it('keeps a scoped address hit count separate from the global one', function () {
+        blacklistRow('203.0.113.9');
+        BlacklistedIp::create([
+            'ip'         => '203.0.113.9',
+            'scope'      => 'auth',
+            'source'     => BlockSource::Manual,
+            'source_env' => 'testing',
+        ]);
+        $this->cache->rebuild();
+
         $this->cache->recordHit('203.0.113.9');
         $this->cache->recordHit('203.0.113.9', 'auth');
         $this->cache->recordHit('203.0.113.9', 'auth');
@@ -529,8 +550,35 @@ describe('hit counting', function () {
     });
 
     it('keeps the block-hit counter under its own key, apart from HitWindow\'s detector counters', function () {
+        blacklistRow('203.0.113.9');
+        $this->cache->rebuild();
+
         $this->cache->recordHit('203.0.113.9');
 
         expect(Cache::store('array')->get('watchtower:blacklist:blockhits:203.0.113.9'))->toBe(1);
+    });
+
+    // Both of these pin the bug /mr-review caught: recordHit() originally
+    // keyed on the raw requesting address, while watchtower:cleanup reads
+    // the counter back by the block ROW's own `ip` column — a different
+    // string for a range or an IPv6 address widened to its /64.
+    it('attributes a hit on a widened IPv6 /64 block to the stored network, not the visiting address', function () {
+        blacklistRow('2001:db8:1:2::/64');
+        $this->cache->rebuild();
+
+        $this->cache->recordHit('2001:db8:1:2:ffff::1');
+
+        expect($this->cache->pullHits('2001:db8:1:2::/64'))->toBe(1)
+            ->and($this->cache->pullHits('2001:db8:1:2:ffff::1'))->toBe(0);
+    });
+
+    it('attributes a hit on an explicit CIDR range block to the range itself, not the attacking address', function () {
+        blacklistRow('203.0.113.0/24');
+        $this->cache->rebuild();
+
+        $this->cache->recordHit('203.0.113.200');
+
+        expect($this->cache->pullHits('203.0.113.0/24'))->toBe(1)
+            ->and($this->cache->pullHits('203.0.113.200'))->toBe(0);
     });
 });
