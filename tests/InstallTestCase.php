@@ -76,8 +76,11 @@ class InstallTestCase extends Orchestra
      */
     protected function tearDown(): void
     {
-        foreach (File::glob(database_path('migrations/*_{create_blacklisted_ips_table,create_ip_offences_table,update_blacklisted_ips_table_add_scope}.php'), GLOB_BRACE) as $published) {
-            File::delete($published);
+        // Every migration the package ships, not a list kept by hand: one left
+        // behind keeps its old timestamp on the next run's publish, sorts
+        // ahead of the table it alters, and fails that run's migrate.
+        foreach (File::glob(__DIR__.'/../database/migrations/*.php') as $shipped) {
+            File::delete(File::glob(database_path('migrations/*_'.basename($shipped))));
         }
 
         File::delete(config_path('watchtower.php'));

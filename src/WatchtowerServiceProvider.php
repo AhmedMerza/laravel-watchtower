@@ -60,6 +60,7 @@ class WatchtowerServiceProvider extends PackageServiceProvider
             // these sorted the order they have to run. MigrationOrderTest pins it.
             ->hasMigration('create_blacklisted_ips_table')
             ->hasMigration('create_ip_offences_table')
+            ->hasMigration('update_blacklisted_ips_table_add_hits')
             ->hasMigration('update_blacklisted_ips_table_add_scope')
             ->hasViews()
             ->hasCommands([InstallCommand::class, SyncCommand::class, CleanupCommand::class, SimulateCommand::class, ReconcileCommand::class]);
