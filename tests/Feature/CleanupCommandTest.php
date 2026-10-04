@@ -156,6 +156,95 @@ it('fails instead of reporting success when the cache rebuild fails', function (
     $this->assertDatabaseMissing('blacklisted_ips', ['ip' => '6.6.6.6']);
 });
 
+it('flushes a pending hit count into hits and last_hit_at', function () {
+    $block = BlacklistedIp::create([
+        'ip'         => '7.7.7.7',
+        'source'     => BlockSource::Manual,
+        'source_env' => 'testing',
+        'expires_at' => null,
+    ]);
+
+    $cache = app(BlacklistCache::class);
+    $cache->rebuild();
+    $cache->recordHit('7.7.7.7');
+    $cache->recordHit('7.7.7.7');
+    $cache->recordHit('7.7.7.7');
+
+    $this->artisan('watchtower:cleanup')
+        ->assertSuccessful()
+        ->expectsOutputToContain('Flushed hit counts for 1 block(s).');
+
+    $block->refresh();
+
+    expect($block->hits)->toBe(3)
+        ->and($block->last_hit_at)->not->toBeNull();
+
+    // Cleared, not merely read: the next flush must not double-count it.
+    expect($cache->pullHits('7.7.7.7'))->toBe(0);
+});
+
+it('attributes hits to the right (ip, scope) pair when both exist for the same address', function () {
+    config()->set('watchtower.scopes', ['auth']);
+
+    $global = BlacklistedIp::create([
+        'ip'         => '8.8.8.8',
+        'scope'      => BlockScope::GLOBAL,
+        'source'     => BlockSource::Manual,
+        'source_env' => 'testing',
+    ]);
+
+    $scoped = BlacklistedIp::create([
+        'ip'         => '8.8.8.8',
+        'scope'      => 'auth',
+        'source'     => BlockSource::Manual,
+        'source_env' => 'testing',
+    ]);
+
+    $cache = app(BlacklistCache::class);
+    $cache->rebuild();
+    $cache->recordHit('8.8.8.8');
+    $cache->recordHit('8.8.8.8', 'auth');
+    $cache->recordHit('8.8.8.8', 'auth');
+
+    $this->artisan('watchtower:cleanup')->assertSuccessful();
+
+    expect($global->refresh()->hits)->toBe(1)
+        ->and($scoped->refresh()->hits)->toBe(2);
+});
+
+it('does not report a flush when nothing was pending', function () {
+    BlacklistedIp::create([
+        'ip'         => '9.9.9.9',
+        'source'     => BlockSource::Manual,
+        'source_env' => 'testing',
+    ]);
+
+    $this->artisan('watchtower:cleanup')
+        ->assertSuccessful()
+        ->doesntExpectOutputToContain('Flushed hit counts');
+});
+
+it('does not let a hit-flush failure stop expired blocks from being cleaned up', function () {
+    BlacklistedIp::create([
+        'ip'         => '10.10.10.10',
+        'source'     => BlockSource::Auto,
+        'source_env' => 'testing',
+        'expires_at' => now()->subHour(),
+    ]);
+
+    $cache = Mockery::mock(BlacklistCache::class)->shouldIgnoreMissing();
+    $cache->shouldReceive('pullHits')->andThrow(new RuntimeException('cache down'));
+    $cache->shouldReceive('rebuild')->once()->andReturnTrue();
+    $this->app->instance(BlacklistCache::class, $cache);
+
+    $this->artisan('watchtower:cleanup')
+        ->assertSuccessful()
+        ->expectsOutputToContain('Could not flush hit counts')
+        ->expectsOutputToContain('Removed 1 expired block');
+
+    $this->assertDatabaseMissing('blacklisted_ips', ['ip' => '10.10.10.10']);
+});
+
 it('can still be run manually even when WATCHTOWER_CLEANUP_ENABLED is false', function () {
     config()->set('watchtower.cleanup.enabled', false);
 

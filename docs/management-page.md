@@ -6,7 +6,7 @@ A page at `/watchtower` that lists what is blocked, and blocks and unblocks by h
 
 A page at your route prefix — `/watchtower` by default — lists what is blocked and lets you block and unblock by hand.
 
-- **The blocklist**, newest first: address or range, scope, source (`manual`, `auto` or `sync`) and the environment it came from, reason, who blocked it, when it was blocked and when it expires. 25 to a page.
+- **The blocklist**, newest first: address or range, scope, source (`manual`, `auto` or `sync`) and the environment it came from, reason, who blocked it, when it was blocked, how many rejected requests it has taken and when the last one landed, and when it expires. 25 to a page.
 - **Filters** by source and by active / expired / all. They live in the query string, so a filtered list is a link you can send someone — and expired blocks are worth looking at, because `watchtower:cleanup` eventually deletes those rows and "it expired an hour ago" then becomes indistinguishable from "it was never blocked".
 - **A block form**: an IP or a CIDR range, a reason, and 1 hour / 24 hours / 7 days / permanent. Where you have declared [scopes](scoped-blocks.md), it can block an address from those routes only. Blocking a range wider than IPv4 `/16` or IPv6 `/32` needs the checkbox, the same guard `POST /api/block` applies.
 - **Unblock, which asks first.** It lifts exactly the row you clicked: an address with both an app-wide block and a scoped one is two rows, and lifting one leaves the other. (`DELETE /api/block/{ip}` still lifts every scope, because "unblock this address" has to keep meaning the address can use the app again.)

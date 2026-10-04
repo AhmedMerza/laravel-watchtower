@@ -89,6 +89,14 @@ class ScopedBlockMiddleware
             }
 
             if ($blocked) {
+                // Advisory stats; caught on its own so a write failure can't
+                // turn an enforced block into a 500 — see BlockedIpMiddleware.
+                try {
+                    $this->cache->recordHit($ip, $scope);
+                } catch (\Throwable) {
+                    // Block is enforced either way.
+                }
+
                 // $request must be passed so the response is marked ANSWERED:
                 // terminate() runs on global middleware even when the
                 // pipeline short-circuits here, and `response_bursts` would

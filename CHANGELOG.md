@@ -4,6 +4,10 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Hit counts on every block.** A rejected request against an existing block now counts toward its `hits` and `last_hit_at` columns — `watchtower:cleanup` moves the count from cache into the DB on its existing daily schedule, so a block still turning away traffic looks different from one that's dead weight. Exposed on `GET /api/blocks` and the management page. See [API](docs/api.md#listing-blocks) ([#20](https://github.com/AhmedMerza/laravel-watchtower/issues/20)).
+
 ## [0.8.0] - 2026-10-03
 
 ### Added

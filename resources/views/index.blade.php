@@ -140,6 +140,7 @@
                         <th>Reason</th>
                         <th>Blocked by</th>
                         <th>Blocked</th>
+                        <th>Hits</th>
                         <th>Expires</th>
                         <th></th>
                     </tr>
@@ -168,6 +169,12 @@
                             <td class="secondary">{{ $block->blocked_by ?: '—' }}</td>
                             <td class="muted nowrap" title="{{ $block->created_at }}">
                                 {{ $block->created_at?->diffForHumans() ?? '—' }}
+                            </td>
+                            <td class="secondary nowrap" @if ($block->last_hit_at) title="last hit {{ $block->last_hit_at }}" @endif>
+                                {{ $block->hits }}
+                                @if ($block->last_hit_at)
+                                    <br><span class="muted">{{ $block->last_hit_at->diffForHumans() }}</span>
+                                @endif
                             </td>
                             <td class="nowrap" @if ($block->expires_at) title="{{ $block->expires_at }}" @endif>
                                 @if ($block->expires_at === null)

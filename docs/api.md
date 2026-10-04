@@ -41,7 +41,7 @@ The body is Laravel's standard paginator shape — the rows under `data`, the co
 ```json
 {
   "current_page": 2,
-  "data": [{ "id": "01J...", "ip": "203.0.113.50", "source": "auto", "expires_at": null }],
+  "data": [{ "id": "01J...", "ip": "203.0.113.50", "source": "auto", "expires_at": null, "hits": 12, "last_hit_at": "2026-10-03T09:15:00.000000Z" }],
   "per_page": 50,
   "total": 87,
   "last_page": 2,
@@ -54,5 +54,6 @@ The body is Laravel's standard paginator shape — the rows under `data`, the co
 - **`per_page` is capped at 100.** Paginating is the point; without a ceiling, `?per_page=100000` is the unbounded query this endpoint used to be.
 - **Page URLs keep your filters**, so paging through a filtered list doesn't silently widen it.
 - **Expired blocks exist only until `watchtower:cleanup` next runs.** `?state=expired` can only show what's still there — "it expired an hour ago" and "it was never blocked" look identical once the row is gone.
+- **`hits` and `last_hit_at` count rejected requests against the block**, not the traffic that led to it being created. They update in the cache on every rejection but only land in these columns when `watchtower:cleanup` next runs — a block can show `hits: 0` for up to a day after turning away its first repeat request.
 
 **Authenticating a non-browser client isn't solved yet.** The management routes carry `watchtower.routes.middleware` (default `['web']`) and the `viewWatchtower` Gate, which is session-cookie authentication — fine for a browser, not for a mobile or CLI client. Token auth is deliberately not built: it needs decisions (which user a token resolves to, what `blocked_by` records for one, whether a token may create blocks or only read them) that shouldn't be guessed at without a real client to answer them. If you have one, say so on [#64](https://github.com/AhmedMerza/laravel-watchtower/issues/64). Until then, a script authenticates however the rest of your app does.

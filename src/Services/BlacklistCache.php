@@ -95,6 +95,16 @@ class BlacklistCache
     }
 
     /**
+     * `:blockhits:`, not `:hits:` — HitWindow already owns `{prefix}:hits:
+     * {detector}:{ip}` for the auto-block detectors, a different counter
+     * entirely, and the two must not collide on one key.
+     */
+    private function hitsKey(string $target, string $scope = BlockScope::GLOBAL): string
+    {
+        return $this->prefix($scope).':blockhits:'.$target;
+    }
+
+    /**
      * Check whether an already-normalized IP is currently blocked, in one
      * scope. Two cache reads, no DB hit — unless the cache is cold, in which
      * case it's warmed from the DB first.
@@ -142,6 +152,116 @@ class BlacklistCache
 
         // ISO-8601 string = temporary block, check if still active
         return now()->lt(Carbon::parse($value));
+    }
+
+    /**
+     * Count one rejected request against an address that is already
+     * blocked, in cache only — watchtower:cleanup moves the total into the
+     * `hits`/`last_hit_at` columns on its own schedule.
+     *
+     * Keyed on the BLOCK's own target — the matching range, or the (possibly
+     * IPv6-widened) single-address key `BlacklistService::block()` actually
+     * stored on the row — never the raw requesting address. For a range
+     * block, or any IPv6 block at the default `/64` widening, those differ,
+     * and watchtower:cleanup reads the counter back by `$block->ip`: a hit
+     * keyed on the visitor's own address would sit uncredited until its TTL
+     * expired. Every caller already confirmed `$ip` is blocked via
+     * isBlocked(), so this re-derives which target covers it rather than
+     * trusting the caller to know.
+     *
+     * `add()` opens the counter's TTL the same way HitWindow::hit() does, so
+     * it decays if cleanup never runs rather than growing forever; a counter
+     * that outlives its block is harmless either way, since cleanup attributes
+     * whatever it finds to the row that still exists for that (ip, scope).
+     */
+    public function recordHit(string $ip, string $scope = BlockScope::GLOBAL): void
+    {
+        $target = $this->matchedTarget($ip, $scope);
+
+        if ($target === null) {
+            return;
+        }
+
+        $cache = $this->cache();
+        $key = $this->hitsKey($target, $scope);
+
+        $cache->add($key, 0, $this->ttlSeconds);
+        $cache->increment($key);
+    }
+
+    /**
+     * Which target currently covers $ip, by the exact string a block row
+     * stores in its `ip` column — or null if nothing does.
+     *
+     * Deliberately NOT shared with isBlocked(): that runs on every request,
+     * blocked or not, and only ever needs a boolean, so it keeps paying for
+     * one array-wide IpUtils::checkIp() call. This is called only from
+     * recordHit(), only once a block is already confirmed — a rare path —
+     * and has to identify WHICH range matched, not just whether one did.
+     * The matching rules here must stay identical to isBlocked()'s; the
+     * "ranges" and "hit counting" groups in BlacklistCacheTest exercise both.
+     */
+    private function matchedTarget(string $ip, string $scope): ?string
+    {
+        $cache = $this->cache();
+        $ranges = $cache->get($this->rangesKey($scope));
+
+        if ((! is_array($ranges) || ! empty($ranges['partial'])) && $this->warm()) {
+            $ranges = $cache->get($this->rangesKey($scope));
+        }
+
+        $now = now()->getTimestamp();
+        $active = array_keys(array_filter(
+            (array) ($ranges['ranges'] ?? []),
+            fn ($expires) => $expires === 0 || $expires > $now,
+        ));
+
+        foreach ($active as $range) {
+            if (IpUtils::checkIp($ip, [$range])) {
+                return $range;
+            }
+        }
+
+        $ipv6Prefix = (int) ($ranges['ipv6_prefix'] ?? IpRange::ipv6BlockPrefix());
+        $target = str_contains($ip, ':') && $ipv6Prefix < 128
+            ? IpRange::canonical("{$ip}/{$ipv6Prefix}") ?? $ip
+            : $ip;
+
+        $value = $cache->get($this->key($target, $scope));
+
+        if ($value === null) {
+            return null;
+        }
+
+        // Empty string = permanent block (no expiry); ISO-8601 = temporary,
+        // still active.
+        if ($value === '' || now()->lt(Carbon::parse($value))) {
+            return $target;
+        }
+
+        return null;
+    }
+
+    /**
+     * Read and clear one address's pending hit count, for the flush that
+     * moves it into the DB.
+     *
+     * Read-then-forget, not atomic: a hit landing in the gap between the two
+     * is lost rather than double-counted. These are advisory stats for
+     * finding dead blocks, not a security control, so that narrow miss costs
+     * less than a lock on the request path would.
+     */
+    public function pullHits(string $ip, string $scope = BlockScope::GLOBAL): int
+    {
+        $cache = $this->cache();
+        $key = $this->hitsKey($ip, $scope);
+        $hits = (int) $cache->get($key, 0);
+
+        if ($hits > 0) {
+            $cache->forget($key);
+        }
+
+        return $hits;
     }
 
     /**
