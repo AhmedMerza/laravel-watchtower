@@ -6,6 +6,7 @@ namespace Watchtower\Console\Commands;
 
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Log;
+use Watchtower\Enums\BlockSource;
 use Watchtower\Models\BlacklistedIp;
 use Watchtower\Support\BlockScope;
 use Watchtower\Support\BlockTargetRegistry;
@@ -35,7 +36,14 @@ class ReconcileCommand extends Command
         // an edge/infrastructure target has no route to enforce "only these
         // paths" against, so reconcile walks the same GLOBAL-only set the
         // live path does.
-        $activeBlocks = BlacklistedIp::active()->where('scope', BlockScope::GLOBAL)->get();
+        //
+        // Feed rows are left out too, as the live path leaves them out by
+        // never announcing them (#21): thousands of ranges, re-imported
+        // daily, are not something to mirror into Cloudflare's rule list.
+        $activeBlocks = BlacklistedIp::active()
+            ->where('scope', BlockScope::GLOBAL)
+            ->where('source', '!=', BlockSource::Feed)
+            ->get();
 
         $failed = 0;
 

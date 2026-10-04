@@ -41,7 +41,13 @@ class SyncController extends Controller
     public function blocks(): JsonResponse
     {
         return response()->json([
-            'data' => BlacklistedIp::active()->where('scope', BlockScope::GLOBAL)->get(),
+            // Not feed rows: every environment imports the feeds itself, and
+            // a satellite pulling the master's copy would store thousands of
+            // them as `sync` rows that no import ever cleans up (#21).
+            'data' => BlacklistedIp::active()
+                ->where('scope', BlockScope::GLOBAL)
+                ->where('source', '!=', BlockSource::Feed)
+                ->get(),
         ]);
     }
 

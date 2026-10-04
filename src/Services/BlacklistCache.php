@@ -8,11 +8,11 @@ use Carbon\Carbon;
 use Illuminate\Contracts\Cache\Repository;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
-use Symfony\Component\HttpFoundation\IpUtils;
 use Watchtower\Models\BlacklistedIp;
 use Watchtower\Support\BlockScope;
 use Watchtower\Support\FailureWindow;
 use Watchtower\Support\IpRange;
+use Watchtower\Support\RangeIndex;
 
 /**
  * Stores the active blacklist in Laravel's cache so the request-path
@@ -27,6 +27,8 @@ use Watchtower\Support\IpRange;
  * - `{prefix}:_ranges` — every other range, in one list, with the IPv6
  *   prefix the keys above were built for. It's read on every request, and
  *   every rebuild writes it, so its absence is what marks the cache cold.
+ *   Stored compiled (RangeIndex), so a feed's thousands of ranges cost a
+ *   binary search per request, not a scan.
  * - `{prefix}:_index` — the targets that have their own key, read only by
  *   `rebuild()` so it can forget stale entries on any cache driver. We
  *   can't rely on `Cache::tags()`: file and database stores don't support
@@ -117,41 +119,7 @@ class BlacklistCache
      */
     public function isBlocked(string $ip, string $scope = BlockScope::GLOBAL): bool
     {
-        $cache = $this->cache();
-        $ranges = $cache->get($this->rangesKey($scope));
-
-        if ((! is_array($ranges) || ! empty($ranges['partial'])) && $this->warm()) {
-            $ranges = $cache->get($this->rangesKey($scope));
-        }
-
-        $now = now()->getTimestamp();
-        $active = array_keys(array_filter(
-            (array) ($ranges['ranges'] ?? []),
-            fn ($expires) => $expires === 0 || $expires > $now,
-        ));
-
-        if ($active !== [] && IpUtils::checkIp($ip, $active)) {
-            return true;
-        }
-
-        $ipv6Prefix = (int) ($ranges['ipv6_prefix'] ?? IpRange::ipv6BlockPrefix());
-        $target = str_contains($ip, ':') && $ipv6Prefix < 128
-            ? IpRange::canonical("{$ip}/{$ipv6Prefix}") ?? $ip
-            : $ip;
-
-        $value = $cache->get($this->key($target, $scope));
-
-        if ($value === null) {
-            return false;
-        }
-
-        // Empty string = permanent block (no expiry)
-        if ($value === '') {
-            return true;
-        }
-
-        // ISO-8601 string = temporary block, check if still active
-        return now()->lt(Carbon::parse($value));
+        return $this->matchedTarget($ip, $scope) !== null;
     }
 
     /**
@@ -193,33 +161,28 @@ class BlacklistCache
      * Which target currently covers $ip, by the exact string a block row
      * stores in its `ip` column — or null if nothing does.
      *
-     * Deliberately NOT shared with isBlocked(): that runs on every request,
-     * blocked or not, and only ever needs a boolean, so it keeps paying for
-     * one array-wide IpUtils::checkIp() call. This is called only from
-     * recordHit(), only once a block is already confirmed — a rare path —
-     * and has to identify WHICH range matched, not just whether one did.
-     * The matching rules here must stay identical to isBlocked()'s; the
-     * "ranges" and "hit counting" groups in BlacklistCacheTest exercise both.
+     * isBlocked() is this, as a boolean. They used to be two copies — a
+     * range check by one array-wide IpUtils::checkIp() call could say
+     * whether some range matched but not which — and two copies of a
+     * matching rule are one drift away from disagreeing. The compiled range
+     * index (#21) answers "which" at the same cost, so there is one copy.
      */
     private function matchedTarget(string $ip, string $scope): ?string
     {
         $cache = $this->cache();
         $ranges = $cache->get($this->rangesKey($scope));
 
-        if ((! is_array($ranges) || ! empty($ranges['partial'])) && $this->warm()) {
+        // No `index` is a list written before ranges were compiled (#21).
+        // Its plain `ranges` map is unreadable here, so trusting it would
+        // stop every range block matching until its TTL ran out.
+        if ((! is_array($ranges) || ! empty($ranges['partial']) || ! isset($ranges['index'])) && $this->warm()) {
             $ranges = $cache->get($this->rangesKey($scope));
         }
 
-        $now = now()->getTimestamp();
-        $active = array_keys(array_filter(
-            (array) ($ranges['ranges'] ?? []),
-            fn ($expires) => $expires === 0 || $expires > $now,
-        ));
+        $range = RangeIndex::match((array) ($ranges['index'] ?? []), $ip, now()->getTimestamp());
 
-        foreach ($active as $range) {
-            if (IpUtils::checkIp($ip, [$range])) {
-                return $range;
-            }
+        if ($range !== null) {
+            return $range;
         }
 
         $ipv6Prefix = (int) ($ranges['ipv6_prefix'] ?? IpRange::ipv6BlockPrefix());
@@ -495,12 +458,12 @@ class BlacklistCache
         if (! is_array($ranges)) {
             $ranges = [
                 'ipv6_prefix' => IpRange::ipv6BlockPrefix(),
-                'ranges'      => [],
                 'expires'     => now()->addSeconds($this->ttlSeconds)->getTimestamp(),
                 'partial'     => true,
             ];
         }
 
+        $ranges['ranges'] = RangeIndex::entries((array) ($ranges['index'] ?? []));
         $ranges['ranges'][$target] = $block->expires_at?->getTimestamp() ?? 0;
         $this->putRanges($ranges, $scope);
     }
@@ -515,6 +478,12 @@ class BlacklistCache
         $cache->forget($this->key($target, $scope));
 
         $ranges = $cache->get($this->rangesKey($scope));
+
+        if (! is_array($ranges)) {
+            return;
+        }
+
+        $ranges['ranges'] = RangeIndex::entries((array) ($ranges['index'] ?? []));
 
         if (isset($ranges['ranges'][$target])) {
             unset($ranges['ranges'][$target]);
@@ -572,9 +541,16 @@ class BlacklistCache
         return $block->expires_at ? $block->expires_at->toIso8601String() : '';
     }
 
-    /** Write one scope's range list, keeping the expiry it was first written with. */
+    /**
+     * Write one scope's range list, keeping the expiry it was first written
+     * with. Takes the plain `ranges` map (target => expiry) and stores it
+     * compiled, as `index` — see RangeIndex.
+     */
     private function putRanges(array $ranges, string $scope = BlockScope::GLOBAL): void
     {
+        $ranges['index'] = RangeIndex::compile((array) ($ranges['ranges'] ?? []));
+        unset($ranges['ranges']);
+
         $expires = $ranges['expires'] ?? now()->addSeconds($this->ttlSeconds)->getTimestamp();
 
         $this->cache()->put($this->rangesKey($scope), $ranges, Carbon::createFromTimestamp($expires));

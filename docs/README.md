@@ -9,9 +9,10 @@
 | [Management Page](management-page.md) | The built-in page for listing, blocking and unblocking by hand |
 | [Cross-Environment Sync](sync.md) | Sharing blocks between production, staging and the rest |
 | [Block Targets](block-targets.md) | Pushing a block to Cloudflare or an nginx deny file, so it's turned away before Laravel boots |
+| [Public Blocklist Feeds](feeds.md) | Importing Spamhaus DROP or FireHOL level1 daily, and what an import never touches |
 | [Attack-Tool User-Agents](user-agents.md) | Rejecting sqlmap, Nikto and friends, and verifying search bots |
 | [Auto-Block](auto-block.md) | Detectors, log rules, modes, the shared-IP guard, escalation, and backtesting with `watchtower:simulate` |
 | [Scoped Blocks](scoped-blocks.md) | Blocking an address from some routes only |
-| [Artisan Commands](commands.md) | `install`, `sync`, `cleanup`, `simulate`, `reconcile` |
+| [Artisan Commands](commands.md) | `install`, `sync`, `cleanup`, `simulate`, `reconcile`, `import-feeds` |
 | [Upgrading](upgrading.md) | What to check when you upgrade |
 | [Security Notes](security.md) | Proxies, cache outages, request signing |

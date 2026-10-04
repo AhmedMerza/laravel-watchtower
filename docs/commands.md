@@ -22,10 +22,17 @@ php artisan watchtower:cleanup
 # Repairs drift a live push missed; not scheduled by default.
 php artisan watchtower:reconcile
 
+# Import the enabled public blocklist feeds, replacing the previous import.
+# Runs automatically every day; every feed is off until you enable it.
+# Never touches manual, auto or sync blocks.
+php artisan watchtower:import-feeds
+
 # Backtest the auto-block rules against the log history you already have.
 # Read-only — it writes nothing, whatever mode the rules are in.
 php artisan watchtower:simulate --days=7
 php artisan watchtower:simulate --rule=0 --json
 ```
+
+To turn on a feed, see [Public Blocklist Feeds](feeds.md).
 
 To backtest your rules, see [Backtesting a rule before you arm it](auto-block.md#backtesting-a-rule-before-you-arm-it).

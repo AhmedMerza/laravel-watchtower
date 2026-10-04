@@ -85,6 +85,7 @@ A global middleware checks each request against the cache right after `TrustProx
 | **Backtesting** | `watchtower:simulate` replays a rule over past logs before you arm it | [Backtesting](docs/auto-block.md#backtesting-a-rule-before-you-arm-it) |
 | **Shared-IP guard** | Holds back an auto-block on an address several signed-in users share | [Shared IPs](docs/auto-block.md#shared-ips) |
 | **Escalating durations** | Longer blocks for addresses that come back | [Escalation](docs/auto-block.md#escalating-durations) |
+| **Public blocklists** | Imports Spamhaus DROP or FireHOL level1 daily. Off by default, and never imports private ranges | [Feeds](docs/feeds.md) |
 | **Scoped blocks** | Block an address from some routes, such as login, instead of the whole app | [Scoped Blocks](docs/scoped-blocks.md) |
 | **Webhook** | Posts every block to a URL, e.g. for Slack or n8n | [Configuration](docs/configuration.md#webhook-notification) |
 
