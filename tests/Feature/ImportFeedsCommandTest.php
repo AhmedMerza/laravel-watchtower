@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use Illuminate\Console\Scheduling\Schedule;
+use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Http;
@@ -11,6 +12,7 @@ use Illuminate\Support\Facades\Route;
 use Watchtower\Console\Commands\ImportFeedsCommand;
 use Watchtower\Enums\BlockSource;
 use Watchtower\Events\IpBlocked;
+use Watchtower\Events\IpUnblocked;
 use Watchtower\Jobs\PushBlockToMaster;
 use Watchtower\Models\BlacklistedIp;
 use Watchtower\Services\BlacklistCache;
@@ -230,7 +232,6 @@ it('keeps a lookup from a non-blocked address fast with 5,000 feed ranges loaded
     $cache->rebuild();
 
     $lookups = 500;
-    $start = hrtime(true);
 
     // Drawn from the same space as the ranges, so lookups land between
     // them and walk parents rather than all falling below the first one.
@@ -243,6 +244,8 @@ it('keeps a lookup from a non-blocked address fast with 5,000 feed ranges loaded
             $probes[] = $probe;
         }
     }
+
+    $start = hrtime(true);
 
     foreach ($probes as $probe) {
         $cache->isBlocked($probe);
@@ -414,14 +417,21 @@ it('finds the range covering an address without loading every other range', func
         ->and($loaded)->toBeLessThan(10);
 });
 
-it('imports a range over a lapsed block that cleanup has not swept yet', function () {
+it('imports a range over a lapsed block that cleanup has not swept yet, lifting it at the edge as cleanup would', function () {
+    config()->set('watchtower.scopes', ['auth']);
+    Event::fake([IpUnblocked::class]);
     BlacklistedIp::create(['ip' => '1.10.16.0/20', 'source' => BlockSource::Manual, 'expires_at' => now()->subHour()]);
+    $scoped = BlacklistedIp::create(['ip' => '1.10.16.0/20', 'scope' => 'auth', 'source' => BlockSource::Manual, 'expires_at' => now()->subHour()]);
     fakeFeeds(['1.10.16.0/20'], ['31.13.0.0/16']);
 
     $this->artisan('watchtower:import-feeds')->assertSuccessful();
 
     expect(feedIps())->toBe(['1.10.16.0/20', '31.13.0.0/16'])
-        ->and(app(BlacklistCache::class)->isBlocked('1.10.16.1'))->toBeTrue();
+        ->and(app(BlacklistCache::class)->isBlocked('1.10.16.1'))->toBeTrue()
+        ->and($scoped->fresh())->not->toBeNull();
+
+    // A target pushed the lapsed temporary block only lifts it on this.
+    Event::assertDispatched(IpUnblocked::class, fn ($event) => $event->ip === '1.10.16.0/20');
 });
 
 it('keeps a block that lands mid-import instead of rolling the import back', function () {
@@ -437,8 +447,85 @@ it('keeps a block that lands mid-import instead of rolling the import back', fun
         }
     });
 
-    $this->artisan('watchtower:import-feeds')->assertSuccessful();
+    $this->artisan('watchtower:import-feeds')->assertSuccessful()
+        ->expectsOutputToContain('2 added');
 
     expect(BlacklistedIp::where('ip', '5.8.0.0/16')->value('source'))->toBe(BlockSource::Manual)
         ->and(feedIps())->toBe(['1.10.16.0/20', '31.13.0.0/16']);
+});
+
+it('fails loudly rather than storing broken rows when the feed migration has not run', function () {
+    // The pre-#21 source enum, as an app that upgraded the package but didn't
+    // migrate still has. INSERT IGNORE / OR IGNORE would swallow this.
+    (include __DIR__.'/../../database/migrations/update_blacklisted_ips_table_source_feed.php')->down();
+    fakeFeeds(['1.10.16.0/20'], ['31.13.0.0/16']);
+
+    expect(fn () => $this->artisan('watchtower:import-feeds')->run())->toThrow(QueryException::class);
+    expect(BlacklistedIp::count())->toBe(0);
+});
+
+it('refuses a feed listing more entries than any real blocklist', function () {
+    $singles = array_map(fn ($i) => long2ip(0x0B000000 + $i), range(1, 100_001));
+    fakeFeeds(['1.10.16.0/20'], $singles);
+
+    $this->artisan('watchtower:import-feeds')->assertFailed()
+        ->expectsOutputToContain('more than the 100000');
+
+    expect(feedIps())->toBe(['1.10.16.0/20']);
+});
+
+it('remembers a feed\'s size only when the import accepted it', function () {
+    $five = ['5.8.0.0/16', '5.9.0.0/16', '5.10.0.0/16', '5.11.0.0/16', '5.12.0.0/16'];
+    fakeFeeds($five, ['31.13.0.0/16']);
+    $this->artisan('watchtower:import-feeds')->assertSuccessful();
+
+    fakeFeeds(['5.8.0.0/16'], ['31.13.0.0/16']);
+    $this->artisan('watchtower:import-feeds')->assertFailed();
+    $this->artisan('watchtower:import-feeds')->assertFailed()
+        ->expectsOutputToContain('down from 5');
+
+    expect(Cache::get('watchtower:blacklist:feeds:drop:listed'))->toBe(5);
+});
+
+it('accepts a shrunk feed with --force, and forgets the size of a feed turned off', function () {
+    $five = ['5.8.0.0/16', '5.9.0.0/16', '5.10.0.0/16', '5.11.0.0/16', '5.12.0.0/16'];
+    fakeFeeds($five, ['31.13.0.0/16']);
+    $this->artisan('watchtower:import-feeds')->assertSuccessful();
+
+    fakeFeeds(['5.8.0.0/16'], ['31.13.0.0/16']);
+    $this->artisan('watchtower:import-feeds', ['--force' => true])->assertSuccessful();
+    expect(feedIps())->toBe(['31.13.0.0/16', '5.8.0.0/16']);
+
+    config()->set('watchtower.feeds.firehol.enabled', false);
+    $this->artisan('watchtower:import-feeds')->assertSuccessful();
+    expect(Cache::has('watchtower:blacklist:feeds:firehol:listed'))->toBeFalse();
+});
+
+it('refuses a redirect from https down to plain http', function () {
+    // The plain-http copy is a valid feed: only the redirect rule keeps it out.
+    $GLOBALS['feedResponses'] = [
+        DROP_URL                       => ['', 302, ['Location' => 'http://feeds.test/drop.json']],
+        'http://feeds.test/drop.json'  => [dropFeed(['1.10.16.0/20']), 200],
+        FIREHOL_URL                    => [fireholFeed(['31.13.0.0/16']), 200],
+    ];
+
+    $this->artisan('watchtower:import-feeds')->assertFailed()
+        ->expectsOutputToContain('Feed [drop] skipped');
+
+    expect(feedIps())->toBe(['31.13.0.0/16']);
+});
+
+it('reads an https URL whatever the case of its scheme', function () {
+    config()->set('watchtower.feeds.drop.urls', ['HTTPS://feeds.test/drop.json']);
+    fakeFeeds(['1.10.16.0/20'], ['31.13.0.0/16']);
+
+    $this->artisan('watchtower:import-feeds')->assertSuccessful();
+
+    expect(feedIps())->toBe(['1.10.16.0/20', '31.13.0.0/16']);
+});
+
+it('finds the covering range for an IPv4-mapped address', function () {
+    BlacklistedIp::create(['ip' => '11.0.7.0/24', 'source' => BlockSource::Feed]);
+
+    expect(app(BlacklistService::class)->find('::ffff:11.0.7.9')?->ip)->toBe('11.0.7.0/24');
 });

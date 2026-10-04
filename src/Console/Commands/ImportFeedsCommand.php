@@ -6,6 +6,7 @@ namespace Watchtower\Console\Commands;
 
 use Illuminate\Console\Command;
 use Illuminate\Contracts\Cache\Repository;
+use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
@@ -13,6 +14,7 @@ use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use Symfony\Component\HttpFoundation\IpUtils;
 use Watchtower\Enums\BlockSource;
+use Watchtower\Events\IpUnblocked;
 use Watchtower\Models\BlacklistedIp;
 use Watchtower\Services\BlacklistCache;
 use Watchtower\Support\BlockScope;
@@ -29,11 +31,14 @@ use Watchtower\Support\IpRange;
  *
  * Feed rows are local: no IpBlocked event (so no webhook, no target push),
  * and the sync export and watchtower:reconcile both leave them out. Every
- * environment imports the feeds itself.
+ * environment imports the feeds itself. A master's synced block for the same
+ * address replaces a feed row (BlacklistService::applySync()), and from then
+ * on it is a sync row like any other.
  */
 class ImportFeedsCommand extends Command
 {
-    protected $signature = 'watchtower:import-feeds';
+    protected $signature = 'watchtower:import-feeds
+        {--force : Accept a feed that shrank by more than half since its last import}';
 
     protected $description = 'Import the enabled public blocklists, replacing every previously imported feed entry';
 
@@ -71,6 +76,13 @@ class ImportFeedsCommand extends Command
 
     private const MAX_IPV6_NETWORKS = 2 ** 44;
 
+    /**
+     * The most entries one feed may list. The coverage cap above counts
+     * addresses, so it lets through millions of single IPs — each its own
+     * row and cache key. The real feeds list under 5,000; this allows ~20x.
+     */
+    private const MAX_ENTRIES = 100_000;
+
     /** A feed shrinking below this share of its previous size is treated as a bad download. */
     private const MIN_KEPT_SHARE = 0.5;
 
@@ -81,7 +93,14 @@ class ImportFeedsCommand extends Command
 
     public function handle(): int
     {
-        $feeds = array_filter((array) config('watchtower.feeds', []), fn ($feed) => ! empty($feed['enabled']));
+        $configured = (array) config('watchtower.feeds', []);
+        $feeds = array_filter($configured, fn ($feed) => ! empty($feed['enabled']));
+
+        // A feed turned off forgets its size, so turning it back on (or
+        // pointing it at a smaller list) isn't refused against a stale one.
+        foreach (array_diff_key($configured, $feeds) as $name => $_) {
+            $this->counts()->forget($this->countKey((string) $name));
+        }
 
         $owned = BlacklistedIp::where('source', BlockSource::Feed)
             ->selectRaw('blocked_by, count(*) as total')
@@ -102,8 +121,8 @@ class ImportFeedsCommand extends Command
             // owned are the fallback for a first run or a flushed cache.
             $previous = (int) ($this->counts()->get($this->countKey((string) $name)) ?? $owned["feed:{$name}"] ?? 0);
 
-            if ($targets !== null && count($targets) < $previous * self::MIN_KEPT_SHARE) {
-                $this->skip($name, 'it listed '.count($targets)." usable ranges, down from {$previous}");
+            if ($targets !== null && ! $this->option('force') && count($targets) < $previous * self::MIN_KEPT_SHARE) {
+                $this->skip($name, 'it listed '.count($targets)." usable ranges, down from {$previous} (if the list really did shrink, run watchtower:import-feeds --force once)");
                 $targets = null;
             }
 
@@ -120,7 +139,15 @@ class ImportFeedsCommand extends Command
             }
         }
 
-        [$added, $removed] = DB::transaction(fn () => $this->apply($wanted, $complete));
+        [$added, $removed, $lapsed] = DB::transaction(fn () => $this->apply($wanted, $complete));
+
+        // As watchtower:cleanup does for the same rows: a block target
+        // (cloudflare, nginx_file) that was pushed the lapsed temporary block
+        // only lifts it on IpUnblocked, and the feed row taking its place is
+        // never pushed — so without this the edge rule would never lift.
+        foreach ($lapsed as $ip) {
+            event(new IpUnblocked($ip));
+        }
 
         foreach ($listed as $name => $count) {
             $this->counts()->forever($this->countKey((string) $name), $count);
@@ -181,6 +208,12 @@ class ImportFeedsCommand extends Command
 
         if ($targets === []) {
             $this->skip($name, 'it listed no usable ranges');
+
+            return null;
+        }
+
+        if (count($targets) > self::MAX_ENTRIES) {
+            $this->skip($name, 'it listed '.count($targets).' entries, more than the '.self::MAX_ENTRIES.' any real blocklist comes near');
 
             return null;
         }
@@ -271,7 +304,7 @@ class ImportFeedsCommand extends Command
      * row: an address already blocked another way keeps that block.
      *
      * @param  array<string, string>  $wanted  target => the first feed listing it
-     * @return array{int, int}
+     * @return array{int, int, list<string>} added, removed, and the lapsed global rows replaced
      */
     private function apply(array $wanted, bool $complete): array
     {
@@ -313,20 +346,56 @@ class ImportFeedsCommand extends Command
         }
 
         $added = 0;
+        $lapsed = [];
 
         foreach (array_chunk($rows, 500) as $chunk) {
-            BlacklistedIp::where('scope', BlockScope::GLOBAL)
+            $expired = BlacklistedIp::where('scope', BlockScope::GLOBAL)
                 ->where('expires_at', '<=', now())
                 ->whereIn('ip', array_column($chunk, 'ip'))
-                ->delete();
+                ->pluck('ip')
+                ->all();
 
-            // OrIgnore: a manual or auto block for one of these, landing
-            // since $existing was read, keeps its row rather than rolling
-            // the whole import back on the unique (ip, scope) index.
-            $added += BlacklistedIp::insertOrIgnore($chunk);
+            if ($expired !== []) {
+                BlacklistedIp::where('scope', BlockScope::GLOBAL)->whereIn('ip', $expired)->delete();
+                array_push($lapsed, ...$expired);
+            }
+
+            $added += $this->insert($chunk);
         }
 
-        return [$added, $stale->count()];
+        return [$added, $stale->count(), $lapsed];
+    }
+
+    /**
+     * Insert one chunk. A manual or auto block for one of these targets,
+     * landing since the existing rows were read, keeps its row: the chunk is
+     * retried without it rather than rolling the whole import back.
+     *
+     * Not insertOrIgnore(): on MySQL that is INSERT IGNORE, which also turns
+     * an invalid enum value or a truncation into a warning — an import run
+     * before the `feed` migration would store rows with an empty source.
+     *
+     * @param  list<array<string, mixed>>  $chunk
+     */
+    private function insert(array $chunk): int
+    {
+        try {
+            // A savepoint, so a failed insert leaves Postgres' outer
+            // transaction usable for the retry.
+            DB::transaction(fn () => BlacklistedIp::insert($chunk));
+
+            return count($chunk);
+        } catch (UniqueConstraintViolationException) {
+            $taken = BlacklistedIp::where('scope', BlockScope::GLOBAL)
+                ->whereIn('ip', array_column($chunk, 'ip'))
+                ->pluck('ip')
+                ->flip();
+
+            $chunk = array_values(array_filter($chunk, fn ($row) => ! isset($taken[$row['ip']])));
+            BlacklistedIp::insert($chunk);
+
+            return count($chunk);
+        }
     }
 
     /** Where each feed's last listed size is remembered, for the shrink guard. */

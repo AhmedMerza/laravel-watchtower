@@ -26,6 +26,7 @@ php artisan watchtower:reconcile
 # Runs automatically every day; every feed is off until you enable it.
 # Never touches manual, auto or sync blocks.
 php artisan watchtower:import-feeds
+php artisan watchtower:import-feeds --force   # accept a feed that shrank by more than half
 
 # Backtest the auto-block rules against the log history you already have.
 # Read-only — it writes nothing, whatever mode the rules are in.
