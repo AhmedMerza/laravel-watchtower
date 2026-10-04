@@ -86,3 +86,11 @@ it('says whether an entry contains all of a target', function (array $entries, s
     'malformed entries skipped' => [['10.0.0.0/1a', 'nope', '', null, ['x'], ' 10.0.0.1 '], '10.0.0.1', true],
     'nothing matches'           => [['10.0.0.1', '192.168.0.0/16'], '10.0.0.2', false],
 ]);
+
+it('lists every wider range containing a target, spelled as stored', function () {
+    expect(IpRange::supersets('203.0.113.7'))->toHaveCount(32)
+        ->toContain('203.0.113.0/24', '203.0.112.0/20', '0.0.0.0/0')
+        ->not->toContain('203.0.113.7')
+        ->and(IpRange::supersets('10.1.0.0/16'))->toBe(array_map(fn ($l) => IpRange::canonical("10.1.0.0/{$l}"), range(0, 15)))
+        ->and(IpRange::supersets('2001:db8::1'))->toHaveCount(128)->toContain('2001:db8::/64', '2001:db8::/32');
+});

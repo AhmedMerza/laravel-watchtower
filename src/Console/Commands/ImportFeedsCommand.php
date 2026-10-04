@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace Watchtower\Console\Commands;
 
 use Illuminate\Console\Command;
+use Illuminate\Contracts\Cache\Repository;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
@@ -51,12 +53,23 @@ class ImportFeedsCommand extends Command
 
     /**
      * The widest range a feed may add. The real feeds' widest legitimate
-     * entries are an IPv4 /12 and an IPv6 /29; anything far wider is a
-     * broken or compromised list, not a netblock.
+     * entries are an IPv4 /12 and an IPv6 /29; these leave 4x and 32x
+     * headroom over them. Wider is a broken or compromised list.
      */
-    private const MIN_IPV4_PREFIX = 8;
+    private const MIN_IPV4_PREFIX = 10;
 
-    private const MIN_IPV6_PREFIX = 16;
+    private const MIN_IPV6_PREFIX = 24;
+
+    /**
+     * The most address space one feed may cover. A floor on single entries
+     * doesn't bound a list of many of them. The real feeds cover at most
+     * 0.42% of IPv4 (FireHOL level1, 18M addresses) and ~2^39.5 IPv6 /64s
+     * (DROP v6); these allow ~7x and ~23x that. A feed above either is
+     * refused whole, as a bad download is.
+     */
+    private const MAX_IPV4_ADDRESSES = 2 ** 27;
+
+    private const MAX_IPV6_NETWORKS = 2 ** 44;
 
     /** A feed shrinking below this share of its previous size is treated as a bad download. */
     private const MIN_KEPT_SHARE = 0.5;
@@ -76,11 +89,18 @@ class ImportFeedsCommand extends Command
             ->pluck('total', 'blocked_by');
 
         $wanted = [];
+        $listed = [];
         $complete = true;
 
         foreach ($feeds as $name => $feed) {
             $targets = $this->fetch((string) $name, (array) ($feed['urls'] ?? []));
-            $previous = (int) ($owned["feed:{$name}"] ?? 0);
+
+            // The size it last listed, not the rows attributed to it: a range
+            // two feeds list is attributed to the first, so with both shipped
+            // feeds on, FireHOL owns only what DROP lacks, and comparing
+            // against that would wave a truncated download through. Rows
+            // owned are the fallback for a first run or a flushed cache.
+            $previous = (int) ($this->counts()->get($this->countKey((string) $name)) ?? $owned["feed:{$name}"] ?? 0);
 
             if ($targets !== null && count($targets) < $previous * self::MIN_KEPT_SHARE) {
                 $this->skip($name, 'it listed '.count($targets)." usable ranges, down from {$previous}");
@@ -93,12 +113,18 @@ class ImportFeedsCommand extends Command
                 continue;
             }
 
+            $listed[$name] = count($targets);
+
             foreach ($targets as $target) {
                 $wanted[$target] ??= (string) $name;
             }
         }
 
         [$added, $removed] = DB::transaction(fn () => $this->apply($wanted, $complete));
+
+        foreach ($listed as $name => $count) {
+            $this->counts()->forever($this->countKey((string) $name), $count);
+        }
 
         if (! $this->cache->rebuild()) {
             $this->error("Imported feeds ({$added} added, {$removed} removed), but the cache rebuild failed — its DB read error is on the watchtower log channel.");
@@ -124,8 +150,18 @@ class ImportFeedsCommand extends Command
         $targets = [];
 
         foreach ($urls as $url) {
+            // A feed decides what gets blocked, so it is only read over TLS,
+            // and a redirect may not step down to plain http.
+            if (! str_starts_with(strtolower((string) $url), 'https://')) {
+                $this->skip($name, "{$url} is not an https URL");
+
+                return null;
+            }
+
             try {
-                $response = Http::timeout(30)->get($url);
+                $response = Http::timeout(30)
+                    ->withOptions(['allow_redirects' => ['max' => 5, 'protocols' => ['https']]])
+                    ->get($url);
             } catch (\Throwable $e) {
                 $this->skip($name, "{$url} could not be fetched: {$e->getMessage()}");
 
@@ -145,6 +181,25 @@ class ImportFeedsCommand extends Command
 
         if ($targets === []) {
             $this->skip($name, 'it listed no usable ranges');
+
+            return null;
+        }
+
+        $ipv4 = 0;
+        $ipv6 = 0;
+
+        foreach (array_keys($targets) as $target) {
+            [$address, $length] = IpRange::split((string) $target);
+
+            if (str_contains($address, ':')) {
+                $ipv6 += 2 ** (64 - min($length, 64));
+            } else {
+                $ipv4 += 2 ** (32 - $length);
+            }
+        }
+
+        if ($ipv4 > self::MAX_IPV4_ADDRESSES || $ipv6 > self::MAX_IPV6_NETWORKS) {
+            $this->skip($name, sprintf('it covers %.1f%% of IPv4 and %s IPv6 /64s, far more than any real blocklist', $ipv4 / 2 ** 32 * 100, number_format($ipv6)));
 
             return null;
         }
@@ -255,6 +310,17 @@ class ImportFeedsCommand extends Command
         }
 
         return [count($rows), $stale->count()];
+    }
+
+    /** Where each feed's last listed size is remembered, for the shrink guard. */
+    private function counts(): Repository
+    {
+        return Cache::store(config('watchtower.cache.store'));
+    }
+
+    private function countKey(string $name): string
+    {
+        return config('watchtower.cache.key', 'watchtower:blacklist').":feeds:{$name}:listed";
     }
 
     private function skip(string $name, string $why): void

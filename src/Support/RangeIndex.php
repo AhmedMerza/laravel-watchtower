@@ -19,6 +19,9 @@ namespace Watchtower\Support;
  *
  * One string per family because a string unserializes in effectively no
  * time, where an array of 5,000 entries costs ~0.4ms to rebuild on every read.
+ * Base64, because the raw bytes aren't valid UTF-8 and the `database` cache
+ * store on MySQL refuses them (1366 Incorrect string value) — decoding 85KB
+ * costs ~8µs.
  *
  * Two CIDR ranges are either disjoint or one contains the other, never a
  * partial overlap — so every range containing an address contains the last
@@ -74,7 +77,7 @@ final class RangeIndex
                 $packed .= $start.$end.pack('NNC', $expires, $parent, $length);
             }
 
-            $index[$width] = $packed;
+            $index[$width] = base64_encode($packed);
         }
 
         return $index;
@@ -94,7 +97,7 @@ final class RangeIndex
         }
 
         $width = strlen($address);
-        $data = $index[$width] ?? '';
+        $data = base64_decode($index[$width] ?? '');
         $size = 2 * $width + self::META;
 
         $low = 0;
@@ -138,6 +141,7 @@ final class RangeIndex
         $ranges = [];
 
         foreach ($index as $width => $data) {
+            $data = base64_decode($data);
             $size = 2 * $width + self::META;
 
             foreach (str_split($data, $size) as $record) {

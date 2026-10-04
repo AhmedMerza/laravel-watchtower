@@ -186,7 +186,10 @@ class BlacklistService
             ->active()
             ->first();
 
-        if ($existing !== null && $existing->source !== BlockSource::Sync) {
+        // A feed row is disposable, not a local decision: the master's block
+        // replaces it, or the satellite would stop blocking X once the feed
+        // dropped it while the master still blocks it (#21).
+        if ($existing !== null && ! in_array($existing->source, [BlockSource::Sync, BlockSource::Feed], true)) {
             return ['applied' => false, 'record' => $existing];
         }
 
@@ -314,7 +317,7 @@ class BlacklistService
             $own,
             fn () => BlacklistedIp::active()
                 ->where('scope', $scope)
-                ->where('ip', 'like', '%/%')
+                ->whereIn('ip', $this->supersetsOf($ip))
                 ->get(),
             $ip,
         );
@@ -323,9 +326,8 @@ class BlacklistService
     /**
      * Choose the record blocking $ip from rows already fetched for one scope.
      *
-     * $ranges is a callable because the covering-range scan reads every range
-     * in the table and is only needed when the address has no live row of its
-     * own. find() and status() share this so the two of them cannot drift on
+     * $ranges is a callable because the covering-range lookup is only needed
+     * when the address has no live row of its own. find() and status() share this so the two of them cannot drift on
      * which row wins.
      *
      * @param  Collection<int, BlacklistedIp>  $own
@@ -395,9 +397,9 @@ class BlacklistService
         $own = BlacklistedIp::whereIn('ip', $this->targetsFor($ip))->get()->groupBy('scope');
 
         $allRanges = null;
-        $rangesFor = function (string $scope) use (&$allRanges) {
+        $rangesFor = function (string $scope) use (&$allRanges, $ip) {
             $allRanges ??= BlacklistedIp::active()
-                ->where('ip', 'like', '%/%')
+                ->whereIn('ip', $this->supersetsOf($ip))
                 ->get()
                 ->groupBy('scope');
 
@@ -484,6 +486,19 @@ class BlacklistService
     private function targetsFor(string $ip): array
     {
         return array_values(array_unique([$this->normalizeTarget($ip), $this->normalizeIp($ip)]));
+    }
+
+    /**
+     * The range rows that could cover $ip, by exact `ip` — not a scan of every
+     * range in the table, which a feed import makes thousands of rows (#21).
+     *
+     * @return list<string>
+     */
+    private function supersetsOf(string $ip): array
+    {
+        $target = IpRange::canonical($ip);
+
+        return $target === null ? [] : IpRange::supersets($target);
     }
 
     /**

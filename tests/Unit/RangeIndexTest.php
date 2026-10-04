@@ -86,3 +86,34 @@ it('agrees with IpUtils on random nested and overlapping ranges', function () {
         }
     }
 });
+
+it('compiles to plain ASCII, so a text-column cache store can hold it', function () {
+    // The `database` store on MySQL refuses bytes that aren't valid UTF-8
+    // (1366 Incorrect string value); raw packed addresses are full of them.
+    $index = RangeIndex::compile(['1.10.16.0/20' => 0, '255.255.255.0/24' => 1_900_000_000, '2a06:e480::/29' => 0]);
+
+    expect(serialize($index))->toMatch('/^[\x20-\x7E]*$/');
+});
+
+it('agrees with IpUtils on random nested IPv6 ranges, alongside IPv4 ones', function () {
+    mt_srand(2106);
+    $now = time();
+    $ranges = ['10.0.0.0/8' => 0];
+
+    foreach (range(1, 400) as $_) {
+        $address = '2001:db8:'.dechex(mt_rand(0, 3)).':'.dechex(mt_rand(0, 0xFFFF)).'::';
+        $ranges[IpRange::canonical($address.'/'.mt_rand(33, 128))] = mt_rand(0, 3) === 0 ? $now + mt_rand(-100, 100) : 0;
+    }
+
+    $index = RangeIndex::compile($ranges);
+    $live = array_keys(array_filter($ranges, fn ($e) => $e === 0 || $e > $now));
+
+    foreach (range(1, 2000) as $_) {
+        $ip = '2001:db8:'.dechex(mt_rand(0, 3)).':'.dechex(mt_rand(0, 0xFFFF)).':'.dechex(mt_rand(0, 0xFFFF)).'::'.dechex(mt_rand(0, 0xFFFF));
+        $match = RangeIndex::match($index, $ip, $now);
+
+        expect($match !== null)->toBe(IpUtils::checkIp($ip, $live), "lookup of {$ip}");
+    }
+
+    expect(RangeIndex::match($index, '10.9.9.9', $now))->toBe('10.0.0.0/8');
+});

@@ -788,8 +788,9 @@ return [
     | pushed to block targets. Unblocking a feed entry by hand lasts until
     | the next import — add it to never_block to keep it unblocked.
     |
-    | Add your own: any URL serving one IP or CIDR per line works (comment
-    | lines starting with # or ; are skipped).
+    | Add your own: any https URL serving one IP or CIDR per line works
+    | (comment lines starting with # or ; are skipped). A feed covering more
+    | than ~3% of IPv4 is refused as broken — the real ones cover under 0.5%.
     |
     */
 

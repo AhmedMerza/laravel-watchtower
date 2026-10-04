@@ -25,8 +25,10 @@ php artisan watchtower:import-feeds
 
 - **It replaces the previous import.** A range a feed stops listing is unblocked on the next run. When several feeds are on, a range stays blocked as long as *any* of them lists it.
 - **It never touches your own blocks.** Manual, auto and sync blocks are left exactly as they are. An address you already block keeps your block, with your reason.
-- **It never imports private or reserved ranges.** FireHOL level1 lists the bogons, which include `10.0.0.0/8`, `172.16.0.0/12` and `192.168.0.0/16`. Importing those as-is would block your own load balancer, health checks and queue workers, so any range that overlaps an IANA special-purpose range is dropped. So is anything wider than an IPv4 `/8` or an IPv6 `/16`. The real feeds' widest entries are a `/12` and a `/29`, so a range that wide means the list is broken.
-- **A bad download removes nothing.** If a feed fails to download, lists nothing usable, or shrinks to less than half its previous size, its existing entries are kept, nothing is removed that run, and the command exits non-zero so the scheduler's failure reporting picks it up. Feeds that did download still have their new entries added.
+- **It never imports private or reserved ranges.** FireHOL level1 lists the bogons, which include `10.0.0.0/8`, `172.16.0.0/12` and `192.168.0.0/16`. Importing those as-is would block your own load balancer, health checks and queue workers, so any range that overlaps an IANA special-purpose range is dropped. So is any entry wider than an IPv4 `/10` or an IPv6 `/24` (the real feeds' widest are a `/12` and a `/29`).
+- **A feed that covers implausibly much is refused whole.** The real feeds cover at most 0.42% of IPv4. A feed covering more than ~3% of IPv4 (2^27 addresses), or more than 2^44 IPv6 `/64`s, is treated like a bad download: a broken or compromised list could otherwise block a large part of the internet one valid-looking entry at a time.
+- **Feeds are only read over HTTPS**, and a redirect may not step down to plain HTTP.
+- **A bad download removes nothing.** If a feed fails to download, lists nothing usable, or shrinks to less than half the size it listed last time, its existing entries are kept, nothing is removed that run, and the command exits non-zero so the scheduler's failure reporting picks it up. Feeds that did download still have their new entries added.
 - **`never_block` still wins** on every request, including over a feed range that covers the address.
 
 ## Where feed blocks go
@@ -43,7 +45,7 @@ A feed adds thousands of ranges, and each request is checked against all of them
 
 ## Adding your own feed
 
-Any URL that serves one IP or CIDR per line works. Lines starting with `#` or `;` are skipped, and the first address on each line is used, so one-JSON-object-per-line formats work too. Add an entry to `feeds` in `config/watchtower.php`:
+Any HTTPS URL that serves one IP or CIDR per line works. Lines starting with `#` or `;` are skipped, and the first address on each line is used, so one-JSON-object-per-line formats work too. Add an entry to `feeds` in `config/watchtower.php`:
 
 ```php
 'feeds' => [

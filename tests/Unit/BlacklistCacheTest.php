@@ -328,6 +328,24 @@ describe('ranges', function () {
             ->and(cachedRanges())->toBe(['203.0.113.0/24' => 0]);
     });
 
+    it('keeps every other range, family and expiry when one range is added or forgotten', function () {
+        $soon = now()->addHour()->getTimestamp();
+        putRangeList(['203.0.113.0/24' => 0, '10.0.0.0/8' => 0, '10.1.0.0/16' => $soon, '2a06:e480::/29' => 0]);
+
+        $this->cache->put(new BlacklistedIp(['ip' => '198.18.0.0/16', 'expires_at' => now()->addDay()]));
+        $this->cache->forget('10.1.0.0/16');
+
+        expect(cachedRanges())->toEqualCanonicalizing([
+            '203.0.113.0/24' => 0,
+            '10.0.0.0/8'     => 0,
+            '2a06:e480::/29' => 0,
+            '198.18.0.0/16'  => now()->addDay()->getTimestamp(),
+        ])
+            ->and($this->cache->isBlocked('10.1.2.3'))->toBeTrue()
+            ->and($this->cache->isBlocked('2a06:e487::1'))->toBeTrue()
+            ->and($this->cache->isBlocked('198.18.5.5'))->toBeTrue();
+    });
+
     it('rebuilds a range list cached before ranges were compiled, rather than reading it as empty', function () {
         blacklistRow('203.0.113.0/24');
         Cache::store('array')->put('watchtower:blacklist:_ranges', [
