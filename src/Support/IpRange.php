@@ -119,6 +119,26 @@ final class IpRange
         return [$canonical, str_contains($canonical, ':') ? 128 : 32];
     }
 
+    /**
+     * Every range strictly wider than $canonical that contains it, spelled
+     * the way canonical() spells a stored row — at most 32 (IPv4) or 128
+     * (IPv6). Looking these up by `ip` finds every range row covering an
+     * address through the (ip, scope) index, instead of scanning them all.
+     *
+     * @return list<string>
+     */
+    public static function supersets(string $canonical): array
+    {
+        [$address, $length] = self::split($canonical);
+        $supersets = [];
+
+        for ($prefix = 0; $prefix < $length; $prefix++) {
+            $supersets[] = (string) self::canonical("{$address}/{$prefix}");
+        }
+
+        return $supersets;
+    }
+
     public static function isTooBroad(string $canonical): bool
     {
         [$address, $length] = self::split($canonical);

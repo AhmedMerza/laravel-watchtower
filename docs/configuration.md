@@ -59,6 +59,10 @@ WATCHTOWER_LOG_CHANNEL=stack
 
 # Automatic cleanup of expired temporary blocks (runs daily)
 WATCHTOWER_CLEANUP_ENABLED=true
+
+# Public blocklist feeds, imported daily (all off by default) — see docs/feeds.md
+WATCHTOWER_FEED_SPAMHAUS_DROP=false
+WATCHTOWER_FEED_FIREHOL_LEVEL1=false
 ```
 
 ## Block Response

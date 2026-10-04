@@ -767,6 +767,51 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Public Blocklist Feeds
+    |--------------------------------------------------------------------------
+    |
+    | `watchtower:import-feeds` (scheduled daily) imports each enabled feed as
+    | `feed` blocks: known-bad networks blocked before they reach your app.
+    | All off by default — turn on the ones you want.
+    |
+    | - spamhaus_drop:  hijacked and criminal netblocks. Small, very high
+    |                   confidence. Free under https://www.spamhaus.org/drop/terms/
+    | - firehol_level1: broader. Already includes most of spamhaus_drop, so
+    |                   most apps need one or the other, not both.
+    |
+    | Every import replaces the previous one: a range a feed drops is
+    | unblocked on the next run. Manual, auto and sync blocks are never
+    | touched, private and reserved ranges are never imported, and
+    | never_block still wins on every request. If a feed fails to download,
+    | lists nothing, or shrinks by more than half, nothing is removed that
+    | run. Feed blocks stay on this environment: they are not synced and not
+    | pushed to block targets. Unblocking a feed entry by hand lasts until
+    | the next import — add it to never_block to keep it unblocked.
+    |
+    | Add your own: any https URL serving one IP or CIDR per line works
+    | (comment lines starting with # or ; are skipped). A feed covering more
+    | than ~3% of IPv4 is refused as broken — the real ones cover under 0.5%.
+    |
+    */
+
+    'feeds' => [
+        'spamhaus_drop' => [
+            'enabled' => env('WATCHTOWER_FEED_SPAMHAUS_DROP', false),
+            'urls'    => [
+                'https://www.spamhaus.org/drop/drop_v4.json',
+                'https://www.spamhaus.org/drop/drop_v6.json',
+            ],
+        ],
+        'firehol_level1' => [
+            'enabled' => env('WATCHTOWER_FEED_FIREHOL_LEVEL1', false),
+            'urls'    => [
+                'https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_level1.netset',
+            ],
+        ],
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
     | Notifications
     |--------------------------------------------------------------------------
     |

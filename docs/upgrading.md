@@ -4,7 +4,7 @@
 
 What to check when you upgrade an existing install. The [CHANGELOG](../CHANGELOG.md) has the full detail for every release.
 
-**1. Run the migrations.** Recent releases added the `scope` column on `blacklisted_ips` and the `ip_offences` table that escalating durations use:
+**1. Run the migrations.** Recent releases added the `scope` column on `blacklisted_ips`, the `ip_offences` table that escalating durations use, the `hits` columns, and the `feed` block source:
 
 ```bash
 # re-publish so the new ones land — this is the only way they run (#104)

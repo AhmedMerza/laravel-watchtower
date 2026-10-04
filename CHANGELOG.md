@@ -8,6 +8,12 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 - **Hit counts on every block.** A rejected request against an existing block now counts toward its `hits` and `last_hit_at` columns — `watchtower:cleanup` moves the count from cache into the DB on its existing daily schedule, so a block still turning away traffic looks different from one that's dead weight. Exposed on `GET /api/blocks` and the management page. See [API](docs/api.md#listing-blocks) ([#20](https://github.com/AhmedMerza/laravel-watchtower/issues/20)).
 
+- **`php artisan watchtower:import-feeds` imports public blocklists**: Spamhaus DROP and FireHOL level1 ship configured, every feed is off by default (`WATCHTOWER_FEED_SPAMHAUS_DROP`, `WATCHTOWER_FEED_FIREHOL_LEVEL1`), and the import runs daily. Entries use a new `feed` block source. Each run replaces the previous import against the union of enabled feeds, so a range stays blocked while any feed lists it. It never touches manual, auto or sync blocks, never imports private or reserved ranges (FireHOL lists the bogons, which cover RFC 1918), and removes nothing when a feed fails, comes back empty, or shrinks by more than half (`--force` accepts a real shrink). Feeds are read over HTTPS only. A feed covering more than ~3% of IPv4 or listing more than 100,000 entries is refused as broken; the real ones cover under 0.5%. Feed blocks stay local: they are not synced, not pushed to block targets, and don't fire the webhook. A block the master syncs for the same address replaces the feed entry and becomes an ordinary sync block. **Needs a migration**: re-publish and migrate. See [Public Blocklist Feeds](docs/feeds.md) ([#21](https://github.com/AhmedMerza/laravel-watchtower/issues/21)).
+
+### Changed
+
+- **Range blocks are checked by binary search instead of a scan.** The cached range list is stored as sorted, packed address ranges, so a request costs microseconds with thousands of ranges loaded, where checking each one took ~6ms at 5,000. A range list cached by an earlier version is rebuilt on the first request after upgrading ([#21](https://github.com/AhmedMerza/laravel-watchtower/issues/21)).
+
 ## [0.8.0] - 2026-10-03
 
 ### Added

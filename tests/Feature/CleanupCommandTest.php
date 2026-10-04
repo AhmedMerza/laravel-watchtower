@@ -233,7 +233,7 @@ it('does not let a hit-flush failure stop expired blocks from being cleaned up',
     ]);
 
     $cache = Mockery::mock(BlacklistCache::class)->shouldIgnoreMissing();
-    $cache->shouldReceive('pullHits')->andThrow(new RuntimeException('cache down'));
+    $cache->shouldReceive('pullHitsFor')->andThrow(new RuntimeException('cache down'));
     $cache->shouldReceive('rebuild')->once()->andReturnTrue();
     $this->app->instance(BlacklistCache::class, $cache);
 

@@ -14,6 +14,7 @@ use Illuminate\Support\Facades\Schema;
 use Watchtower\Enums\BlockSource;
 use Watchtower\Models\BlacklistedIp;
 use Watchtower\Services\BlacklistCache;
+use Watchtower\Support\RangeIndex;
 
 beforeEach(function () {
     // Use the array cache store — a real cache, no mocking. Each test gets
@@ -45,10 +46,16 @@ function putRangeList(array $ranges = [], int $ipv6Prefix = 64, bool $partial = 
 {
     Cache::store('array')->put('watchtower:blacklist:_ranges', array_filter([
         'ipv6_prefix' => $ipv6Prefix,
-        'ranges'      => $ranges,
+        'index'       => RangeIndex::compile($ranges),
         'expires'     => now()->addHour()->getTimestamp(),
         'partial'     => $partial,
     ], fn ($value) => $value !== false), 3600);
+}
+
+/** The global range list as the plain target => expiry map it was compiled from. */
+function cachedRanges(): array
+{
+    return RangeIndex::entries(Cache::store('array')->get('watchtower:blacklist:_ranges')['index']);
 }
 
 /** A cache that serves reads but fails every write, as a full or read-only Redis would. */
@@ -191,7 +198,7 @@ it('empties the index when no IPs are blocked on rebuild', function () {
     $this->cache->rebuild();
 
     expect(Cache::store('array')->get('watchtower:blacklist:_index'))->toBe([]);
-    expect(Cache::store('array')->get('watchtower:blacklist:_ranges')['ranges'])->toBe([]);
+    expect(cachedRanges())->toBe([]);
     expect(Cache::store('array')->has('watchtower:blacklist:ip:old.ip'))->toBeFalse();
 });
 
@@ -318,7 +325,50 @@ describe('ranges', function () {
         expect($this->cache->isBlocked('203.0.113.200'))->toBeTrue()
             ->and($this->cache->isBlocked('203.0.114.1'))->toBeFalse()
             ->and($this->cache->isBlocked('203.0.112.255'))->toBeFalse()
-            ->and(Cache::store('array')->get('watchtower:blacklist:_ranges')['ranges'])->toBe(['203.0.113.0/24' => 0]);
+            ->and(cachedRanges())->toBe(['203.0.113.0/24' => 0]);
+    });
+
+    it('keeps every other range, family and expiry when one range is added or forgotten', function () {
+        $soon = now()->addHour()->getTimestamp();
+        putRangeList(['203.0.113.0/24' => 0, '10.0.0.0/8' => 0, '10.1.0.0/16' => $soon, '2a06:e480::/29' => 0]);
+
+        $this->cache->put(new BlacklistedIp(['ip' => '198.18.0.0/16', 'expires_at' => now()->addDay()]));
+        $this->cache->forget('10.1.0.0/16');
+
+        expect(cachedRanges())->toEqualCanonicalizing([
+            '203.0.113.0/24' => 0,
+            '10.0.0.0/8'     => 0,
+            '2a06:e480::/29' => 0,
+            '198.18.0.0/16'  => now()->addDay()->getTimestamp(),
+        ])
+            ->and($this->cache->isBlocked('10.1.2.3'))->toBeTrue()
+            ->and($this->cache->isBlocked('2a06:e487::1'))->toBeTrue()
+            ->and($this->cache->isBlocked('198.18.5.5'))->toBeTrue();
+    });
+
+    it('rebuilds a range list cached before ranges were compiled, rather than reading it as empty', function () {
+        blacklistRow('203.0.113.0/24');
+        Cache::store('array')->put('watchtower:blacklist:_ranges', [
+            'ipv6_prefix' => 64,
+            'ranges'      => ['203.0.113.0/24' => 0],
+            'expires'     => now()->addHour()->getTimestamp(),
+        ], 3600);
+
+        expect($this->cache->isBlocked('203.0.113.9'))->toBeTrue();
+    });
+
+    it('keeps the other ranges when one is put into a list cached before ranges were compiled', function () {
+        blacklistRow('203.0.113.0/24');
+        Cache::store('array')->put('watchtower:blacklist:_ranges', [
+            'ipv6_prefix' => 64,
+            'ranges'      => ['203.0.113.0/24' => 0],
+            'expires'     => now()->addHour()->getTimestamp(),
+        ], 3600);
+
+        $this->cache->put(blacklistRow('198.18.0.0/16'));
+
+        expect($this->cache->isBlocked('203.0.113.9'))->toBeTrue()
+            ->and($this->cache->isBlocked('198.18.0.9'))->toBeTrue();
     });
 
     it('gives an IPv6 range at the block prefix its own key, off the range list', function () {
@@ -327,7 +377,7 @@ describe('ranges', function () {
         $this->cache->rebuild();
 
         expect(Cache::store('array')->get('watchtower:blacklist:ip:2001:db8:1:2::/64'))->toBe('')
-            ->and(Cache::store('array')->get('watchtower:blacklist:_ranges')['ranges'])->toBe([])
+            ->and(cachedRanges())->toBe([])
             ->and($this->cache->isBlocked('2001:db8:1:2:ffff::1'))->toBeTrue()
             ->and($this->cache->isBlocked('2001:db8:1:3::1'))->toBeFalse();
     });
@@ -349,7 +399,7 @@ describe('ranges', function () {
         $this->cache->rebuild();
 
         expect(Cache::store('array')->get('watchtower:blacklist:ip:2001:db8::5'))->toBe('')
-            ->and(Cache::store('array')->get('watchtower:blacklist:_ranges')['ranges'])->toBe(['2001:db8:1::/64' => 0])
+            ->and(cachedRanges())->toBe(['2001:db8:1::/64' => 0])
             ->and($this->cache->isBlocked('2001:db8::5'))->toBeTrue()
             ->and($this->cache->isBlocked('2001:db8::6'))->toBeFalse()
             ->and($this->cache->isBlocked('2001:db8:1::9'))->toBeTrue();
@@ -409,8 +459,8 @@ describe('ranges', function () {
     it('marks the list partial when it adds a range to a cold cache', function () {
         $this->cache->put(new BlacklistedIp(['ip' => '203.0.113.0/24']));
 
-        expect(Cache::store('array')->get('watchtower:blacklist:_ranges'))
-            ->toMatchArray(['partial' => true, 'ranges' => ['203.0.113.0/24' => 0]]);
+        expect(Cache::store('array')->get('watchtower:blacklist:_ranges'))->toMatchArray(['partial' => true])
+            ->and(cachedRanges())->toBe(['203.0.113.0/24' => 0]);
     });
 
     it('gives a single IP its own key when the rebuild fallback writes it', function () {
@@ -421,7 +471,7 @@ describe('ranges', function () {
         // A bare IP parked in the range list would still match isBlocked(),
         // so only the key itself shows the O(1) path was taken.
         expect(Cache::store('array')->get('watchtower:blacklist:ip:1.2.3.4'))->toBe('')
-            ->and(Cache::store('array')->get('watchtower:blacklist:_ranges')['ranges'])->toBe([]);
+            ->and(cachedRanges())->toBe([]);
     });
 
     it('leaves a cold cache cold when forgetting a target it never held', function () {
@@ -478,10 +528,7 @@ describe('write', function () {
 
         // The range list is what a rebuild writes last, and it holds every
         // active range — not just the one written.
-        $ranges = Cache::store('array')->get('watchtower:blacklist:_ranges');
-
-        expect($ranges)->toBeArray()
-            ->and(array_keys($ranges['ranges']))->toContain('198.18.0.0/16');
+        expect(array_keys(cachedRanges()))->toContain('198.18.0.0/16');
     });
 
     it('still writes the entry when a rebuild cannot read the DB', function () {

@@ -41,3 +41,18 @@ it('ships a migration file for every name it declares', function () {
         expect(__DIR__."/../../database/migrations/{$name}.php")->toBeFile();
     }
 });
+
+it('declares every migration it ships', function () {
+    // A migration that is shipped but never declared is never published, and
+    // publishing is the only way one runs (#104) — so an upgraded app simply
+    // never gets it. The hits columns (#20) went out exactly like that.
+    $package = new Package;
+
+    (new WatchtowerServiceProvider($this->app))->configurePackage($package);
+
+    $shipped = collect(glob(__DIR__.'/../../database/migrations/*.php'))
+        ->map(fn ($path) => basename($path, '.php'))
+        ->sort()->values()->all();
+
+    expect(collect($package->migrationFileNames)->sort()->values()->all())->toBe($shipped);
+});
