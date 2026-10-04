@@ -4,6 +4,10 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-04
+
+**Run the migrations after upgrading.** This release adds two: the `hits`/`last_hit_at` columns and the `feed` block source. Re-publish so they land, then migrate: `php artisan vendor:publish --tag=watchtower-migrations && php artisan migrate`. See [Upgrading](docs/upgrading.md).
+
 ### Added
 
 - **Hit counts on every block.** A rejected request against an existing block now counts toward its `hits` and `last_hit_at` columns — `watchtower:cleanup` moves the count from cache into the DB on its existing daily schedule, so a block still turning away traffic looks different from one that's dead weight. Exposed on `GET /api/blocks` and the management page. See [API](docs/api.md#listing-blocks) ([#20](https://github.com/AhmedMerza/laravel-watchtower/issues/20)).
@@ -270,7 +274,8 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 - **There is no transitional `ahmedmerza/logscope-guard` package.** It has been removed from Packagist. To upgrade, `composer remove ahmedmerza/logscope-guard`, `composer require ahmedmerza/watchtower`, then work through the BREAKING entries under Changed.
 
-[Unreleased]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.6.2...v0.7.0
 [0.6.2]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.6.1...v0.6.2
