@@ -275,7 +275,14 @@ class ImportFeedsCommand extends Command
      */
     private function apply(array $wanted, bool $complete): array
     {
-        $existing = BlacklistedIp::where('scope', BlockScope::GLOBAL)->pluck('source', 'ip');
+        // Live rows, plus every feed row (a feed row never lapses). A lapsed
+        // manual/auto/sync row blocks nothing, so it must not keep a listed
+        // range out; it is deleted below to make way, as cleanup would.
+        $existing = BlacklistedIp::where('scope', BlockScope::GLOBAL)
+            ->where(fn ($query) => $query->whereNull('expires_at')
+                ->orWhere('expires_at', '>', now())
+                ->orWhere('source', BlockSource::Feed))
+            ->pluck('source', 'ip');
 
         $stale = $complete
             ? $existing->filter(fn ($source, $ip) => $source === BlockSource::Feed && ! isset($wanted[$ip]))->keys()
@@ -305,11 +312,21 @@ class ImportFeedsCommand extends Command
             ];
         }
 
+        $added = 0;
+
         foreach (array_chunk($rows, 500) as $chunk) {
-            BlacklistedIp::insert($chunk);
+            BlacklistedIp::where('scope', BlockScope::GLOBAL)
+                ->where('expires_at', '<=', now())
+                ->whereIn('ip', array_column($chunk, 'ip'))
+                ->delete();
+
+            // OrIgnore: a manual or auto block for one of these, landing
+            // since $existing was read, keeps its row rather than rolling
+            // the whole import back on the unique (ip, scope) index.
+            $added += BlacklistedIp::insertOrIgnore($chunk);
         }
 
-        return [count($rows), $stale->count()];
+        return [$added, $stale->count()];
     }
 
     /** Where each feed's last listed size is remembered, for the shrink guard. */

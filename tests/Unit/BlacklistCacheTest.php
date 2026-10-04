@@ -357,6 +357,20 @@ describe('ranges', function () {
         expect($this->cache->isBlocked('203.0.113.9'))->toBeTrue();
     });
 
+    it('keeps the other ranges when one is put into a list cached before ranges were compiled', function () {
+        blacklistRow('203.0.113.0/24');
+        Cache::store('array')->put('watchtower:blacklist:_ranges', [
+            'ipv6_prefix' => 64,
+            'ranges'      => ['203.0.113.0/24' => 0],
+            'expires'     => now()->addHour()->getTimestamp(),
+        ], 3600);
+
+        $this->cache->put(blacklistRow('198.18.0.0/16'));
+
+        expect($this->cache->isBlocked('203.0.113.9'))->toBeTrue()
+            ->and($this->cache->isBlocked('198.18.0.9'))->toBeTrue();
+    });
+
     it('gives an IPv6 range at the block prefix its own key, off the range list', function () {
         blacklistRow('2001:db8:1:2::/64');
 

@@ -130,13 +130,11 @@ class CleanupCommand extends Command
         BlacklistedIp::query()
             ->select(['id', 'ip', 'scope', 'hits'])
             ->chunkById(500, function ($blocks) use (&$flushed) {
-                foreach ($blocks as $block) {
-                    $hits = $this->cache->pullHits($block->ip, $block->scope);
-
-                    if ($hits > 0) {
-                        $block->increment('hits', $hits, ['last_hit_at' => now()]);
-                        $flushed++;
-                    }
+                // One cache read per chunk, not per row: a feed import makes
+                // this thousands of rows, nearly all with nothing pending.
+                foreach ($this->cache->pullHitsFor($blocks) as $position => $hits) {
+                    $blocks[$position]->increment('hits', $hits, ['last_hit_at' => now()]);
+                    $flushed++;
                 }
             });
 

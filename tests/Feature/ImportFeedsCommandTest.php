@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use Illuminate\Console\Scheduling\Schedule;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Queue;
@@ -411,4 +412,33 @@ it('finds the range covering an address without loading every other range', func
     expect($status['record']?->ip)->toBe('11.0.7.0/24')
         ->and(app(BlacklistService::class)->find('11.0.9.1')?->ip)->toBe('11.0.9.0/24')
         ->and($loaded)->toBeLessThan(10);
+});
+
+it('imports a range over a lapsed block that cleanup has not swept yet', function () {
+    BlacklistedIp::create(['ip' => '1.10.16.0/20', 'source' => BlockSource::Manual, 'expires_at' => now()->subHour()]);
+    fakeFeeds(['1.10.16.0/20'], ['31.13.0.0/16']);
+
+    $this->artisan('watchtower:import-feeds')->assertSuccessful();
+
+    expect(feedIps())->toBe(['1.10.16.0/20', '31.13.0.0/16'])
+        ->and(app(BlacklistCache::class)->isBlocked('1.10.16.1'))->toBeTrue();
+});
+
+it('keeps a block that lands mid-import instead of rolling the import back', function () {
+    fakeFeeds(['1.10.16.0/20', '5.8.0.0/16'], ['31.13.0.0/16']);
+
+    // Stands in for a manual block written between the existing-row read and
+    // the insert: it lands right after that read.
+    $raced = false;
+    DB::listen(function ($query) use (&$raced) {
+        if (! $raced && str_starts_with($query->sql, 'select "source", "ip" from "blacklisted_ips"')) {
+            $raced = true;
+            DB::table('blacklisted_ips')->insert(['id' => (string) str()->ulid(), 'ip' => '5.8.0.0/16', 'scope' => '', 'source' => 'manual']);
+        }
+    });
+
+    $this->artisan('watchtower:import-feeds')->assertSuccessful();
+
+    expect(BlacklistedIp::where('ip', '5.8.0.0/16')->value('source'))->toBe(BlockSource::Manual)
+        ->and(feedIps())->toBe(['1.10.16.0/20', '31.13.0.0/16']);
 });

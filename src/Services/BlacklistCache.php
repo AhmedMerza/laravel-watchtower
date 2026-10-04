@@ -216,12 +216,40 @@ class BlacklistCache
      */
     public function pullHits(string $ip, string $scope = BlockScope::GLOBAL): int
     {
-        $cache = $this->cache();
-        $key = $this->hitsKey($ip, $scope);
-        $hits = (int) $cache->get($key, 0);
+        return $this->pullHitsFor([new BlacklistedIp(['ip' => $ip, 'scope' => $scope])])[0] ?? 0;
+    }
 
-        if ($hits > 0) {
-            $cache->forget($key);
+    /**
+     * pullHits() for many rows in one read: watchtower:cleanup flushes every
+     * row, and a feed makes that thousands, almost all with no hits. Keyed by
+     * the position in $blocks; only rows with hits appear.
+     *
+     * @param  iterable<BlacklistedIp>  $blocks
+     * @return array<int|string, int>
+     */
+    public function pullHitsFor(iterable $blocks): array
+    {
+        $cache = $this->cache();
+        $keys = [];
+
+        foreach ($blocks as $position => $block) {
+            $keys[$position] = $this->hitsKey($block->ip, (string) $block->scope);
+        }
+
+        if ($keys === []) {
+            return [];
+        }
+
+        $values = $cache->many(array_values(array_unique($keys)));
+        $hits = [];
+
+        foreach ($keys as $position => $key) {
+            $count = (int) ($values[$key] ?? 0);
+
+            if ($count > 0) {
+                $cache->forget($key);
+                $hits[$position] = $count;
+            }
         }
 
         return $hits;
@@ -455,7 +483,10 @@ class BlacklistCache
             return;
         }
 
-        if (! is_array($ranges)) {
+        // No `index` is a list cached before ranges were compiled (#21): its
+        // map can't be read here, and adding to it as if it were empty would
+        // drop every other range and look warm. Start a partial one instead.
+        if (! is_array($ranges) || ! isset($ranges['index'])) {
             $ranges = [
                 'ipv6_prefix' => IpRange::ipv6BlockPrefix(),
                 'expires'     => now()->addSeconds($this->ttlSeconds)->getTimestamp(),
@@ -479,11 +510,14 @@ class BlacklistCache
 
         $ranges = $cache->get($this->rangesKey($scope));
 
-        if (! is_array($ranges)) {
+        // A target with its own key is never in the range list, so don't pay
+        // to decode thousands of feed ranges to find that out.
+        if (! is_array($ranges) || ! isset($ranges['index'])
+            || $this->hasOwnKey($target, (int) ($ranges['ipv6_prefix'] ?? IpRange::ipv6BlockPrefix()))) {
             return;
         }
 
-        $ranges['ranges'] = RangeIndex::entries((array) ($ranges['index'] ?? []));
+        $ranges['ranges'] = RangeIndex::entries((array) $ranges['index']);
 
         if (isset($ranges['ranges'][$target])) {
             unset($ranges['ranges'][$target]);
