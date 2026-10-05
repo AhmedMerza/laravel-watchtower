@@ -600,6 +600,15 @@ it('emits the detector report in --json', function () {
         ]]);
 });
 
+it('strips control and bidi characters from an outcome before printing it', function () {
+    onlyDetector('response_bursts');
+    wouldHaveBlocked('10.0.0.9', 'response_bursts', 30, ['in_block_mode' => "bl\u{202E}ocked\u{9B}31m"]);
+
+    $this->artisan('watchtower:simulate')
+        ->assertSuccessful()
+        ->expectsOutputToContain('blocked31m');
+});
+
 it('does not trust a forged line: unknown detectors and non-addresses are set aside, markup is printed as text', function () {
     // The log table is shared; anything can log this message.
     onlyDetector('response_bursts');

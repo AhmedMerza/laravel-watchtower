@@ -307,7 +307,7 @@ class SimulateCommand extends Command
         if ($unreadable > 0) {
             $this->newLine();
             $this->warn(sprintf(
-                '%d would-have-blocked line(s) could not be used — cut short by LogScope, or not written by a configured detector — so they are not counted above.',
+                '%d would-have-blocked line(s) could not be used — cut short by LogScope (a rule\'s line looks the same once cut), or not naming a configured detector — so they are not counted above.',
                 $unreadable,
             ));
         }
@@ -323,10 +323,11 @@ class SimulateCommand extends Command
         arsort($outcomes);
 
         // Outcomes are read out of a shared log table, so they are printed
-        // as text: no control bytes for the terminal, no tags for Console.
+        // as text: no control or bidi characters for the terminal, no tags
+        // for Console.
         $cells = array_map(
             static fn (string|int $outcome, int $n): string => OutputFormatter::escape(
-                (string) preg_replace('/[\x00-\x1F\x7F]/u', '', (string) $outcome),
+                (string) preg_replace('/[\p{Cc}\p{Cf}]/u', '', (string) $outcome),
             ).(count($outcomes) > 1 ? " ×{$n}" : ''),
             array_keys($outcomes),
             $outcomes,
