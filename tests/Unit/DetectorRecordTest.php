@@ -475,3 +475,101 @@ it('does not carry a previous window\'s users into the next one', function () {
 
     expect($this->hits->users('failed_logins', '198.51.100.21'))->toBe([]);
 });
+
+it('says in warn mode what block mode would have done (#121)', function (array $config, ?int $users, string $expected) {
+    config()->set('watchtower.auto_block.mode', 'warn');
+    config()->set('watchtower.auto_block.shared_ip_user_threshold', 1);
+    config()->set('watchtower.scopes', ['auth']);
+
+    foreach ($config as $key => $value) {
+        config()->set($key, $value);
+    }
+
+    $lines = captureWouldHaveBlocked();
+
+    foreach (range(1, 3) as $i) {
+        $this->service->record('failed_logins', '198.51.100.40', $users);
+    }
+
+    expect($lines)->toHaveCount(1)
+        ->and($lines[0]['not_blocked_because'])->toBe('warn mode')
+        ->and($lines[0]['in_block_mode'])->toBe($expected);
+})->with([
+    'nothing in the way'        => [[], null, 'blocked'],
+    'shared, app-wide'          => [[], 7, 'held_by_shared_ip'],
+    'shared, scoped'            => [['watchtower.auto_block.detectors.failed_logins.scope' => 'auth'], 7, 'blocked_in_scope'],
+    'never_auto_block'          => [['watchtower.never_auto_block' => ['198.51.100.40']], null, 'held_by_never_auto_block'],
+    'never_block'               => [['watchtower.never_block' => ['198.51.100.40']], null, 'held_by_never_block'],
+    // Block mode checks the shared-IP guard before block() reaches the lists.
+    'shared beats the list'     => [['watchtower.never_auto_block' => ['198.51.100.40']], 7, 'held_by_shared_ip'],
+    // block() checks never_auto_block first, as it throws.
+    'both lists'                => [['watchtower.never_auto_block' => ['198.51.100.40'], 'watchtower.never_block' => ['198.51.100.40']], null, 'held_by_never_auto_block'],
+]);
+
+it('leaves in_block_mode off a line that block mode itself wrote', function () {
+    config()->set('watchtower.never_auto_block', ['198.51.100.41']);
+    $lines = captureWouldHaveBlocked();
+
+    foreach (range(1, 3) as $i) {
+        $this->service->record('failed_logins', '198.51.100.41');
+    }
+
+    expect($lines)->toHaveCount(1)
+        ->and($lines[0])->not->toHaveKey('in_block_mode');
+});
+
+it('lets a detector set its own user threshold without moving any other detector (#121)', function () {
+    config()->set('watchtower.auto_block.shared_ip_user_threshold', 3);
+    config()->set('watchtower.auto_block.detectors.response_bursts', [
+        'enabled'                  => true,
+        'count'                    => 3,
+        'window_minutes'           => 1,
+        'shared_ip_user_threshold' => 1,
+    ]);
+    $lines = captureWouldHaveBlocked();
+
+    // One signed-in user is enough to hold response_bursts back...
+    foreach (range(1, 3) as $i) {
+        $this->service->record('response_bursts', '198.51.100.42', 7);
+    }
+
+    // ...while failed_logins still answers to the global 3.
+    foreach (range(1, 3) as $i) {
+        $this->service->record('failed_logins', '198.51.100.43', 7);
+    }
+
+    expect($lines)->toHaveCount(1)
+        ->and($lines[0]['detector'])->toBe('response_bursts')
+        ->and($lines[0]['not_blocked_because'])->toBe('shared IP');
+
+    $this->assertDatabaseMissing('blacklisted_ips', ['ip' => '198.51.100.42']);
+    $this->assertDatabaseHas('blacklisted_ips', ['ip' => '198.51.100.43']);
+});
+
+it('falls back to the default, loudly, when a detector\'s own threshold is not a number', function () {
+    config()->set('watchtower.auto_block.shared_ip_user_threshold', 0);
+    config()->set('watchtower.auto_block.detectors.failed_logins.shared_ip_user_threshold', 'one');
+
+    $logChannel = Mockery::mock()->shouldIgnoreMissing();
+    $logChannel->shouldReceive('warning')
+        ->with('Watchtower: shared_ip_user_threshold is not a whole number, so the shared-IP guard fell back to its default.', Mockery::any())
+        ->once();
+    Log::shouldReceive('channel')->andReturn($logChannel);
+
+    // Three users meet the default of 3, so the guard holds even though the
+    // global value switched it off.
+    foreach ([7, 8, 9] as $userId) {
+        $this->service->record('failed_logins', '198.51.100.44', $userId);
+    }
+
+    $this->assertDatabaseMissing('blacklisted_ips', ['ip' => '198.51.100.44']);
+});
+
+it('ships response_bursts counting 404 only, held back by one signed-in user (#121)', function () {
+    $shipped = require __DIR__.'/../../config/watchtower.php';
+    $bursts = $shipped['auto_block']['detectors']['response_bursts'];
+
+    expect($bursts['statuses'])->toBe([404])
+        ->and($bursts['shared_ip_user_threshold'])->toBe(1)
+        ->and($shipped['auto_block']['shared_ip_user_threshold'])->toBe(3);
+});

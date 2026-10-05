@@ -4,6 +4,17 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 ## [Unreleased]
 
+**If you published `config/watchtower.php`, update `response_bursts` by hand.** The new defaults below don't reach a published config. See [Upgrading](docs/upgrading.md).
+
+### Added
+
+- **A warn-mode near miss says what block mode would have done.** Every would-have-blocked line in warn mode now carries `in_block_mode`: `blocked`, `blocked_in_scope`, `held_by_shared_ip`, `held_by_never_auto_block` or `held_by_never_block`. Before, the mode was checked ahead of every guard, so all of them read `warn mode`, and nobody could tell which ones arming would actually block ([#121](https://github.com/AhmedMerza/laravel-watchtower/issues/121)).
+- **A detector or rule can set its own `shared_ip_user_threshold`,** which wins over the global one. `watchtower:simulate` judges each rule by its own value and reports it in `--json` ([#121](https://github.com/AhmedMerza/laravel-watchtower/issues/121)).
+
+### Changed
+
+- **`response_bursts` no longer counts 429 by default,** and ships with `shared_ip_user_threshold => 1`. A 429 is the app's own rate limiter already handling the client, and a threshold below the limiter's let throttling feed a security block. In production data, every signed-in address that tripped the detector was a customer and every scanner had no user. Add `429` back only with `count` above your throttle ([#121](https://github.com/AhmedMerza/laravel-watchtower/issues/121)).
+
 ## [0.10.1] - 2026-10-05
 
 No new migrations. If you installed before 0.7.0 and never published Watchtower's migrations, publish and migrate after upgrading; see [Upgrading](docs/upgrading.md).

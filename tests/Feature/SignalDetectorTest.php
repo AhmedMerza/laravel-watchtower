@@ -121,8 +121,34 @@ it('does not count a response outside the configured statuses', function () {
     $this->assertDatabaseMissing('blacklisted_ips', ['ip' => '203.0.113.11']);
 });
 
+it('does not count a 429 by default, since the app\'s own limiter already answered it (#121)', function () {
+    config()->set('watchtower.auto_block.detectors.response_bursts.count', 2);
+
+    Route::get('/throttled', fn () => abort(429));
+
+    foreach (range(1, 4) as $i) {
+        $this->withServerVariables(['REMOTE_ADDR' => '203.0.113.14'])->get('/throttled')->assertStatus(429);
+    }
+
+    $this->assertDatabaseMissing('blacklisted_ips', ['ip' => '203.0.113.14']);
+});
+
+it('counts a 429 once statuses names it', function () {
+    config()->set('watchtower.auto_block.detectors.response_bursts.count', 2);
+    config()->set('watchtower.auto_block.detectors.response_bursts.statuses', [404, 429]);
+
+    Route::get('/throttled', fn () => abort(429));
+
+    foreach (range(1, 2) as $i) {
+        $this->withServerVariables(['REMOTE_ADDR' => '203.0.113.15'])->get('/throttled');
+    }
+
+    $this->assertDatabaseHas('blacklisted_ips', ['ip' => '203.0.113.15']);
+});
+
 it('does not count a 404 or 429 on an excepted path, whatever its case or encoding', function () {
     config()->set('watchtower.auto_block.detectors.response_bursts.count', 1);
+    config()->set('watchtower.auto_block.detectors.response_bursts.statuses', [404, 429]);
     config()->set('watchtower.auto_block.detectors.response_bursts.except_paths', ['/lookup/*']);
 
     Route::get('/lookup/busy', fn () => abort(429));

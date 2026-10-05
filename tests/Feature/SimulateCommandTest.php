@@ -304,3 +304,27 @@ it('reports a scoped downgrade as a block in scope, not as a warning', function 
         ->expectsOutputToContain('blocked them in scope rather than app-wide')
         ->doesntExpectOutputToContain('would have been warnings, not blocks');
 });
+
+it('judges a rule by its own user threshold, and says which (#121)', function () {
+    seedBurst('10.0.0.9', 10, 30, ['user_id' => 7]);
+
+    oneRule(['shared_ip_user_threshold' => 1]);
+
+    $this->artisan('watchtower:simulate')
+        ->assertSuccessful()
+        ->expectsOutputToContain('0 address(es) would have been blocked')
+        ->expectsOutputToContain('held back by the shared-IP guard (>= 1 signed-in users)');
+});
+
+it('reports each rule\'s user threshold in --json', function () {
+    config()->set('watchtower.auto_block.rules', [
+        ['level' => 'error', 'count' => 10, 'window_minutes' => 5, 'shared_ip_user_threshold' => 1],
+        ['level' => 'error', 'count' => 10, 'window_minutes' => 5],
+    ]);
+
+    expect(Artisan::call('watchtower:simulate', ['--json' => true]))->toBe(0);
+
+    $json = json_decode(Artisan::output(), true, flags: JSON_THROW_ON_ERROR);
+
+    expect(array_column($json['rules'], 'shared_ip_user_threshold'))->toBe([1, 3]);
+});

@@ -16,7 +16,7 @@ use Watchtower\Support\PathMatcher;
  *
  * - `scanner_paths` matches the path on the way in, so a probe for `/.env`
  *   is answered rather than served.
- * - `response_bursts` counts 404s and 429s on the way out, which needs the
+ * - `response_bursts` counts 404s (by default) on the way out, which needs the
  *   response and so runs in terminate(), after it has been sent.
  *
  * One class because they share a request and an address; one stack frame is
@@ -80,7 +80,7 @@ class SignalDetectorMiddleware
             return;
         }
 
-        $statuses = array_map(intval(...), (array) ($settings['statuses'] ?? [404, 429]));
+        $statuses = array_map(intval(...), (array) ($settings['statuses'] ?? [404]));
 
         if (! in_array($response->getStatusCode(), $statuses, true)) {
             return;

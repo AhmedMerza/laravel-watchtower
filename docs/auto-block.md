@@ -34,7 +34,7 @@ WATCHTOWER_DETECT_BAD_USER_AGENT=false
 
 | Mode | Behaviour |
 |------|-----------|
-| `warn` | **The default.** Match the rule and emit a structured `would_have_blocked: true` log entry on the configured log channel — but **do not** block. Tail your logs for that key to see what the rule would catch, then set `WATCHTOWER_AUTO_BLOCK_MODE=block` to arm it. |
+| `warn` | **The default.** Match the rule and emit a structured `would_have_blocked: true` log entry on the configured log channel — but **do not** block. Tail your logs for that key to see what the rule would catch, then set `WATCHTOWER_AUTO_BLOCK_MODE=block` to arm it. Each entry's `in_block_mode` says what block mode would have done with it: `blocked`, `blocked_in_scope`, or held back by a guard (`held_by_shared_ip`, `held_by_never_auto_block`, `held_by_never_block`). |
 | `block` | Actually block matching IPs. |
 | `disabled` | Skip the rule entirely. A per-rule kill switch without deleting the definition. |
 
@@ -47,7 +47,7 @@ Each one counts per IP in the cache and blocks through the same path a rule does
 | `failed_logins` | `Illuminate\Auth\Events\Failed`, fired by every guard on a bad credential | off | 10 in 5 min |
 | `login_lockouts` | `Illuminate\Auth\Events\Lockout`, fired by the Breeze / Fortify / `ThrottlesLogins` login throttle | off | 3 in 15 min |
 | `scanner_paths` | A request for a configured path pattern | off | 1 in 5 min |
-| `response_bursts` | Responses with a configured status (`404`, `429`) | off | 40 in 1 min |
+| `response_bursts` | Responses with a configured status (`404`) | off | 40 in 1 min |
 | `bad_user_agent` | A request the [User-Agent filter](user-agents.md) already rejected | off | 5 in 10 min |
 
 ```php
@@ -68,7 +68,7 @@ Each one counts per IP in the cache and blocks through the same path a rule does
             'enabled'        => true,
             'count'          => 40,
             'window_minutes' => 1,
-            'statuses'       => [404, 429],
+            'statuses'       => [404],
             'mode'           => 'warn',
         ],
 
@@ -84,7 +84,7 @@ A few things worth knowing before you arm any of these:
 - **`scanner_paths` answers the matching request itself.** A probe for `/.env` gets the block response rather than your 404, so a pattern that overlaps a real route never serves it even once. That cuts both ways: **a pattern that overlaps a route your users need will lock them out of it**, so keep the list to paths nothing legitimate asks for. Matching runs against the *decoded* path, so `/%2Eenv` is caught too. The threshold of `1` is deliberate — a single request for `/.env` is not a mistake.
 - **`response_bursts` is the loosest and most likely to catch a real person.** It reads the status after the response is sent, so it costs the request nothing, but a broken deploy that 404s its own assets looks exactly like enumeration. Leave it in `warn` mode for a full traffic cycle and raise the count to whatever your own logs say is normal.
 
-  **A route whose 404 means "found nothing" trips it too.** A search, a lookup by a code someone typed, or a front end polling for a record that doesn't exist yet can produce dozens of 404s a minute from one signed-in user. The real fix is to return `200` with an empty result from those routes. Until you can, list them in `except_paths`, using the same pattern syntax as `scanner_paths` and matched against the decoded path, case-insensitively. Their 404s and 429s are then never counted:
+  **A route whose 404 means "found nothing" trips it too.** A search, a lookup by a code someone typed, or a front end polling for a record that doesn't exist yet can produce dozens of 404s a minute from one signed-in user. The real fix is to return `200` with an empty result from those routes. Until you can, list them in `except_paths`, using the same pattern syntax as `scanner_paths` and matched against the decoded path, case-insensitively. Their 404s are then never counted:
 
   ```php
   'response_bursts' => [
@@ -92,6 +92,8 @@ A few things worth knowing before you arm any of these:
       'except_paths' => ['/api/lookup/*', '/search'],
   ],
   ```
+
+  **Its statuses don't include `429` by default.** A 429 is your own rate limiter already dealing with the client, so counting it turns throttling into a block, and a `count` below your throttle's limit means the limit itself trips it. Add `429` back only with `count` above that limit.
 
   Keep the list to routes like these. A route that takes an ID is exactly what enumeration walks, so excepting it hides the burst this detector exists to catch. Skipping signed-in users instead would not be safer: a stolen session enumerating IDs is a signed-in user.
 - **`bad_user_agent` only sees what the filter already rejected**, so it does nothing unless `user_agents` is on, and a `never_block` address never reaches it. Its threshold is `5` rather than `scanner_paths`' `1` because a `User-Agent` is one header anyone can set to anything — see [Attack-Tool User-Agents](user-agents.md).
@@ -108,11 +110,13 @@ Plenty of real users share one public address: mobile carriers put subscribers b
 
 So before it blocks, watchtower counts how many **distinct signed-in users** the log saw from that address during the window. At or above `WATCHTOWER_SHARED_IP_USER_THRESHOLD` (default `3`) the block downgrades to a warning carrying `not_blocked_because: shared IP`. Set the threshold to `0` to switch the guard off.
 
+**A rule or detector can set its own `shared_ip_user_threshold`**, which wins over the global one. `response_bursts` ships with `1`: one signed-in user holds an app-wide block back. In production data, every address that tripped it while signed in was a customer on a page that asks for things that aren't there, and every scanner had no user at all. Setting the global threshold to `1` instead would apply the same leniency to every log rule.
+
 The count covers **all** of the address's logged traffic, not just the rows the rule matched — the question is how many people a block would hit, not how many of them tripped it. An address where one buggy client throws every error while two hundred others browse fine is the case this exists for.
 
 **Detectors have no log table to ask**, so they count the signed-in users seen on the requests they themselves counted, and the `would_have_blocked` entry carries the actual `user_ids` alongside `distinct_users` — deciding whether to arm a detector is much easier when you can see *who* was behind a flagged address rather than just how many. Nothing is recorded for traffic that matches no detector.
 
-**The same caveat applies, and more sharply.** The guard counts signed-in users and can't tell real ones from accounts an attacker made — and for detectors the identity comes from the *matching* requests themselves, so an attacker doesn't even need separate innocent traffic: signing in as three throwaway accounts while probing is enough to downgrade `response_bursts` to warn-only for their address. Read the guard as protection against **your own detector misfiring on a real shared gateway** — a broken deploy 404ing assets for three signed-in staff, which it handles exactly right — and never as a control an adversary respects. For that, use `never_block`, or keep `scanner_paths` at its default `count` of `1`, which fires before any accumulation is possible.
+**The same caveat applies, and more sharply.** The guard counts signed-in users and can't tell real ones from accounts an attacker made — and for detectors the identity comes from the *matching* requests themselves, so an attacker doesn't even need separate innocent traffic: signing in while probing is enough to downgrade `response_bursts` to warn-only for their address — one account at its default threshold of `1`. `scanner_paths` still catches a probe for a known path, signed in or not. Read the guard as protection against **your own detector misfiring on a real shared gateway** — a broken deploy 404ing assets for three signed-in staff, which it handles exactly right — and never as a control an adversary respects. For that, use `never_block`, or keep `scanner_paths` at its default `count` of `1`, which fires before any accumulation is possible.
 
 That makes the guard strongest for `response_bursts`, where the requests are often signed in, and **blind for `failed_logins` and `login_lockouts`**, where by definition nobody is. It would be easy to count the account the credentials were *aimed* at instead — and wrong: an attacker working through a list of usernames would report a new distinct "user" on every attempt, read as a busy office, and stand the guard down. The guard would be disarmed by exactly the attack it is in the way of. So those two detectors report no users at all, and **`never_auto_block` is the protection for a known office or carrier range** before you arm them.
 

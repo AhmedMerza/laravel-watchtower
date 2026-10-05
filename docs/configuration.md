@@ -41,7 +41,7 @@ WATCHTOWER_NEVER_AUTO_BLOCK_IPS=        # automation skips these; an admin can s
 WATCHTOWER_DETECT_FAILED_LOGINS=false     # Auth\Events\Failed      — start at 10 in 5 min
 WATCHTOWER_DETECT_LOGIN_LOCKOUTS=false    # Auth\Events\Lockout     — start at 3 in 15 min
 WATCHTOWER_DETECT_SCANNER_PATHS=false     # /.env, /.git/*, …       — start at 1 in 5 min
-WATCHTOWER_DETECT_RESPONSE_BURSTS=false   # 404/429 bursts          — start at 40 in 1 min
+WATCHTOWER_DETECT_RESPONSE_BURSTS=false   # 404 bursts              — start at 40 in 1 min
 WATCHTOWER_DETECT_BAD_USER_AGENT=false    # rejected User-Agents    — start at 5 in 10 min
 
 # Reject requests whose User-Agent names a known attack tool (ON by default)

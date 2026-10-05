@@ -1,6 +1,7 @@
 <?php
 
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use Watchtower\Support\SyncSignature;
 use Watchtower\Tests\InstallTestCase;
@@ -116,4 +117,26 @@ function postSigned(object $test, string $body, array $override = []): object
         'HTTP_X_WATCHTOWER_TIMESTAMP' => $headers[SyncSignature::TIMESTAMP_HEADER],
         'HTTP_X_WATCHTOWER_SIGNATURE' => $headers[SyncSignature::SIGNATURE_HEADER],
     ], $override['sendBody'] ?? $body);
+}
+
+/**
+ * Capture every would-have-blocked line, so a test can count them across
+ * several ticks rather than expecting exactly one.
+ *
+ * @return ArrayObject<int, array<string, mixed>>
+ */
+function captureWouldHaveBlocked(): ArrayObject
+{
+    $seen = new ArrayObject;
+
+    $logChannel = Mockery::mock();
+    $logChannel->shouldReceive('warning')->andReturnUsing(function (string $message, array $context) use ($seen): void {
+        if (($context['would_have_blocked'] ?? false) === true) {
+            $seen[] = $context;
+        }
+    });
+    $logChannel->shouldReceive('debug')->zeroOrMoreTimes();
+    Log::shouldReceive('channel')->andReturn($logChannel);
+
+    return $seen;
 }

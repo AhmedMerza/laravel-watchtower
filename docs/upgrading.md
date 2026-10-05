@@ -28,3 +28,15 @@ Nothing changes for anyone who already set a mode explicitly, per rule or global
 **3. Attack-tool User-Agent rejection is on by default.** Also since **v0.4.0**: a request whose `User-Agent` names sqlmap, Nikto, WPScan, masscan or zgrab is rejected. If you run any of those against your own site from CI or a pentest box, add its address to `WATCHTOWER_NEVER_BLOCK_IPS` or its `User-Agent` to `user_agents.allow` before upgrading — or set `WATCHTOWER_USER_AGENT_FILTER=false`. It rejects the request only and never blocks the address.
 
 **4. ⚠️ `GET /api/blocks` is paginated, so `data` is no longer the whole list.** Since **v0.6.0**, it returns one page (25 rows by default) inside Laravel's paginator body rather than every active block in one array. A script that read `data` as the complete blocklist now silently sees only the first page. Read `total` and follow `next_page_url`, or raise `?per_page=` up to 100. The default filter is still `state=active`, so the first page holds the rows it always did — see [Listing Blocks](api.md#listing-blocks). Nothing else changed shape: `POST /api/block`, `DELETE /api/block/{ip}` and `GET /api/status/{ip}` are untouched.
+
+**5. ⚠️ A published config keeps the old `response_bursts` defaults.** In the next release (#121), `response_bursts` stops counting 429 and ships with its own `shared_ip_user_threshold` of `1`: one signed-in user holds an app-wide block back. Laravel merges a package's config only one level deep, so if you published `config/watchtower.php`, your `detectors` block keeps the old values. Bring them across by hand:
+
+```php
+'response_bursts' => [
+    // ...
+    'statuses'                 => [404],
+    'shared_ip_user_threshold' => 1,
+],
+```
+
+Keep `429` only if `count` sits above your rate limiter's limit; otherwise the limiter itself trips the block. See [Auto-Block](auto-block.md).
