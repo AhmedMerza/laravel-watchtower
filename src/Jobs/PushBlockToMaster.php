@@ -13,6 +13,7 @@ use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use Watchtower\Enums\BlockSource;
+use Watchtower\Enums\SyncRole;
 use Watchtower\Models\BlacklistedIp;
 use Watchtower\Support\SyncSignature;
 
@@ -34,13 +35,15 @@ class PushBlockToMaster implements ShouldQueue
         $masterUrl = config('watchtower.sync.master_url');
         $secret = SyncSignature::secret();
 
-        if (! $masterUrl) {
+        // The master is where blocks are pushed to, not from (#36).
+        if (! $masterUrl || SyncRole::current() === SyncRole::Master) {
             return;
         }
 
         // A block that arrived by sync is not ours to report. Without this a
         // master whose own master_url points at itself pushes every incoming
-        // block straight back to itself, forever.
+        // block straight back to itself, forever. Still needed with the role
+        // above: a master that leaves WATCHTOWER_SYNC_ROLE unset relies on it.
         if ($this->record->source === BlockSource::Sync) {
             return;
         }
@@ -95,7 +98,7 @@ class PushBlockToMaster implements ShouldQueue
             ->post(rtrim((string) $masterUrl, '/').SyncSignature::PUSH_PATH);
 
         if (! $response->successful()) {
-            throw new \RuntimeException("Master returned HTTP {$response->status()} for IP {$this->record->ip}");
+            throw new \RuntimeException("Master returned HTTP {$response->status()} for IP {$this->record->ip}".SyncRole::hintFor($response->status()));
         }
     }
 

@@ -7,6 +7,7 @@ namespace Watchtower\Console\Commands;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
+use Watchtower\Enums\SyncRole;
 use Watchtower\Exceptions\NeverAutoBlockException;
 use Watchtower\Exceptions\NeverBlockException;
 use Watchtower\Services\BlacklistCache;
@@ -37,6 +38,18 @@ class SyncCommand extends Command
             return self::FAILURE;
         }
 
+        if (($invalid = SyncRole::invalid()) !== null) {
+            $this->error("WATCHTOWER_SYNC_ROLE is '{$invalid}'; it must be master or satellite, or unset.");
+
+            return self::FAILURE;
+        }
+
+        if (SyncRole::current() === SyncRole::Master) {
+            $this->error('This environment is the master (WATCHTOWER_SYNC_ROLE=master), and watchtower:sync pulls from the master. Schedule it on the satellites only.');
+
+            return self::FAILURE;
+        }
+
         if ($secret === '') {
             $this->error('WATCHTOWER_SYNC_SECRET is not configured. The master rejects unsigned requests — set the same secret on every environment.');
 
@@ -50,7 +63,7 @@ class SyncCommand extends Command
             )->get(rtrim((string) $masterUrl, '/').SyncSignature::PULL_PATH);
 
             if (! $response->successful()) {
-                $this->error("Sync failed — master returned HTTP {$response->status()}.");
+                $this->error("Sync failed — master returned HTTP {$response->status()}.".SyncRole::hintFor($response->status()));
                 Log::channel(config('watchtower.log_channel', 'stack'))->error('Watchtower: sync failed', ['status' => $response->status()]);
 
                 return self::FAILURE;

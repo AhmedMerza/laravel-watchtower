@@ -16,6 +16,13 @@ it('includes the laravel target when a master URL is configured', function () {
         ->and($targets['laravel'])->toBeInstanceOf(LaravelTarget::class);
 });
 
+it('leaves the laravel target out on the master, which would push to itself', function () {
+    config()->set('watchtower.sync.master_url', 'https://master.example.com');
+    config()->set('watchtower.sync.role', 'master');
+
+    expect((new BlockTargetRegistry)->enabled())->not->toHaveKey('laravel');
+});
+
 it('is empty for a vanilla single-environment install', function () {
     config()->set('watchtower.sync.master_url', null);
 

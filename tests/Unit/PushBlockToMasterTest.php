@@ -46,6 +46,25 @@ it('throws a RuntimeException on non-2xx response so the queue retries', functio
         ->toThrow(RuntimeException::class, 'HTTP 500');
 });
 
+it('says the master is not serving the routes when it answers 404', function () {
+    Http::fake([
+        'master.example.com/watchtower/sync/block' => Http::response([], 404),
+    ]);
+
+    expect(fn () => (new PushBlockToMaster($this->record))->handle())
+        ->toThrow(RuntimeException::class, 'the master is not serving the sync routes');
+});
+
+it('does not push from the master to itself', function () {
+    config()->set('watchtower.sync.role', 'master');
+
+    Http::fake();
+
+    (new PushBlockToMaster($this->record))->handle();
+
+    Http::assertNothingSent();
+});
+
 it('does nothing when master URL is not configured', function () {
     config()->set('watchtower.sync.master_url', null);
 

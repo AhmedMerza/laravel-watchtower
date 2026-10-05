@@ -49,6 +49,38 @@ it('fails gracefully when master returns an error', function () {
         ->expectsOutputToContain('HTTP 500');
 });
 
+it('says the master is not serving the routes when it answers 404', function () {
+    Http::fake([
+        'master.example.com/watchtower/sync/blocks' => Http::response([], 404),
+    ]);
+
+    $this->artisan('watchtower:sync')
+        ->assertFailed()
+        ->expectsOutputToContain('WATCHTOWER_SYNC_ROLE is master or unset');
+});
+
+it('refuses to run on the master', function () {
+    config()->set('watchtower.sync.role', 'master');
+    Http::fake();
+
+    $this->artisan('watchtower:sync')
+        ->assertFailed()
+        ->expectsOutputToContain('This environment is the master');
+
+    Http::assertNothingSent();
+});
+
+it('reports an unrecognised role instead of syncing', function () {
+    config()->set('watchtower.sync.role', 'sattelite');
+    Http::fake();
+
+    $this->artisan('watchtower:sync')
+        ->assertFailed()
+        ->expectsOutputToContain("WATCHTOWER_SYNC_ROLE is 'sattelite'");
+
+    Http::assertNothingSent();
+});
+
 it('fails gracefully when master URL is not configured', function () {
     config()->set('watchtower.sync.master_url', null);
 
