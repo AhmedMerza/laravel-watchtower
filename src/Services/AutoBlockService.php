@@ -45,6 +45,13 @@ class AutoBlockService
      */
     private const HELD_BY_SHARED_IP = 'shared IP';
 
+    /**
+     * The near-miss log line. Public because `watchtower:simulate` reads it
+     * back out of LogScope to report what the detectors saw (#123), so the
+     * two must not drift.
+     */
+    public const WOULD_HAVE_BLOCKED_MESSAGE = 'Watchtower: would-have-blocked (auto-block did not block)';
+
     public function __construct(
         private readonly BlacklistService $blacklist,
         private readonly HitWindow $hits,
@@ -1035,7 +1042,7 @@ class AutoBlockService
         }
 
         Log::channel(config('watchtower.log_channel', 'stack'))->warning(
-            'Watchtower: would-have-blocked (auto-block did not block)',
+            self::WOULD_HAVE_BLOCKED_MESSAGE,
             $context,
         );
     }

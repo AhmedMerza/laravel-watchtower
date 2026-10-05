@@ -4,6 +4,10 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **`watchtower:simulate` reports the detectors too.** An app that runs only detectors used to get "nothing to backtest". Detectors count signals LogScope doesn't store (auth events, response statuses, every request's path and User-Agent), so they can't be replayed. Instead, each enabled detector now lists what it actually reported in `warn` mode over `--days`: per address, the reports, first and last seen, signed-in users, and what block mode would have done. A warning names the signed-in people that arming it would have locked out. The output is labelled *observed, not simulated* ([#123](https://github.com/AhmedMerza/laravel-watchtower/issues/123)).
+
 ## [0.12.0] - 2026-10-05
 
 No migrations. **If you published `config/watchtower.php`, copy the new `scanner_paths` patterns by hand.** A published config keeps its old list. See [Upgrading](docs/upgrading.md).

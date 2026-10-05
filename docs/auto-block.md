@@ -277,6 +277,52 @@ whole `/64`, which keeps its siblings out for the duration, while the replay
 judges each address on its own rows — so a sibling that kept going shows
 blocks the live `/64` block would already have covered.
 
+### The detectors: observed, not replayed
+
+The [detectors](#detectors) can't be replayed. They count failed logins,
+lockouts, response statuses, request paths and User-Agents as they happen,
+and LogScope stores log lines, not requests: there is no status column, and
+a request that logged nothing left no row. A replay built from the few
+requests that did log something would mostly report zero and look like a
+clean bill of health.
+
+So for each enabled detector, `simulate` reports what it **actually saw**: the
+`would-have-blocked` lines it wrote over `--days`, grouped by address. Those
+come from the real detector at its real settings on real traffic, so they are
+exact rather than estimated, and the report labels them *observed, not
+simulated*:
+
+```
+Detector response_bursts [warn]
++-------------+---------+------------------+------------------+-----------------+---------------+
+| IP          | Reports | First            | Last             | Signed-in users | In block mode |
++-------------+---------+------------------+------------------+-----------------+---------------+
+| 203.0.113.9 | 3       | 2026-09-29 08:14 | 2026-10-02 17:40 | 1               | blocked       |
++-------------+---------+------------------+------------------+-----------------+---------------+
+  1 of these had signed-in users and block mode would have blocked them app-wide — arming this detector would have locked those people out.
+```
+
+**Reports** counts would-have-blocked lines — about one per block the
+detector was held back from, not one per request. **In block mode** is what arming it would have done, which the
+engine works out at the time: `blocked`, `blocked_in_scope`, `shared IP`
+(the guard would have held it back), `never_block` or `never_auto_block` —
+or `not recorded` for a line written before v0.11.0, which didn't record it.
+Those are flagged as possible lock-outs rather than guessed either way. The
+warning line is the one to read before arming: signed-in people behind an
+address block mode would have blocked app-wide. A separate line counts those
+it would only have blocked in the detector's scope, who keep the rest of the
+app.
+
+This needs a history, so run the detector in `warn` mode for a while first.
+A detector with no reports says why: auto-block is off, its mode is
+`disabled`, it never reached its threshold, or — in `block` mode — its real
+blocks are in the blacklist and only the ones a guard held back are listed
+here. The log table is shared, so a line naming a detector that isn't
+configured, or an address that isn't one, is set aside and counted rather
+than reported. The lines only reach
+LogScope if it captures `watchtower.log_channel` (its default `all` capture
+does). `--rule` narrows the report to one rule and leaves the detectors out.
+
 ### Cost, honestly
 
 Memory is bounded: each address is replayed through a ring buffer holding at

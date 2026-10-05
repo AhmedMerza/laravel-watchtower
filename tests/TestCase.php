@@ -86,6 +86,8 @@ class TestCase extends Orchestra
                 -- distinct values and never does arithmetic on them, so
                 -- either type works.
                 user_id BIGINT,
+                -- JSON in LogScope; the detector report reads it back.
+                context TEXT,
                 occurred_at DATETIME NOT NULL,
                 created_at DATETIME,
                 updated_at DATETIME
