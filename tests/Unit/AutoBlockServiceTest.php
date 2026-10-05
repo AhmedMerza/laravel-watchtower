@@ -980,8 +980,49 @@ it('says in a warn-mode rule\'s line what block mode would have done (#121)', fu
     $logChannel->shouldReceive('warning')
         ->once()
         ->withArgs(fn (string $message, array $context): bool => $context['not_blocked_because'] === 'warn mode'
-            && $context['in_block_mode'] === 'held_by_shared_ip');
+            && $context['in_block_mode'] === 'shared IP');
     Log::shouldReceive('channel')->andReturn($logChannel);
 
     $this->service->run();
+});
+
+it('predicts a scoped rule\'s downgrade in warn mode as a block in scope', function () {
+    config()->set('watchtower.auto_block.mode', 'warn');
+    config()->set('watchtower.scopes', ['auth']);
+    config()->set('watchtower.auto_block.rules', [
+        ['level' => 'error', 'message_contains' => null, 'count' => 2, 'window_minutes' => 5, 'scope' => 'auth', 'shared_ip_user_threshold' => 1],
+    ]);
+
+    foreach (range(1, 2) as $i) {
+        logEntry('30.30.30.4', ['user_id' => 7]);
+    }
+
+    $seen = captureWouldHaveBlocked();
+
+    $this->service->run();
+
+    expect($seen)->toHaveCount(1)
+        ->and($seen[0]['in_block_mode'])->toBe('blocked_in_scope');
+});
+
+it('falls back to the default, loudly, when a rule\'s own threshold is not a number', function () {
+    config()->set('watchtower.auto_block.shared_ip_user_threshold', 0);
+    config()->set('watchtower.auto_block.rules', [
+        ['level' => 'error', 'message_contains' => null, 'count' => 3, 'window_minutes' => 5, 'shared_ip_user_threshold' => 'one'],
+    ]);
+
+    foreach ([1, 2, 3] as $userId) {
+        logEntry('30.30.30.5', ['user_id' => $userId]);
+    }
+
+    $logChannel = Mockery::mock()->shouldIgnoreMissing();
+    $logChannel->shouldReceive('warning')
+        ->with('Watchtower: shared_ip_user_threshold is not a whole number, so the shared-IP guard fell back to its default.', Mockery::any())
+        ->once();
+    Log::shouldReceive('channel')->andReturn($logChannel);
+
+    $this->service->run();
+
+    // Three users meet the default of 3, though the global 0 had the guard off.
+    $this->assertDatabaseMissing('blacklisted_ips', ['ip' => '30.30.30.5']);
 });

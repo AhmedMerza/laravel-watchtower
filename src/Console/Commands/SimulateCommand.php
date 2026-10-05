@@ -108,7 +108,7 @@ class SimulateCommand extends Command
             // A rule may set its own threshold, as the live engine lets it
             // (#121). Carried on the result so the report labels each rule
             // with the number it was judged by.
-            $ruleThreshold = array_key_exists('shared_ip_user_threshold', (array) $rule)
+            $ruleThreshold = isset($rule['shared_ip_user_threshold'])
                 ? $this->sharedIpThreshold($rule['shared_ip_user_threshold'])
                 : $sharedIpThreshold;
 

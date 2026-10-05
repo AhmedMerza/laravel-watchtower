@@ -34,7 +34,7 @@ WATCHTOWER_DETECT_BAD_USER_AGENT=false
 
 | Mode | Behaviour |
 |------|-----------|
-| `warn` | **The default.** Match the rule and emit a structured `would_have_blocked: true` log entry on the configured log channel — but **do not** block. Tail your logs for that key to see what the rule would catch, then set `WATCHTOWER_AUTO_BLOCK_MODE=block` to arm it. Each entry's `in_block_mode` says what block mode would have done with it: `blocked`, `blocked_in_scope`, or held back by a guard (`held_by_shared_ip`, `held_by_never_auto_block`, `held_by_never_block`). |
+| `warn` | **The default.** Match the rule and emit a structured `would_have_blocked: true` log entry on the configured log channel — but **do not** block. Tail your logs for that key to see what the rule would catch, then set `WATCHTOWER_AUTO_BLOCK_MODE=block` to arm it. Each entry's `in_block_mode` says what block mode would have done with it: `blocked`, `blocked_in_scope`, or the hold-back that would have stopped it, spelled as block mode's `not_blocked_because` spells it (`shared IP`, `never_block`, `never_auto_block`). |
 | `block` | Actually block matching IPs. |
 | `disabled` | Skip the rule entirely. A per-rule kill switch without deleting the definition. |
 
@@ -110,7 +110,7 @@ Plenty of real users share one public address: mobile carriers put subscribers b
 
 So before it blocks, watchtower counts how many **distinct signed-in users** the log saw from that address during the window. At or above `WATCHTOWER_SHARED_IP_USER_THRESHOLD` (default `3`) the block downgrades to a warning carrying `not_blocked_because: shared IP`. Set the threshold to `0` to switch the guard off.
 
-**A rule or detector can set its own `shared_ip_user_threshold`**, which wins over the global one. `response_bursts` ships with `1`: one signed-in user holds an app-wide block back. In production data, every address that tripped it while signed in was a customer on a page that asks for things that aren't there, and every scanner had no user at all. Setting the global threshold to `1` instead would apply the same leniency to every log rule.
+**A rule or detector can set its own `shared_ip_user_threshold`**, which wins over the global one. `response_bursts` ships with `1`: one signed-in user holds an app-wide block back. In production data, every address that tripped it while signed in was a customer on a page that asks for things that aren't there, and every scanner had no user at all. Setting the global threshold to `1` instead would apply the same leniency to every log rule. A value of `0` switches the guard off for that rule or detector alone. A value that isn't a whole number falls back to the default of `3`, not to the global value, and logs a warning, the same as a bad global value. `null` counts as not set.
 
 The count covers **all** of the address's logged traffic, not just the rows the rule matched — the question is how many people a block would hit, not how many of them tripped it. An address where one buggy client throws every error while two hundred others browse fine is the case this exists for.
 

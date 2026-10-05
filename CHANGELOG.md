@@ -8,7 +8,7 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 ### Added
 
-- **A warn-mode near miss says what block mode would have done.** Every would-have-blocked line in warn mode now carries `in_block_mode`: `blocked`, `blocked_in_scope`, `held_by_shared_ip`, `held_by_never_auto_block` or `held_by_never_block`. Before, the mode was checked ahead of every guard, so all of them read `warn mode`, and nobody could tell which ones arming would actually block ([#121](https://github.com/AhmedMerza/laravel-watchtower/issues/121)).
+- **A warn-mode near miss says what block mode would have done.** Every would-have-blocked line in warn mode now carries `in_block_mode`: `blocked`, `blocked_in_scope`, or the hold-back that would have stopped it, spelled as block mode's `not_blocked_because` spells it (`shared IP`, `never_block`, `never_auto_block`). Before, the mode was checked ahead of every guard, so all of them read `warn mode`, and nobody could tell which ones arming would actually block ([#121](https://github.com/AhmedMerza/laravel-watchtower/issues/121)).
 - **A detector or rule can set its own `shared_ip_user_threshold`,** which wins over the global one. `watchtower:simulate` judges each rule by its own value and reports it in `--json` ([#121](https://github.com/AhmedMerza/laravel-watchtower/issues/121)).
 
 ### Changed

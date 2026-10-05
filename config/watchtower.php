@@ -437,8 +437,10 @@ return [
     |                    blocks on the first request.
     |
     | In warn mode, each would-have-blocked line carries `in_block_mode`:
-    | what block mode would have done with it — blocked, blocked_in_scope,
-    | held_by_shared_ip, held_by_never_auto_block or held_by_never_block.
+    | what block mode would have done with it — 'blocked',
+    | 'blocked_in_scope', or the hold-back that would have stopped it, spelled
+    | as `not_blocked_because` spells it ('shared IP', 'never_block',
+    | 'never_auto_block').
     |
     | ⚠️ The shared-IP guard is blind to anonymous traffic, and the auth
     | detectors are anonymous by nature — a failed login has no signed-in
