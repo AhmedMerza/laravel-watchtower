@@ -60,7 +60,9 @@ Each one counts per IP in the cache and blocks through the same path a rule does
             'enabled'        => true,
             'count'          => 1,
             'window_minutes' => 5,
-            'patterns'       => ['/.env', '/.git/*', '/wp-login.php', '/xmlrpc.php', '/phpmyadmin*'],
+            // The shipped list also covers /.git*, /.aws/*, /config/*.yml,
+            // /docker-compose*.yml, /phpinfo.php and more; see the config.
+            'patterns'       => ['/.env', '/.env.*', '/.git*', '/wp-login.php', '/phpmyadmin*'],
         ],
 
         // Armed only after watching it in warn mode for a full traffic cycle

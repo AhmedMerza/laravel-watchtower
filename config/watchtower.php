@@ -581,12 +581,35 @@ return [
                 'enabled'        => env('WATCHTOWER_DETECT_SCANNER_PATHS', false),
                 'count'          => 1,
                 'window_minutes' => 5,
+                // Each one is a file a scanner hopes was left in the web
+                // root, which no Laravel route serves. Before adding to it,
+                // check the pattern against your own routes and public/ —
+                // `/*.json` would take mix-manifest.json with it, and
+                // `/config*` a /configurator page. Left out on purpose:
+                // `/config.json`, which some SPAs serve as runtime config,
+                // and `/actuator/*`, which a proxied JVM service may own.
                 'patterns'       => [
+                    // Secrets and source control.
                     '/.env',
                     '/.env.*',
-                    '/.git/*',
+                    '/.git*',
+                    '/.svn/*',
+                    '/.aws/*',
+                    '/.vscode/*',
+                    '/.DS_Store',
+                    // Other frameworks' and tools' config files (#122).
+                    '/config/*.yml',
+                    '/config/*.yaml',
+                    '/configs.json',
+                    '/serverless.yml',
+                    '/serverless.yaml',
+                    '/docker-compose*.yml',
+                    '/docker-compose*.yaml',
+                    '/phpinfo.php',
+                    // WordPress and phpMyAdmin.
                     '/wp-login.php',
                     '/wp-admin/*',
+                    '/wp-config.php*',
                     '/xmlrpc.php',
                     '/phpmyadmin*',
                 ],
