@@ -12,6 +12,7 @@ use Watchtower\Services\AutoBlockService;
 use Watchtower\Services\BlacklistCache;
 use Watchtower\Services\BlacklistService;
 use Watchtower\Services\OffenceLedger;
+use Watchtower\Support\BlockScope;
 use Watchtower\Support\HitWindow;
 
 beforeEach(function () {
@@ -474,4 +475,247 @@ it('does not carry a previous window\'s users into the next one', function () {
     $this->travel(6)->minutes();
 
     expect($this->hits->users('failed_logins', '198.51.100.21'))->toBe([]);
+});
+
+it('says in warn mode what block mode would have done (#121)', function (array $config, ?int $users, string $expected) {
+    config()->set('watchtower.auto_block.mode', 'warn');
+    config()->set('watchtower.auto_block.shared_ip_user_threshold', 1);
+    config()->set('watchtower.scopes', ['auth']);
+
+    foreach ($config as $key => $value) {
+        config()->set($key, $value);
+    }
+
+    $lines = captureWouldHaveBlocked();
+
+    foreach (range(1, 3) as $i) {
+        $this->service->record('failed_logins', '198.51.100.40', $users);
+    }
+
+    expect($lines)->toHaveCount(1)
+        ->and($lines[0]['not_blocked_because'])->toBe('warn mode')
+        ->and($lines[0]['in_block_mode'])->toBe($expected);
+})->with(fn () => inBlockModeCases());
+
+it('predicts in warn mode exactly what block mode then does', function (array $config, ?int $users, string $expected) {
+    config()->set('watchtower.auto_block.shared_ip_user_threshold', 1);
+    config()->set('watchtower.scopes', ['auth']);
+
+    foreach ($config as $key => $value) {
+        config()->set($key, $value);
+    }
+
+    // Warnings and debug lines both, and any other log call is harmless:
+    // block mode's never_block outcome is a debug line, and an exception
+    // swallowed by record()'s fail-open must not pass for one.
+    $lines = new ArrayObject;
+    $debug = new ArrayObject;
+    $logChannel = Mockery::mock()->shouldIgnoreMissing();
+    $logChannel->shouldReceive('warning')->andReturnUsing(function (string $message, array $context = []) use ($lines): void {
+        if (($context['would_have_blocked'] ?? false) === true) {
+            $lines[] = $context;
+        }
+    });
+    $logChannel->shouldReceive('debug')->andReturnUsing(function (string $message) use ($debug): void {
+        $debug[] = $message;
+    });
+    $logChannel->shouldReceive('error')->never();
+    Log::shouldReceive('channel')->andReturn($logChannel);
+
+    config()->set('watchtower.auto_block.mode', 'warn');
+    foreach (range(1, 3) as $i) {
+        $this->service->record('failed_logins', '198.51.100.40', $users);
+    }
+
+    $warned = count($lines);
+
+    // The warn decision is held under 'warn'; arming re-decides at once.
+    config()->set('watchtower.auto_block.mode', 'block');
+    foreach (range(1, 3) as $i) {
+        $this->service->record('failed_logins', '198.51.100.40', $users);
+    }
+
+    $row = BlacklistedIp::where('ip', '198.51.100.40')->first();
+    $actual = match (true) {
+        $row !== null => $row->scope === BlockScope::GLOBAL ? 'blocked' : 'blocked_in_scope',
+        count($lines) > $warned => $lines[count($lines) - 1]['not_blocked_because'],
+        // The one hold-back block mode reports at debug, not as a
+        // would-have-blocked line.
+        in_array('Watchtower: auto-block skipped for whitelisted IP', $debug->getArrayCopy(), true) => 'never_block',
+        default => 'nothing happened',
+    };
+
+    expect($lines[0]['in_block_mode'])->toBe($expected)
+        ->and($actual)->toBe($expected);
+})->with(fn () => inBlockModeCases());
+
+/**
+ * @return array<string, array{0: array<string, mixed>, 1: int|null, 2: string}>
+ */
+function inBlockModeCases(): array
+{
+    return [
+        'nothing in the way'    => [[], null, 'blocked'],
+        'shared, app-wide'      => [[], 7, 'shared IP'],
+        'shared, scoped'        => [['watchtower.auto_block.detectors.failed_logins.scope' => 'auth'], 7, 'blocked_in_scope'],
+        'never_auto_block'      => [['watchtower.never_auto_block' => ['198.51.100.40']], null, 'never_auto_block'],
+        'never_block'           => [['watchtower.never_block' => ['198.51.100.40']], null, 'never_block'],
+        // Block mode checks the shared-IP guard before block() reaches the lists.
+        'shared beats the list' => [['watchtower.never_auto_block' => ['198.51.100.40']], 7, 'shared IP'],
+        // block() asserts never_block before it checks never_auto_block.
+        'both lists'            => [['watchtower.never_auto_block' => ['198.51.100.40'], 'watchtower.never_block' => ['198.51.100.40']], null, 'never_block'],
+        // A scoped block still goes through block(), so the list wins.
+        'shared, scoped, listed' => [['watchtower.auto_block.detectors.failed_logins.scope' => 'auth', 'watchtower.never_block' => ['198.51.100.40']], 7, 'never_block'],
+    ];
+}
+
+it('asks the lists about the address, not the IPv6 network a block would cover', function () {
+    config()->set('watchtower.auto_block.mode', 'warn');
+    config()->set('watchtower.never_block', ['2001:db8::1']);
+    $lines = captureWouldHaveBlocked();
+
+    foreach (['2001:db8::1', '2001:db8::2'] as $ip) {
+        foreach (range(1, 3) as $i) {
+            $this->service->record('failed_logins', $ip);
+        }
+    }
+
+    // The listed address is exempt; its /64 sibling is not, so it still
+    // reports 'blocked' even though both count against the same network.
+    expect(array_map(fn ($l) => [$l['ip'], $l['in_block_mode']], $lines->getArrayCopy()))
+        ->toBe([['2001:db8::1', 'never_block'], ['2001:db8::2', 'blocked']]);
+});
+
+it('re-measures a warn-mode near miss block mode would have held as shared, rather than holding it', function () {
+    config()->set('watchtower.auto_block.mode', 'warn');
+    config()->set('watchtower.auto_block.shared_ip_user_threshold', 1);
+    $lines = captureWouldHaveBlocked();
+
+    // A signed-in customer crosses first...
+    foreach (range(1, 3) as $i) {
+        $this->service->record('failed_logins', '198.51.100.45', 7);
+    }
+
+    // ...then anonymous traffic from the same address crosses again. A hold
+    // opened on the first decision would have silenced this one.
+    foreach (range(1, 3) as $i) {
+        $this->service->record('failed_logins', '198.51.100.45');
+    }
+
+    expect(array_column($lines->getArrayCopy(), 'in_block_mode'))->toBe(['shared IP', 'blocked']);
+});
+
+it('switches the guard off for one detector at its own threshold of 0', function () {
+    config()->set('watchtower.auto_block.shared_ip_user_threshold', 3);
+    config()->set('watchtower.auto_block.detectors.failed_logins.shared_ip_user_threshold', 0);
+
+    foreach ([7, 8, 9] as $userId) {
+        $this->service->record('failed_logins', '198.51.100.46', $userId);
+    }
+
+    $this->assertDatabaseHas('blacklisted_ips', ['ip' => '198.51.100.46']);
+});
+
+it('treats a null threshold of its own as unset, without a warning', function () {
+    config()->set('watchtower.auto_block.shared_ip_user_threshold', 0);
+    config()->set('watchtower.auto_block.detectors.failed_logins.shared_ip_user_threshold', null);
+
+    $logChannel = Mockery::mock()->shouldIgnoreMissing();
+    $logChannel->shouldNotReceive('warning');
+    Log::shouldReceive('channel')->andReturn($logChannel);
+
+    foreach ([7, 8, 9] as $userId) {
+        $this->service->record('failed_logins', '198.51.100.47', $userId);
+    }
+
+    // The global 0 applies: the guard is off, so three users still block.
+    $this->assertDatabaseHas('blacklisted_ips', ['ip' => '198.51.100.47']);
+});
+
+it('does not re-parse a bad threshold on every request to a held address', function () {
+    config()->set('watchtower.auto_block.mode', 'warn');
+    config()->set('watchtower.auto_block.detectors.failed_logins.shared_ip_user_threshold', 'one');
+
+    $warnings = 0;
+    $logChannel = Mockery::mock()->shouldIgnoreMissing();
+    $logChannel->shouldReceive('warning')->andReturnUsing(function (string $message) use (&$warnings) {
+        if (str_contains($message, 'not a whole number')) {
+            $warnings++;
+        }
+    });
+    Log::shouldReceive('channel')->andReturn($logChannel);
+
+    foreach (range(1, 10) as $i) {
+        $this->service->record('failed_logins', '198.51.100.48');
+    }
+
+    expect($warnings)->toBe(1);
+});
+
+it('leaves in_block_mode off a line that block mode itself wrote', function () {
+    config()->set('watchtower.never_auto_block', ['198.51.100.41']);
+    $lines = captureWouldHaveBlocked();
+
+    foreach (range(1, 3) as $i) {
+        $this->service->record('failed_logins', '198.51.100.41');
+    }
+
+    expect($lines)->toHaveCount(1)
+        ->and($lines[0])->not->toHaveKey('in_block_mode');
+});
+
+it('lets a detector set its own user threshold without moving any other detector (#121)', function () {
+    config()->set('watchtower.auto_block.shared_ip_user_threshold', 3);
+    config()->set('watchtower.auto_block.detectors.response_bursts', [
+        'enabled'                  => true,
+        'count'                    => 3,
+        'window_minutes'           => 1,
+        'shared_ip_user_threshold' => 1,
+    ]);
+    $lines = captureWouldHaveBlocked();
+
+    // One signed-in user is enough to hold response_bursts back...
+    foreach (range(1, 3) as $i) {
+        $this->service->record('response_bursts', '198.51.100.42', 7);
+    }
+
+    // ...while failed_logins still answers to the global 3.
+    foreach (range(1, 3) as $i) {
+        $this->service->record('failed_logins', '198.51.100.43', 7);
+    }
+
+    expect($lines)->toHaveCount(1)
+        ->and($lines[0]['detector'])->toBe('response_bursts')
+        ->and($lines[0]['not_blocked_because'])->toBe('shared IP');
+
+    $this->assertDatabaseMissing('blacklisted_ips', ['ip' => '198.51.100.42']);
+    $this->assertDatabaseHas('blacklisted_ips', ['ip' => '198.51.100.43']);
+});
+
+it('falls back to the default, loudly, when a detector\'s own threshold is not a number', function () {
+    config()->set('watchtower.auto_block.shared_ip_user_threshold', 0);
+    config()->set('watchtower.auto_block.detectors.failed_logins.shared_ip_user_threshold', 'one');
+
+    $logChannel = Mockery::mock()->shouldIgnoreMissing();
+    $logChannel->shouldReceive('warning')
+        ->with('Watchtower: shared_ip_user_threshold is not a whole number, so the shared-IP guard fell back to its default.', Mockery::any())
+        ->once();
+    Log::shouldReceive('channel')->andReturn($logChannel);
+
+    // Three users meet the default of 3, so the guard holds even though the
+    // global value switched it off.
+    foreach ([7, 8, 9] as $userId) {
+        $this->service->record('failed_logins', '198.51.100.44', $userId);
+    }
+
+    $this->assertDatabaseMissing('blacklisted_ips', ['ip' => '198.51.100.44']);
+});
+
+it('ships response_bursts counting 404 only, held back by one signed-in user (#121)', function () {
+    $shipped = require __DIR__.'/../../config/watchtower.php';
+    $bursts = $shipped['auto_block']['detectors']['response_bursts'];
+
+    expect($bursts['statuses'])->toBe([404])
+        ->and($bursts['shared_ip_user_threshold'])->toBe(1)
+        ->and($shipped['auto_block']['shared_ip_user_threshold'])->toBe(3);
 });

@@ -719,28 +719,6 @@ it('applies never_auto_block to a caller that passes the source as a string', fu
     $this->assertDatabaseMissing('blacklisted_ips', ['ip' => '33.33.33.33']);
 });
 
-/**
- * Capture every would-have-blocked line, so a test can count them across
- * several ticks rather than expecting exactly one.
- *
- * @return ArrayObject<int, array<string, mixed>>
- */
-function captureWouldHaveBlocked(): ArrayObject
-{
-    $seen = new ArrayObject;
-
-    $logChannel = Mockery::mock();
-    $logChannel->shouldReceive('warning')->andReturnUsing(function (string $message, array $context) use ($seen): void {
-        if (($context['would_have_blocked'] ?? false) === true) {
-            $seen[] = $context;
-        }
-    });
-    $logChannel->shouldReceive('debug')->zeroOrMoreTimes();
-    Log::shouldReceive('channel')->andReturn($logChannel);
-
-    return $seen;
-}
-
 function oneErrorRule(array $overrides = []): array
 {
     return array_merge([
@@ -965,4 +943,86 @@ it('holds a never_block refusal in block mode, until the address leaves the list
     $this->service->run();
 
     $this->assertDatabaseHas('blacklisted_ips', ['ip' => '30.30.30.40']);
+});
+
+it('lets a rule set its own user threshold, leaving the other rules on the global one (#121)', function () {
+    config()->set('watchtower.auto_block.shared_ip_user_threshold', 3);
+    config()->set('watchtower.auto_block.rules', [
+        ['level' => 'error', 'message_contains' => 'lenient', 'count' => 2, 'window_minutes' => 5, 'shared_ip_user_threshold' => 1],
+        ['level' => 'error', 'message_contains' => 'strict', 'count' => 2, 'window_minutes' => 5],
+    ]);
+
+    // One signed-in user behind each address.
+    foreach (range(1, 2) as $i) {
+        logEntry('30.30.30.1', ['message' => 'lenient', 'user_id' => 7]);
+        logEntry('30.30.30.2', ['message' => 'strict', 'user_id' => 7]);
+    }
+
+    expectWarning('shared IP');
+
+    $this->service->run();
+
+    $this->assertDatabaseMissing('blacklisted_ips', ['ip' => '30.30.30.1']);
+    $this->assertDatabaseHas('blacklisted_ips', ['ip' => '30.30.30.2']);
+});
+
+it('says in a warn-mode rule\'s line what block mode would have done (#121)', function () {
+    config()->set('watchtower.auto_block.mode', 'warn');
+    config()->set('watchtower.auto_block.rules', [
+        ['level' => 'error', 'message_contains' => null, 'count' => 2, 'window_minutes' => 5, 'shared_ip_user_threshold' => 1],
+    ]);
+
+    foreach (range(1, 2) as $i) {
+        logEntry('30.30.30.3', ['user_id' => 7]);
+    }
+
+    $logChannel = Mockery::mock();
+    $logChannel->shouldReceive('warning')
+        ->once()
+        ->withArgs(fn (string $message, array $context): bool => $context['not_blocked_because'] === 'warn mode'
+            && $context['in_block_mode'] === 'shared IP');
+    Log::shouldReceive('channel')->andReturn($logChannel);
+
+    $this->service->run();
+});
+
+it('predicts a scoped rule\'s downgrade in warn mode as a block in scope', function () {
+    config()->set('watchtower.auto_block.mode', 'warn');
+    config()->set('watchtower.scopes', ['auth']);
+    config()->set('watchtower.auto_block.rules', [
+        ['level' => 'error', 'message_contains' => null, 'count' => 2, 'window_minutes' => 5, 'scope' => 'auth', 'shared_ip_user_threshold' => 1],
+    ]);
+
+    foreach (range(1, 2) as $i) {
+        logEntry('30.30.30.4', ['user_id' => 7]);
+    }
+
+    $seen = captureWouldHaveBlocked();
+
+    $this->service->run();
+
+    expect($seen)->toHaveCount(1)
+        ->and($seen[0]['in_block_mode'])->toBe('blocked_in_scope');
+});
+
+it('falls back to the default, loudly, when a rule\'s own threshold is not a number', function () {
+    config()->set('watchtower.auto_block.shared_ip_user_threshold', 0);
+    config()->set('watchtower.auto_block.rules', [
+        ['level' => 'error', 'message_contains' => null, 'count' => 3, 'window_minutes' => 5, 'shared_ip_user_threshold' => 'one'],
+    ]);
+
+    foreach ([1, 2, 3] as $userId) {
+        logEntry('30.30.30.5', ['user_id' => $userId]);
+    }
+
+    $logChannel = Mockery::mock()->shouldIgnoreMissing();
+    $logChannel->shouldReceive('warning')
+        ->with('Watchtower: shared_ip_user_threshold is not a whole number, so the shared-IP guard fell back to its default.', Mockery::any())
+        ->once();
+    Log::shouldReceive('channel')->andReturn($logChannel);
+
+    $this->service->run();
+
+    // Three users meet the default of 3, though the global 0 had the guard off.
+    $this->assertDatabaseMissing('blacklisted_ips', ['ip' => '30.30.30.5']);
 });

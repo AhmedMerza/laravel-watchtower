@@ -398,7 +398,8 @@ return [
     |   the rule matched, because the point is how many people a block would
     |   hit. At or above shared_ip_user_threshold it downgrades to a warning
     |   and records `not_blocked_because: shared IP`. Set it to 0 to switch
-    |   the guard off.
+    |   the guard off. A rule or detector can set its own
+    |   'shared_ip_user_threshold', which wins over this one.
     |
     |   This can only see users the app actually logged. It protects an
     |   address your users are signed in from; it can't recognise a busy
@@ -411,6 +412,7 @@ return [
     |   count            - number of matching logs within the window to trigger a block.
     |   window_minutes   - look-back window for counting logs.
     |   mode             - (optional) override the global mode for this rule only.
+    |   shared_ip_user_threshold - (optional) override the global one for this rule.
     |
     | Detectors (below) are the other half of the engine. Rules read a log
     | table on a schedule; detectors react to Laravel's own signals as they
@@ -428,6 +430,19 @@ return [
     |   window_minutes - how long the counter decays over.
     |   mode           - (optional) override the global mode for this
     |                    detector only.
+    |   shared_ip_user_threshold - (optional) override the global one for
+    |                    this detector. Every detector but the two auth ones
+    |                    (below) counts the signed-in user of the request it
+    |                    sees — scanner_paths included, at its count of 1.
+    |                    ⚠️ So a threshold of 1 on scanner_paths, or a global
+    |                    1, lets a signed-in probe for /.env through. Set 1
+    |                    per detector, where a signed-in signal is innocent.
+    |
+    | In warn mode, each would-have-blocked line carries `in_block_mode`:
+    | what block mode would have done with it — 'blocked',
+    | 'blocked_in_scope', or the hold-back that would have stopped it, spelled
+    | as `not_blocked_because` spells it ('shared IP', 'never_block',
+    | 'never_auto_block').
     |
     | ⚠️ The shared-IP guard is blind to anonymous traffic, and the auth
     | detectors are anonymous by nature — a failed login has no signed-in
@@ -581,9 +596,9 @@ return [
                 'scope'          => null,
             ],
 
-            // A burst of 404s or 429s is what path enumeration looks like
-            // when it isn't using a known filename. Read after the response
-            // is sent, so it costs the request nothing.
+            // A burst of 404s is what path enumeration looks like when it
+            // isn't using a known filename. Read after the response is sent,
+            // so it costs the request nothing.
             //
             // The loosest detector here, and the one most likely to catch a
             // real person: a broken deploy that 404s its own assets can trip
@@ -593,8 +608,19 @@ return [
                 'enabled'        => env('WATCHTOWER_DETECT_RESPONSE_BURSTS', false),
                 'count'          => 40,
                 'window_minutes' => 1,
-                'statuses'       => [404, 429],
-                // Paths whose 404 or 429 is never counted, in the same
+                // Not 429 (#121): a 429 is your own rate limiter already
+                // dealing with the client, and counting it turns throttling
+                // into a block. Add it back only with `count` above your
+                // throttle's limit, or the limit itself trips the block.
+                'statuses'       => [404],
+                // One signed-in user holds an app-wide block back (#121).
+                // A burst of 404s from a signed-in customer is a page that
+                // asks for things that aren't there — scanners in oreem's
+                // data had no user at all. A scanner that signs in first gets
+                // past this detector; scanner_paths still catches it, and
+                // its user id is in the would-have-blocked line.
+                'shared_ip_user_threshold' => 1,
+                // Paths whose 404 is never counted, in the same
                 // pattern syntax as scanner_paths. For routes where a 404
                 // is an ordinary answer — a lookup or search that found
                 // nothing — and a real user can produce forty a minute.

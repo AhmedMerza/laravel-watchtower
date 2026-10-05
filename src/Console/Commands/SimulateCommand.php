@@ -90,7 +90,9 @@ class SimulateCommand extends Command
         $to = now();
         $from = $to->copy()->subDays($days);
         $duration = (int) config('watchtower.auto_block.block_duration_minutes', 60);
-        $sharedIpThreshold = $this->sharedIpThreshold();
+        $sharedIpThreshold = $this->sharedIpThreshold(
+            config('watchtower.auto_block.shared_ip_user_threshold', AutoBlockService::DEFAULT_SHARED_IP_USER_THRESHOLD),
+        );
         // `?? 'warn'` is load-bearing, not belt-and-braces. config()'s default
         // only applies when the KEY IS ABSENT, and `WATCHTOWER_AUTO_BLOCK_MODE=null`
         // in .env gives the key a literal PHP null — so config() returns null,
@@ -103,15 +105,25 @@ class SimulateCommand extends Command
         $results = [];
 
         foreach ($rules as $index => $rule) {
-            $results[] = $this->simulator->simulate(
-                $rule,
-                (int) $index,
-                $from,
-                $to,
-                $duration,
-                $sharedIpThreshold,
-                $this->mode($rule['mode'] ?? null) ?? $globalMode,
-            );
+            // A rule may set its own threshold, as the live engine lets it
+            // (#121). Carried on the result so the report labels each rule
+            // with the number it was judged by.
+            $ruleThreshold = isset($rule['shared_ip_user_threshold'])
+                ? $this->sharedIpThreshold($rule['shared_ip_user_threshold'])
+                : $sharedIpThreshold;
+
+            $results[] = [
+                ...$this->simulator->simulate(
+                    $rule,
+                    (int) $index,
+                    $from,
+                    $to,
+                    $duration,
+                    $ruleThreshold,
+                    $this->mode($rule['mode'] ?? null) ?? $globalMode,
+                ),
+                'shared_ip_user_threshold' => $ruleThreshold,
+            ];
         }
 
         if ($this->option('json')) {
@@ -206,7 +218,7 @@ class SimulateCommand extends Command
                 ));
             }
 
-            $this->caveats($offenders, $sharedIpThreshold);
+            $this->caveats($offenders, $result['shared_ip_user_threshold'] ?? $sharedIpThreshold);
             $this->reportNeverBlocked($neverBlocked);
         }
     }
@@ -385,16 +397,9 @@ class SimulateCommand extends Command
      * column in a report, so a bad value quietly falls back rather than
      * shouting about it a second time.
      */
-    private function sharedIpThreshold(): int
+    private function sharedIpThreshold(mixed $configured): int
     {
-        $default = AutoBlockService::DEFAULT_SHARED_IP_USER_THRESHOLD;
-        $configured = config('watchtower.auto_block.shared_ip_user_threshold', $default);
-
-        if (is_int($configured) && $configured >= 0) {
-            return $configured;
-        }
-
-        return is_string($configured) && ctype_digit(trim($configured)) ? (int) trim($configured) : $default;
+        return AutoBlockService::parseUserThreshold($configured) ?? AutoBlockService::DEFAULT_SHARED_IP_USER_THRESHOLD;
     }
 
     /**

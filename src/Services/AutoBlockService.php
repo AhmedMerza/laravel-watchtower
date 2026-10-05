@@ -186,10 +186,7 @@ class AutoBlockService
             $hits,
             $threshold,
             $windowMinutes,
-            // Resolved once here rather than inside the decision, for the
-            // reason holdBack() gives: parsing it warns on a bad value, and
-            // this runs per request rather than per tick.
-            $this->sharedIpUserThreshold(),
+            $settings,
         );
 
         // Only an app-wide block licenses the caller to answer the request.
@@ -224,6 +221,8 @@ class AutoBlockService
     /**
      * A detector reached its threshold: apply the same guards a rule gets,
      * then block or report the near miss.
+     *
+     * @param  array<string, mixed>  $settings  the detector's config
      */
     private function blockDetected(
         string $detector,
@@ -234,7 +233,7 @@ class AutoBlockService
         int $hits,
         int $threshold,
         int $windowMinutes,
-        int $sharedIpThreshold,
+        array $settings,
     ): bool {
         // This detector has already decided about this address and was held
         // back from enforcing it. Honour that decision for as long as the
@@ -266,6 +265,12 @@ class AutoBlockService
         if ($this->isHeld($detector, $counted, $ip, $mode)) {
             return false;
         }
+
+        // Parsed only here, past the hold: parsing warns on a bad value, and
+        // a held address keeps arriving at its threshold on every request —
+        // before the hold that would have been a warning per request. The
+        // detector's own value wins (#121).
+        $sharedIpThreshold = $this->sharedIpUserThreshold($settings);
 
         // Whatever is decided below, this crossing has been answered, so the
         // count starts again. Blocking clears it so a lapsed block doesn't
@@ -358,13 +363,16 @@ class AutoBlockService
      * hour, so honouring them for an hour changes nothing. How many
      * signed-in users an address is showing changes minute to minute, and
      * holding that answer would convert a guard an attacker has to keep
-     * re-earning — three accounts live in a one-minute window, for
-     * response_bursts — into an hour of immunity bought once. docs/auto-block.md
+     * re-earning — a signed-in account live in a one-minute window, for
+     * response_bursts at its shipped threshold of 1 — into an hour of
+     * immunity bought once. docs/auto-block.md
      * is explicit that this guard is not a control an adversary respects;
      * that is a reason to leave it re-measured, not to make it stickier.
-     * It also needs no hold: it cannot fire at `count => 1`, where at
-     * most the current request's own user is known, so `scanner_paths` never
-     * reaches it.
+     * It also needs no hold at a threshold of 2 or more: it cannot fire at
+     * `count => 1`, where at most the current request's own user is known,
+     * so `scanner_paths` never reaches it. At a threshold of 1 it does, on
+     * every signed-in probe — which is why 1 belongs on a detector whose
+     * signed-in signals are innocent, not on scanner_paths or globally.
      *
      * The flat duration, never the escalated one: escalatedMinutes() is
      * only consulted past every hold-back, because a near miss is not an
@@ -391,7 +399,9 @@ class AutoBlockService
      *
      * @param  array<string, mixed>  $context
      * @return string|null why the address did NOT end up blocked, or null if
-     *                     it did. Both callers hold a reported decision for
+     *                     it did. A warn-mode decision block mode would have
+     *                     held back returns that hold-back, not 'warn mode',
+     *                     so it is held the way block mode would hold it. Both callers hold a reported decision for
      *                     the span the block would have run, and which
      *                     hold-back produced it decides whether they may —
      *                     see holdDecision(). A caller that only needs the
@@ -425,10 +435,30 @@ class AutoBlockService
             $notBlockedBecause = null;
         }
 
+        // Warn mode's job is to answer "what if I armed this?", and the mode
+        // check above runs before every guard — so say what they would have
+        // done, or every near miss reads the same (#121).
+        if ($notBlockedBecause === 'warn mode') {
+            $context['in_block_mode'] = $this->inBlockMode($ip, $scope, $distinctUsers, $sharedIpThreshold);
+        }
+
         if ($notBlockedBecause !== null) {
             $this->logWouldHaveBlocked($ip, $reason, $notBlockedBecause, $distinctUsers, $context);
 
-            return $notBlockedBecause;
+            // A dry run that block mode would have held back is held the way
+            // block mode would hold it, so the two keep agreeing past the first
+            // crossing. A 'warn mode' hold covers the whole prefix for the
+            // whole duration; block mode re-measures a shared IP every time,
+            // and re-asks a never_* list for each address in the prefix. Held
+            // as 'warn mode', a signed-in customer at the first crossing would
+            // vouch for a scanner arriving behind them, and one listed address
+            // would silence its /64. Returned only for holdDecision(); the
+            // line above still says 'warn mode'.
+            $predicted = $context['in_block_mode'] ?? null;
+
+            return in_array($predicted, [self::HELD_BY_SHARED_IP, 'never_block', 'never_auto_block'], true)
+                ? $predicted
+                : $notBlockedBecause;
         }
 
         // Only past every hold-back, and never before: a warn-mode dry run
@@ -557,6 +587,34 @@ class AutoBlockService
             $mode === 'warn' => 'warn mode',
             $sharedIpThreshold > 0 && $distinctUsers >= $sharedIpThreshold => self::HELD_BY_SHARED_IP,
             default => null,
+        };
+    }
+
+    /**
+     * What block mode would have done with a decision warn mode reported:
+     * 'blocked', 'blocked_in_scope', or the hold-back that would have stopped
+     * it, spelled as `not_blocked_because` spells it in block mode.
+     *
+     * In the order block mode checks: the shared-IP guard first, then the
+     * lists in the order BlacklistService::block() throws — never_block
+     * (assertBlockable) before never_auto_block. A test runs each case
+     * through both modes and compares, so this can't drift from them
+     * unnoticed.
+     *
+     * Asks the lists for $ip, not the prefix, for the reason
+     * holdStillSpeaksFor() gives: block() checks the address before it is
+     * widened.
+     */
+    private function inBlockMode(string $ip, string $scope, int $distinctUsers, int $sharedIpThreshold): string
+    {
+        $shared = $this->holdBack('block', $distinctUsers, $sharedIpThreshold) === self::HELD_BY_SHARED_IP;
+
+        return match (true) {
+            $shared && $scope === BlockScope::GLOBAL => self::HELD_BY_SHARED_IP,
+            NeverBlockList::neverBlock($ip) => 'never_block',
+            NeverBlockList::neverAutoBlock($ip) => 'never_auto_block',
+            $shared => 'blocked_in_scope',
+            default => 'blocked',
         };
     }
 
@@ -698,25 +756,31 @@ class AutoBlockService
     /**
      * Distinct signed-in users from one address before a block downgrades.
      *
+     * A detector or rule may set its own `shared_ip_user_threshold`, which
+     * wins over the global one (#121): one signed-in user is strong evidence
+     * against a 404 burst being a scanner, and says nothing either way
+     * about a log rule.
+     *
      * `0` switches the guard off, which is what makes a bare `(int)` cast
      * the wrong tool: a blank or misspelled env value casts to 0 too, and
      * would quietly remove the protection this feature exists to provide.
      * Anything that isn't a whole number falls back to the default and says
      * so, since the safe reading of a typo is "they meant to have a guard".
+     *
+     * @param  array<string, mixed>  $settings  the detector's or rule's own
      */
-    private function sharedIpUserThreshold(): int
+    private function sharedIpUserThreshold(array $settings = []): int
     {
-        $configured = config(
-            'watchtower.auto_block.shared_ip_user_threshold',
-            self::DEFAULT_SHARED_IP_USER_THRESHOLD,
-        );
+        // isset, not array_key_exists: `=> env('X')` with X unset is null,
+        // which means "not set here", not a bad value.
+        $configured = isset($settings['shared_ip_user_threshold'])
+            ? $settings['shared_ip_user_threshold']
+            : config('watchtower.auto_block.shared_ip_user_threshold', self::DEFAULT_SHARED_IP_USER_THRESHOLD);
 
-        if (is_int($configured) && $configured >= 0) {
-            return $configured;
-        }
+        $parsed = self::parseUserThreshold($configured);
 
-        if (is_string($configured) && ctype_digit(trim($configured))) {
-            return (int) trim($configured);
+        if ($parsed !== null) {
+            return $parsed;
         }
 
         Log::channel(config('watchtower.log_channel', 'stack'))->warning(
@@ -724,11 +788,25 @@ class AutoBlockService
             [
                 'configured' => $configured,
                 'using'      => self::DEFAULT_SHARED_IP_USER_THRESHOLD,
-                'hint'       => 'Set WATCHTOWER_SHARED_IP_USER_THRESHOLD to a whole number, or to 0 to switch the guard off on purpose.',
+                'hint'       => 'Set WATCHTOWER_SHARED_IP_USER_THRESHOLD, or the detector\'s or rule\'s own shared_ip_user_threshold, to a whole number, or to 0 to switch the guard off on purpose.',
             ],
         );
 
         return self::DEFAULT_SHARED_IP_USER_THRESHOLD;
+    }
+
+    /**
+     * A whole number of users, or null when $value isn't one. Public so
+     * `watchtower:simulate` parses it the same way — see
+     * DEFAULT_SHARED_IP_USER_THRESHOLD.
+     */
+    public static function parseUserThreshold(mixed $value): ?int
+    {
+        if (is_int($value) && $value >= 0) {
+            return $value;
+        }
+
+        return is_string($value) && ctype_digit(trim($value)) ? (int) trim($value) : null;
     }
 
     private function normaliseMode(mixed $mode): string
@@ -788,6 +866,12 @@ class AutoBlockService
 
         $distinctUsers = $this->distinctUsersPerIp($logsTable, $offenders->all(), $windowStart);
 
+        // The rule's own value wins (#121). run() resolved the global one
+        // once for the tick; only a rule that sets its own is parsed here.
+        $ruleThreshold = isset($rule['shared_ip_user_threshold'])
+            ? $this->sharedIpUserThreshold($rule)
+            : $sharedIpThreshold;
+
         $reason = sprintf(
             'Auto-blocked: %s%s exceeded %d hits in %d min',
             $level ? "level={$level} " : '',
@@ -810,7 +894,7 @@ class AutoBlockService
                 'window_minutes' => $windowMinutes,
             ];
 
-            $heldBy = $this->blockOrReport($ip, $reason, $mode, $scope, $users, $sharedIpThreshold, $durationMinutes, $context);
+            $heldBy = $this->blockOrReport($ip, $reason, $mode, $scope, $users, $ruleThreshold, $durationMinutes, $context);
 
             try {
                 $this->holdDecision($holder, $this->blacklist->normalizeTarget($ip), $mode, $heldBy, $durationMinutes);
