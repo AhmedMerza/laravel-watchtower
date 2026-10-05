@@ -157,17 +157,107 @@ it('skips what the whitelist, never_block or the breadth limit keeps unblocked',
     expect(importedIps())->toBe(['2001:db8:1::/64', '45.9.20.0/24']);
 });
 
-it('keeps a live block as it is and replaces a lapsed one', function () {
+it('keeps a permanent block as it is, and replaces one that would lapse', function () {
     $service = app(BlacklistService::class);
-    $service->block('45.9.20.5', ['reason' => 'mine', 'expires_at' => now()->addDay()]);
+    $service->block('45.9.20.5', ['reason' => 'mine']);
     $service->block('45.9.20.6', ['reason' => 'old', 'expires_at' => now()->subDay()]);
-    config()->set('firewall.blacklist', ['45.9.20.5', '45.9.20.6']);
+    $service->block('45.9.20.7', ['reason' => 'for now', 'expires_at' => now()->addDay()]);
+    $service->block('45.9.20.8', ['reason' => 'listed', 'source' => BlockSource::Feed]);
+    config()->set('firewall.blacklist', ['45.9.20.5', '45.9.20.6', '45.9.20.7', '45.9.20.8']);
 
     $this->artisan('watchtower:import-firewall --commit')->assertSuccessful()
         ->expectsOutputToContain('skip   45.9.20.5 — already blocked')
-        ->expectsOutputToContain('block  45.9.20.6');
+        ->expectsOutputToContain('Imported 3 block(s).');
 
     expect(BlacklistedIp::where('ip', '45.9.20.5')->value('reason'))->toBe('mine')
-        ->and(BlacklistedIp::where('ip', '45.9.20.6')->sole()->expires_at)->toBeNull()
+        ->and(BlacklistedIp::count())->toBe(4)
+        ->and(importedIps())->toBe(['45.9.20.6', '45.9.20.7', '45.9.20.8'])
+        ->and(BlacklistedIp::whereNotNull('expires_at')->orWhere('source', BlockSource::Feed)->count())->toBe(0)
         ->and(app(BlacklistCache::class)->isBlocked('45.9.20.6'))->toBeTrue();
+});
+
+it('checks a lone IPv6 address against the lists before widening it', function () {
+    config()->set('watchtower.never_block', ['2001:db8:1::7']);
+    config()->set('firewall.whitelist', ['2001:db8:2::7']);
+    config()->set('firewall.blacklist', ['2001:db8:1::7', '2001:db8:2::7', '2001:db8:3::7']);
+
+    $this->artisan('watchtower:import-firewall --commit')->assertSuccessful()
+        ->expectsOutputToContain('skip   2001:db8:1::7 — covered by never_block')
+        ->expectsOutputToContain('skip   2001:db8:2::7 — also whitelisted');
+
+    expect(importedIps())->toBe(['2001:db8:3::/64']);
+});
+
+it('keeps the earliest listing of a target, and fills in missing timestamps', function () {
+    firewallTable(['45.9.20.5' => false, '45.9.20.6' => false]);
+    // The same address again, padded: the column is unique, the trimmed value isn't.
+    DB::table('firewall')->insert(['ip_address' => ' 45.9.20.5 ', 'whitelisted' => false, 'created_at' => '2017-01-01 00:00:00', 'updated_at' => null]);
+    DB::table('firewall')->where('ip_address', '45.9.20.6')->update(['created_at' => null, 'updated_at' => null]);
+
+    $this->artisan('watchtower:import-firewall --commit')->assertSuccessful();
+
+    $rows = BlacklistedIp::get()->keyBy('ip');
+    expect(importedIps())->toBe(['45.9.20.5', '45.9.20.6'])
+        // Listed by the 2019 row and the 2017 one: the earlier date wins,
+        // and its missing updated_at falls back to its created_at.
+        ->and((string) $rows['45.9.20.5']->created_at)->toBe('2017-01-01 00:00:00')
+        ->and((string) $rows['45.9.20.5']->updated_at)->toBe('2017-01-01 00:00:00')
+        ->and($rows['45.9.20.6']->created_at)->not->toBeNull()
+        ->and($rows['45.9.20.6']->source_env)->toBe(app()->environment());
+});
+
+it('converts the edge cases of a dash range', function () {
+    config()->set('firewall.blacklist', [
+        '45.9.20.5-45.9.20.5',
+        '45.9.21.10-45.9.21.1',
+        '255.255.255.254-255.255.255.255',
+    ]);
+
+    $this->artisan('watchtower:import-firewall')->assertSuccessful()
+        ->expectsOutputToContain('block  45.9.20.5')
+        ->expectsOutputToContain('skip   45.9.21.10-45.9.21.1 — not an address')
+        ->expectsOutputToContain('block  255.255.255.254/31');
+});
+
+it('fails, and recovers on a re-run, when the cache rebuild fails', function () {
+    config()->set('firewall.blacklist', ['45.9.20.5']);
+    // The first rebuild fails; later ones run for real.
+    $real = app(BlacklistCache::class);
+    $calls = 0;
+    $this->partialMock(BlacklistCache::class)->shouldReceive('rebuild')
+        ->andReturnUsing(function () use ($real, &$calls) {
+            return $calls++ > 0 && $real->rebuild();
+        });
+
+    $this->artisan('watchtower:import-firewall --commit')->assertFailed()
+        ->expectsOutputToContain('the cache rebuild failed')
+        ->doesntExpectOutputToContain('No block targets enabled.');
+
+    expect(importedIps())->toBe(['45.9.20.5']);
+
+    // Nothing new to import, but the rebuild and the reconcile still run.
+    $this->artisan('watchtower:import-firewall --commit')->assertSuccessful()
+        ->expectsOutputToContain('Imported 0 block(s).')
+        ->expectsOutputToContain('No block targets enabled.');
+
+    expect($calls)->toBe(2)->and($real->isBlocked('45.9.20.5'))->toBeTrue();
+});
+
+it('escapes what an old row holds, and does not suggest a huge whitelist entry', function () {
+    firewallTable(['<error>x</error>' => false, '0.0.0.0/0' => true]);
+
+    $this->artisan('watchtower:import-firewall')->assertSuccessful()
+        ->expectsOutputToContain('skip   <error>x</error> — not an address')
+        ->expectsOutputToContain('Whitelisted 0.0.0.0/0 is too broad to suggest')
+        ->doesntExpectOutputToContain('WATCHTOWER_NEVER_BLOCK_IPS=');
+});
+
+it('handles a list larger than one chunk', function () {
+    config()->set('firewall.blacklist', array_map(fn ($i) => '45.9.'.intdiv($i, 256).'.'.($i % 256), range(0, 1200)));
+
+    $this->artisan('watchtower:import-firewall --commit')->assertSuccessful()
+        ->expectsOutputToContain('Imported 1201 block(s).');
+
+    $this->artisan('watchtower:import-firewall --commit')->assertSuccessful()
+        ->expectsOutputToContain('Imported 0 block(s).');
 });

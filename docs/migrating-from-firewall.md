@@ -16,7 +16,7 @@ php artisan watchtower:import-firewall
 php artisan watchtower:import-firewall --commit
 ```
 
-It reads both places the old package kept entries: the `firewall` table, if it exists, and the `blacklist` / `whitelist` arrays in `config/firewall.php`. Running it again changes nothing.
+It reads both places the old package kept entries: the `firewall` table, if it exists, and the `blacklist` / `whitelist` arrays in `config/firewall.php`. Running it again imports nothing twice. If a run fails after writing, for example because the cache was unreachable, run it again: it rebuilds the cache and reconciles without adding anything new.
 
 | Old entry | What the importer does |
 |---|---|
@@ -33,17 +33,22 @@ Every skipped entry is listed with its reason. A blacklisted entry is also skipp
 - **It's also whitelisted.** The old package let it through.
 - **`never_block` covers it.**
 - **It's wider than a `/16`.** Watchtower makes you confirm those. Block it by hand with `force` if you meant it.
-- **It's already blocked.** A block Watchtower already has is kept exactly as it is.
+- **It's already blocked permanently.** That block is kept exactly as it is. A temporary block, or a [feed](feeds.md) entry, for the same target is replaced by the permanent one, since it would otherwise lapse and let the address back in.
+
+A whitelisted entry wider than a `/16` isn't suggested for `never_block`. The importer names it instead, because pasting a `/0` there would turn blocking off.
 
 The import doesn't send a webhook or a notification for each block. After writing, it rebuilds the cache once and runs [`watchtower:reconcile`](commands.md) once, so your [block targets](block-targets.md) and, on a satellite, the master get the whole list in one go.
 
-To undo an import, delete the rows with that reason:
+To undo an import, unblock the rows with that reason. Going through `unblockRecord()` updates the cache and tells your block targets, which a plain `delete()` does not:
 
 ```php
-Watchtower\Models\BlacklistedIp::where('reason', Watchtower\Console\Commands\ImportFirewallCommand::REASON)->delete();
-```
+use Watchtower\Console\Commands\ImportFirewallCommand;
+use Watchtower\Models\BlacklistedIp;
+use Watchtower\Services\BlacklistService;
 
-Then run `php artisan watchtower:cleanup` to rebuild the cache.
+BlacklistedIp::where('reason', ImportFirewallCommand::REASON)
+    ->each(fn ($row) => app(BlacklistService::class)->unblockRecord($row));
+```
 
 ## 2. Replace the middleware
 

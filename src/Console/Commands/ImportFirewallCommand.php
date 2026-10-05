@@ -5,9 +5,11 @@ declare(strict_types=1);
 namespace Watchtower\Console\Commands;
 
 use Illuminate\Console\Command;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
+use Symfony\Component\Console\Formatter\OutputFormatter;
 use Watchtower\Enums\BlockSource;
 use Watchtower\Models\BlacklistedIp;
 use Watchtower\Services\BlacklistCache;
@@ -49,61 +51,73 @@ class ImportFirewallCommand extends Command
 
     public function handle(): int
     {
-        // target => [created_at, updated_at], earliest first-seen kept.
-        $blocks = [];
+        $listed = [];
         $allow = [];
 
         foreach ($this->entries() as [$entry, $whitelisted, $created, $updated, $fromConfig]) {
             [$targets, $why] = $this->expand($entry, $fromConfig);
 
             if ($why !== null) {
-                $this->line("  skip   {$entry} — {$why}");
+                $this->report('skip', $entry, $why);
 
                 continue;
             }
 
             foreach ($targets as $target) {
                 if ($whitelisted) {
-                    $allow[$target] = true;
-
-                    continue;
-                }
-
-                // Blocked the way block() would store it: a lone IPv6
-                // address widens to its prefix.
-                $target = (string) IpRange::blockTarget($target);
-
-                if (! isset($blocks[$target]) || $created < $blocks[$target][0]) {
-                    $blocks[$target] = [$created, $updated];
+                    $allow[] = $target;
+                } else {
+                    $listed[] = [$target, $created, $updated];
                 }
             }
         }
 
-        $existing = BlacklistedIp::active()
-            ->where('scope', BlockScope::GLOBAL)
-            ->whereIn('ip', array_map('strval', array_keys($blocks)))
-            ->pluck('ip')
-            ->flip();
+        // target => [created_at, updated_at], the earliest listing kept.
+        $blocks = [];
 
+        foreach ($listed as [$target, $created, $updated]) {
+            // Asked of the address as listed, before widening, as block()
+            // asks it: a lone IPv6 address on either list never covers the
+            // /64 it widens to, so checking the stored form would let it by.
+            $why = match (true) {
+                IpRange::covers($allow, $target)    => 'also whitelisted, and the old package let whitelisted addresses through',
+                NeverBlockList::neverBlock($target) => 'covered by never_block',
+                default                             => null,
+            };
+
+            if ($why !== null) {
+                $this->report('skip', $target, $why);
+
+                continue;
+            }
+
+            // Stored the way block() stores it: a lone IPv6 address widens
+            // to its prefix.
+            $target = (string) IpRange::blockTarget($target);
+
+            if (! isset($blocks[$target]) || $created < $blocks[$target][0]) {
+                $blocks[$target] = [$created, $updated];
+            }
+        }
+
+        $kept = $this->kept(array_map('strval', array_keys($blocks)));
         $rows = [];
 
         foreach ($blocks as $target => [$created, $updated]) {
             $target = (string) $target;
             $why = match (true) {
-                IpRange::covers(array_keys($allow), $target) => 'also whitelisted, and the old package let whitelisted addresses through',
-                NeverBlockList::neverBlock($target)           => 'covered by never_block',
-                IpRange::isTooBroad($target)                  => 'broader than /'.IpRange::MIN_IPV4_PREFIX.' (IPv4) or /'.IpRange::MIN_IPV6_PREFIX.' (IPv6); block it by hand with force if you meant it',
-                isset($existing[$target])                     => 'already blocked',
-                default                                       => null,
+                IpRange::isTooBroad($target) => 'broader than /'.IpRange::MIN_IPV4_PREFIX.' (IPv4) or /'.IpRange::MIN_IPV6_PREFIX.' (IPv6); block it by hand with force if you meant it',
+                isset($kept[$target])        => 'already blocked',
+                default                      => null,
             };
 
             if ($why !== null) {
-                $this->line("  skip   {$target} — {$why}");
+                $this->report('skip', $target, $why);
 
                 continue;
             }
 
-            $this->line("  block  {$target}");
+            $this->report('block', $target);
             $rows[] = [
                 'id'         => (string) Str::ulid(),
                 'ip'         => $target,
@@ -116,7 +130,7 @@ class ImportFirewallCommand extends Command
             ];
         }
 
-        $this->allowlist(array_keys($allow));
+        $this->allowlist(array_values(array_unique($allow)));
 
         if (! $this->option('commit')) {
             $this->info(count($rows).' block(s) would be imported. Nothing was written; run again with --commit to import them.');
@@ -126,13 +140,14 @@ class ImportFirewallCommand extends Command
 
         DB::transaction(function () use ($rows) {
             foreach (array_chunk($rows, 500) as $chunk) {
-                // A lapsed block for the same target holds the (ip, scope)
-                // unique key without blocking anything; the permanent row
-                // replaces it. Its edge rule, if any, stays right: the
-                // reconcile below pushes the same target again.
-                BlacklistedIp::where('scope', BlockScope::GLOBAL)
-                    ->whereIn('ip', array_column($chunk, 'ip'))
-                    ->delete();
+                // Rows that would let an imported permanent block lapse make
+                // way for it: an expired or temporary block, or a feed row
+                // the next feed import may drop. The target stays blocked
+                // throughout, so no IpUnblocked; the reconcile below pushes
+                // it again. A permanent block landing since kept() read the
+                // table isn't matched, so the insert hits the unique key and
+                // the whole import rolls back rather than overwrite it.
+                $this->replaceable()->whereIn('ip', array_column($chunk, 'ip'))->delete();
 
                 // Not insertOrIgnore(): on MySQL that is INSERT IGNORE, which
                 // turns a truncation into a warning and a corrupt row.
@@ -141,14 +156,60 @@ class ImportFirewallCommand extends Command
         });
 
         if (! $this->cache->rebuild()) {
-            $this->error('Imported '.count($rows).' block(s), but the cache rebuild failed — its DB read error is on the watchtower log channel.');
+            $this->error('Imported '.count($rows).' block(s), but the cache rebuild failed, so they are not enforced yet — its DB read error is on the watchtower log channel. Run this command again once the cache is reachable; it rebuilds and reconciles without importing anything twice.');
 
             return self::FAILURE;
         }
 
         $this->info('Imported '.count($rows).' block(s).');
 
-        return $rows === [] ? self::SUCCESS : $this->call('watchtower:reconcile');
+        // Even when nothing was new: a run that failed after writing comes
+        // back with every row already blocked, and the targets still need
+        // them. Reconcile only pushes the current list, so repeating it is
+        // harmless.
+        return $this->call('watchtower:reconcile');
+    }
+
+    /**
+     * Which of $targets already hold a block the import should leave alone:
+     * a permanent one that isn't a feed row. Everything else is replaceable().
+     *
+     * @param  list<string>  $targets
+     * @return array<string, int>
+     */
+    private function kept(array $targets): array
+    {
+        $kept = [];
+
+        // Chunked: one bind per target would pass SQLite's and Postgres'
+        // parameter limits on a large list, failing even the dry run.
+        foreach (array_chunk($targets, 500) as $chunk) {
+            $kept += BlacklistedIp::where('scope', BlockScope::GLOBAL)
+                ->whereIn('ip', $chunk)
+                ->whereNull('expires_at')
+                ->where('source', '!=', BlockSource::Feed)
+                ->pluck('ip')
+                ->flip()
+                ->all();
+        }
+
+        return $kept;
+    }
+
+    /**
+     * @return Builder<BlacklistedIp>
+     */
+    private function replaceable(): Builder
+    {
+        return BlacklistedIp::where('scope', BlockScope::GLOBAL)
+            ->where(fn ($query) => $query->whereNotNull('expires_at')->orWhere('source', BlockSource::Feed));
+    }
+
+    /** One report line. $text can be anything an old row held, so it is escaped. */
+    private function report(string $verb, string $text, ?string $why = null): void
+    {
+        $line = sprintf('  %-6s %s', $verb, OutputFormatter::escape($text));
+        $this->line($why === null ? $line : "{$line} — {$why}");
     }
 
     /**
@@ -229,7 +290,7 @@ class ImportFirewallCommand extends Command
                 [$found, $why] = $this->expand(trim($line), true, $files + [$entry => true]);
 
                 if ($why !== null) {
-                    $this->line("  skip   {$line} (in {$entry}) — {$why}");
+                    $this->report('skip', "{$line} (in {$entry})", $why);
                 }
 
                 array_push($targets, ...$found);
@@ -307,6 +368,14 @@ class ImportFirewallCommand extends Command
     private function allowlist(array $targets): void
     {
         $missing = array_values(array_filter($targets, fn ($target) => ! NeverBlockList::neverBlock((string) $target)));
+
+        // Pasted into never_block, a /0 or /8 would turn off blocking for
+        // all or much of the internet, so those are named, not suggested.
+        foreach (array_filter($missing, fn ($target) => IpRange::isTooBroad((string) $target)) as $broad) {
+            $this->warn("Whitelisted {$broad} is too broad to suggest for never_block. Add it yourself only if you mean to exempt all of it from every block.");
+        }
+
+        $missing = array_values(array_filter($missing, fn ($target) => ! IpRange::isTooBroad((string) $target)));
 
         if ($missing === []) {
             return;
