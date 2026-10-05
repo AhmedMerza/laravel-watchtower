@@ -6,6 +6,7 @@ namespace Watchtower\Targets;
 
 use Watchtower\Contracts\BlockTarget;
 use Watchtower\Enums\BlockSource;
+use Watchtower\Enums\SyncRole;
 use Watchtower\Jobs\PushBlockToMaster;
 use Watchtower\Models\BlacklistedIp;
 
@@ -19,8 +20,8 @@ class LaravelTarget implements BlockTarget
 {
     public function apply(BlacklistedIp $record): void
     {
-        // PushBlockToMaster::handle() already refuses a Sync record and a
-        // missing master_url once dispatched — checked again here so
+        // PushBlockToMaster::handle() already refuses a Sync record, a
+        // missing master_url and the master itself once dispatched — checked again here so
         // reconcile() (which walks every active record, Sync-sourced ones
         // included on a satellite) never pays for a queue round trip whose
         // job would just return.
@@ -28,7 +29,7 @@ class LaravelTarget implements BlockTarget
             return;
         }
 
-        if (! config('watchtower.sync.master_url')) {
+        if (! config('watchtower.sync.master_url') || SyncRole::current() === SyncRole::Master) {
             return;
         }
 

@@ -22,6 +22,7 @@ use Watchtower\Console\Commands\InstallCommand;
 use Watchtower\Console\Commands\ReconcileCommand;
 use Watchtower\Console\Commands\SimulateCommand;
 use Watchtower\Console\Commands\SyncCommand;
+use Watchtower\Enums\SyncRole;
 use Watchtower\Events\IpBlocked;
 use Watchtower\Events\IpUnblocked;
 use Watchtower\Http\Controllers\BlockController;
@@ -342,7 +343,9 @@ class WatchtowerServiceProvider extends PackageServiceProvider
      * The master side of cross-environment sync.
      *
      * Registered only when a shared secret exists — an environment with no
-     * WATCHTOWER_SYNC_SECRET is not a master and should expose nothing.
+     * WATCHTOWER_SYNC_SECRET is not a master and should expose nothing — and
+     * the environment isn't a satellite. A satellite holds the secret too,
+     * to sign its own requests, so the secret alone can't tell (#36).
      * Deliberately independent of watchtower.routes.enabled, which governs
      * the human-facing management API: a master can turn that off and still
      * serve its satellites.
@@ -354,7 +357,7 @@ class WatchtowerServiceProvider extends PackageServiceProvider
      */
     protected function registerSyncRoutes(): void
     {
-        if (SyncSignature::secret() === '') {
+        if (SyncSignature::secret() === '' || SyncRole::current() === SyncRole::Satellite) {
             return;
         }
 

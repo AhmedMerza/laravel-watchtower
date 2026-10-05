@@ -18,7 +18,8 @@ php artisan watchtower:sync
 php artisan watchtower:cleanup
 
 # Push the full active (global) blocklist to every enabled block target —
-# today that's the master environment, if WATCHTOWER_MASTER_URL is set.
+# on a satellite that includes the master, if WATCHTOWER_MASTER_URL is set.
+# The master never pushes to itself (WATCHTOWER_SYNC_ROLE=master).
 # Repairs drift a live push missed; not scheduled by default.
 php artisan watchtower:reconcile
 
