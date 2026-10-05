@@ -11,6 +11,11 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 - **`scanner_paths` catches the common config and secret probes by default.** The list now covers `/config/*.yml`, `/serverless.yml`, `/configs.json`, `/.aws/*`, `/.svn/*`, `/.vscode/*`, `/.DS_Store`, `/docker-compose*.yml`, `/phpinfo.php` and `/wp-config.php*`. `/.git/*` also widens to `/.git*`, so `/.gitignore` and `/.git-credentials` are caught too. In production data these probes reached `response_bursts` instead, the loose detector, while the precise one missed them. A test now checks the defaults against paths a real Laravel app serves, since one matching request blocks the address ([#122](https://github.com/AhmedMerza/laravel-watchtower/issues/122)).
 - **The sync pull comes in pages, and carries only the columns a satellite reads.** `watchtower:sync` asks for 1,000 blocks at a time and keeps going until the master has no more, so a large blocklist is no longer one response. Mixed versions keep working both ways: an older master sends the whole list as before, and an older satellite, which doesn't ask for pages, still gets the whole list. If a page fails partway through, the blocks already pulled are still cached, and the run reports failure ([#37](https://github.com/AhmedMerza/laravel-watchtower/issues/37)).
 
+### Documentation
+
+- **What Watchtower doesn't do, and why** ([Security Notes](docs/security.md#what-watchtower-doesnt-do-and-why)): account bans, country blocking, request-input inspection and rate limiting, each with what to use instead.
+- **[Migrating from akaunting/laravel-firewall](docs/migrating-from-akaunting.md):** what replaces each of its 14 middleware, `FIREWALL_WHITELIST` → `WATCHTOWER_NEVER_BLOCK_IPS`, and why its `CF-Connecting-IP` handling should become trusted proxies ([#127](https://github.com/AhmedMerza/laravel-watchtower/issues/127)).
+
 ## [0.11.0] - 2026-10-05
 
 No migrations. **If you published `config/watchtower.php`, update `response_bursts` by hand.** The new defaults below don't reach a published config. See [Upgrading](docs/upgrading.md).

@@ -15,5 +15,6 @@
 | [Scoped Blocks](scoped-blocks.md) | Blocking an address from some routes only |
 | [Artisan Commands](commands.md) | `install`, `sync`, `cleanup`, `simulate`, `reconcile`, `import-feeds`, `import-firewall` |
 | [Migrating from antonioribeiro/firewall](migrating-from-firewall.md) | Importing its blocks and allowlist, and what replaces its middleware and facade |
+| [Migrating from akaunting/laravel-firewall](migrating-from-akaunting.md) | What replaces each of its middleware, its whitelist, and its Cloudflare IP handling |
 | [Upgrading](upgrading.md) | What to check when you upgrade |
-| [Security Notes](security.md) | Proxies, cache outages, request signing |
+| [Security Notes](security.md) | Proxies, cache outages, request signing, and what Watchtower doesn't do |
