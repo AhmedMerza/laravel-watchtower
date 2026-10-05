@@ -3,6 +3,8 @@
 [![License](https://img.shields.io/github/license/AhmedMerza/laravel-watchtower?style=flat-square)](LICENSE.md)
 [![PHP Version](https://img.shields.io/badge/php-%3E%3D8.2-blue?style=flat-square)](https://php.net)
 
+*The only Laravel firewall that checks who the user is before blocking, lets you test a rule on last week's data before switching it on, and sends one decision to every environment and to the edge.*
+
 **Bans brute-forcers and scanners automatically, stays correct behind a proxy or load balancer, and keeps answering requests even if the cache goes down.** Block an address in one click from your logs with [LogScope](https://github.com/AhmedMerza/laravel-logscope), or let detectors and rules catch it on their own — either way it reaches every environment you run within minutes, with no Cloudflare, no WAF and no infrastructure changes required.
 
 <p align="center">

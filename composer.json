@@ -1,6 +1,6 @@
 {
     "name": "ahmedmerza/watchtower",
-    "description": "Active blocking and cross-server coordination at the edge of your Laravel app — IPs (with bots and exploit paths in v1.0).",
+    "description": "The only Laravel firewall that checks who the user is before blocking, lets you test a rule on last week's data before switching it on, and sends one decision to every environment and to the edge.",
     "keywords": [
         "laravel",
         "firewall",

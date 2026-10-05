@@ -4,9 +4,17 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-05
+
+No migrations and nothing breaking: a `composer update` is enough.
+
 ### Added
 
 - `watchtower:import-firewall` imports antonioribeiro/firewall's blocks from its `firewall` table and `config/firewall.php`, with or without the old package installed. It is a dry run unless you pass `--commit`, and running it again changes nothing. Netmask, wildcard and dash ranges become CIDR blocks. The whitelist is printed for `never_block`, and `host:` and `country:` entries are listed as skipped. A permanent block it finds already in place is kept; a temporary or feed block for the same target is replaced, so the imported block can't lapse. `--undo` removes what an import added. See [Migrating from antonioribeiro/firewall](docs/migrating-from-firewall.md). (#29)
+
+### Changed
+
+- The README and the Packagist description now lead with the roadmap's tagline, now that #22, #24 and #25, the features behind its claims, have shipped. (#26)
 
 ## [0.9.0] - 2026-10-04
 
@@ -278,7 +286,8 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 - **There is no transitional `ahmedmerza/logscope-guard` package.** It has been removed from Packagist. To upgrade, `composer remove ahmedmerza/logscope-guard`, `composer require ahmedmerza/watchtower`, then work through the BREAKING entries under Changed.
 
-[Unreleased]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.6.2...v0.7.0
