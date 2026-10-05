@@ -313,6 +313,14 @@ address block mode would have blocked app-wide. A separate line counts those
 it would only have blocked in the detector's scope, who keep the rest of the
 app.
 
+**`failed_logins` and `login_lockouts` can't see who is signed in** — a failed
+login has no user — so their lines carry none, and the shared-IP guard never
+holds them back. For these two the column is **Users seen at IP** instead:
+the distinct signed-in users LogScope saw from the address over `--days`
+(`logscope_users` in `--json`). An address with several is an office or a
+mobile carrier, and a block there hits all of them; put it in
+`never_auto_block` before arming the detector.
+
 This needs a history, so run the detector in `warn` mode for a while first.
 A detector with no reports says why: auto-block is off, its mode is
 `disabled`, it never reached its threshold, or — in `block` mode — its real

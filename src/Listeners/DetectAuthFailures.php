@@ -21,7 +21,8 @@ use Watchtower\Services\AutoBlockService;
  *   fumbling a password, several is someone working through a list.
  *
  * Neither reports a user id to the shared-IP guard, deliberately — see
- * record().
+ * record(). A detector added here belongs in
+ * AutoBlockService::USERLESS_DETECTORS too.
  */
 class DetectAuthFailures
 {

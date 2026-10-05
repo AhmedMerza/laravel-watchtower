@@ -102,13 +102,32 @@ class DetectorHistory
             $byDetector[$detector][$ip] = $offender;
         }
 
+        // The auth detectors' lines name no users, so `user_ids` is empty
+        // whoever was behind the address. Who LogScope saw signed in from it
+        // is the number that says whether a block would hit customers.
+        // One lookup per address, however many of them flagged it.
+        $userless = array_intersect_key($byDetector, array_flip(AutoBlockService::USERLESS_DETECTORS));
+        $ips = [];
+
+        foreach ($userless as $offenders) {
+            $ips += $offenders;
+        }
+
+        $usersAt = self::usersAt($table, array_map('strval', array_keys($ips)), $from, $to);
+
         $result = [];
 
         foreach ($byDetector as $detector => $offenders) {
-            $list = array_map(static function (array $o): array {
+            $countUsers = isset($userless[$detector]);
+
+            $list = array_map(static function (array $o) use ($countUsers, $usersAt): array {
                 $o['user_ids'] = array_map('strval', array_keys($o['user_ids']));
                 $o['first_at'] = Carbon::parse($o['first_at'])->toIso8601String();
                 $o['last_at'] = Carbon::parse($o['last_at'])->toIso8601String();
+
+                if ($countUsers) {
+                    $o['logscope_users'] = $usersAt[$o['ip']] ?? 0;
+                }
 
                 return $o;
             }, array_values($offenders));
@@ -121,6 +140,37 @@ class DetectorHistory
         ksort($result);
 
         return ['detectors' => $result, 'unreadable' => $unreadable];
+    }
+
+    /**
+     * Distinct signed-in users LogScope saw from each address, in one grouped
+     * query per chunk rather than one per address — a botnet can flag
+     * thousands. Unfiltered, like the live guard: the question is who a block
+     * would hit. Addresses with none are absent.
+     *
+     * @param  list<string>  $ips
+     * @return array<string, int>
+     */
+    private static function usersAt(string $table, array $ips, CarbonInterface $from, CarbonInterface $to): array
+    {
+        $counts = [];
+
+        foreach (array_chunk($ips, 500) as $chunk) {
+            $rows = DB::table($table)
+                ->whereIn('ip_address', $chunk)
+                ->whereNotNull('user_id')
+                ->where('occurred_at', '>=', $from)
+                ->where('occurred_at', '<=', $to)
+                ->groupBy('ip_address')
+                ->selectRaw('ip_address, count(distinct user_id) as users')
+                ->get();
+
+            foreach ($rows as $row) {
+                $counts[(string) $row->ip_address] = (int) $row->users;
+            }
+        }
+
+        return $counts;
     }
 
     /**
