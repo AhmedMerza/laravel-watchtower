@@ -9,8 +9,8 @@ namespace Watchtower\Support;
  *
  * `Str::is()` — and so `$request->is()` — loops the pattern list and builds a
  * fresh regex for each entry on every call: preg_quote, a str_replace to turn
- * `*` into `.*`, then its own preg_match. With the seven patterns that ship by
- * default that is seven regex builds and seven matches on every request the
+ * `*` into `.*`, then its own preg_match. With the patterns that ship by
+ * default that is a regex build and a match per pattern on every request the
  * detector middleware sees, matching or not. One anchored alternation answers
  * the same question with one match.
  *

@@ -46,6 +46,14 @@ dataset('probe paths', [
     'phpmyadmin',
     'phpmyadmin/index.php',
     'phpMyAdmin2',
+    'config/database.yml',
+    'config/a/b.yml',
+    'CONFIG/SECRETS.YML',
+    'docker-compose.prod.yml',
+    'docker-composeXyml',
+    'wp-config.php~',
+    '.github/workflows/ci.yml',
+    '.ds_store',
     '',
     '/',
     'index.php',
@@ -119,8 +127,9 @@ it('matches exactly what Str::is did, for each pattern in isolation', function (
     // One pattern at a time, so a disagreement names the pattern rather than
     // being absorbed by another alternative in the group.
     $each = [
-        '/.env', '/.env.*', '/.git/*', '/wp-login.php', '/wp-admin/*',
-        '/xmlrpc.php', '/phpmyadmin*', '*', '', '/a*b', '/*.php',
+        '/.env', '/.env.*', '/.git*', '/.git/*', '/wp-login.php', '/wp-admin/*',
+        '/xmlrpc.php', '/phpmyadmin*', '/config/*.yml', '/docker-compose*.yml',
+        '/wp-config.php*', '/.DS_Store', '*', '', '/a*b', '/*.php',
     ];
 
     foreach ($each as $pattern) {
