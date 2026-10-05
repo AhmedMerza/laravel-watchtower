@@ -8,7 +8,6 @@ use Carbon\CarbonInterface;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Schema;
 use Symfony\Component\Console\Formatter\OutputFormatter;
-use Watchtower\Listeners\DetectAuthFailures;
 use Watchtower\Services\AutoBlockService;
 use Watchtower\Services\DetectorHistory;
 use Watchtower\Services\RuleSimulator;
@@ -249,7 +248,7 @@ class SimulateCommand extends Command
             // The auth detectors never see a user, so their lines would read
             // 0 signed-in users for an office full of customers (#141). For
             // them the count is everyone LogScope saw signed in from there.
-            $userless = in_array($name, DetectAuthFailures::DETECTORS, true);
+            $userless = in_array($name, AutoBlockService::USERLESS_DETECTORS, true);
             $users = static fn (array $o): int => $userless ? (int) ($o['logscope_users'] ?? 0) : count($o['user_ids']);
 
             $this->table(

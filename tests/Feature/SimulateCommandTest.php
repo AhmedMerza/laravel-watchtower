@@ -2,6 +2,9 @@
 
 declare(strict_types=1);
 
+use Illuminate\Auth\Events\Failed;
+use Illuminate\Auth\Events\Lockout;
+use Illuminate\Http\Request;
 use Illuminate\Log\Events\MessageLogged;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Artisan;
@@ -9,6 +12,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
+use Watchtower\Listeners\DetectAuthFailures;
 use Watchtower\Services\AutoBlockService;
 
 beforeEach(function () {
@@ -476,11 +480,11 @@ it('writes nothing while reading detector history, enforced by the database', fu
     $this->artisan('watchtower:simulate')->assertSuccessful();
 });
 
-it('reads back the line the live detector actually writes, not just a hand-built one', function () {
+it('reads back the line the live detector actually writes, not just a hand-built one', function (string $detector, Closure $fire) {
     // The helper above writes the context shape by hand, so a rename on the
     // engine side would leave every test above green. This drives the real
-    // detector and stores its line the way LogScope does — on MessageLogged.
-    onlyDetector('failed_logins', ['count' => 2, 'window_minutes' => 5]);
+    // listener and stores its line the way LogScope does — on MessageLogged.
+    onlyDetector($detector, ['count' => 2, 'window_minutes' => 5]);
 
     Event::listen(MessageLogged::class, function (MessageLogged $log): void {
         if ($log->message === AutoBlockService::WOULD_HAVE_BLOCKED_MESSAGE) {
@@ -492,12 +496,14 @@ it('reads back the line the live detector actually writes, not just a hand-built
         }
     });
 
-    // No user, as DetectAuthFailures records it; the user is a LogScope row.
+    // The listener records no user; the user is a LogScope row.
     logEntry('10.0.0.7', ['user_id' => 7, 'occurred_at' => now()->subHour()]);
 
-    $engine = app(AutoBlockService::class);
-    $engine->record('failed_logins', '10.0.0.7');
-    $engine->record('failed_logins', '10.0.0.7');
+    $request = Request::create('/login', 'POST', server: ['REMOTE_ADDR' => '10.0.0.7']);
+    app()->instance('request', $request);
+    $listener = app(DetectAuthFailures::class);
+    $fire($listener, $request);
+    $fire($listener, $request);
 
     $this->artisan('watchtower:simulate')
         ->assertSuccessful()
@@ -506,17 +512,22 @@ it('reads back the line the live detector actually writes, not just a hand-built
             [['10.0.0.7', 1, '2026-09-21 12:00', '2026-09-21 12:00', 1, 'blocked']],
         )
         ->expectsOutputToContain('1 of these had signed-in users');
-});
+})->with([
+    'failed_logins'  => ['failed_logins', fn (DetectAuthFailures $l) => $l->handleFailed(new Failed('web', null, []))],
+    'login_lockouts' => ['login_lockouts', fn (DetectAuthFailures $l, Request $r) => $l->handleLockout(new Lockout($r))],
+]);
 
-it('counts who LogScope saw at an auth detector\'s address, since its lines name no one (#141)', function () {
-    onlyDetector('failed_logins');
-    wouldHaveBlocked('10.0.0.9', 'failed_logins', 30);
-    wouldHaveBlocked('10.0.0.8', 'failed_logins', 30);
-    // Two customers behind 10.0.0.9, one of them twice; one only before the window.
+it('counts who LogScope saw at an auth detector\'s address, since its lines name no one (#141)', function (string $detector) {
+    onlyDetector($detector);
+    wouldHaveBlocked('10.0.0.9', $detector, 30);
+    wouldHaveBlocked('10.0.0.8', $detector, 30);
+    // Two customers behind 10.0.0.9, one of them twice; one only before the
+    // window and one after it.
     logEntry('10.0.0.9', ['user_id' => 7, 'occurred_at' => now()->subDays(2)]);
     logEntry('10.0.0.9', ['user_id' => 7, 'occurred_at' => now()->subDay()]);
     logEntry('10.0.0.9', ['user_id' => 8, 'occurred_at' => now()->subHour()]);
     logEntry('10.0.0.9', ['user_id' => 9, 'occurred_at' => now()->subDays(8)]);
+    logEntry('10.0.0.9', ['user_id' => 11, 'occurred_at' => now()->addMinute()]);
     logEntry('10.0.0.6', ['user_id' => 10, 'occurred_at' => now()->subHour()]);
 
     $this->artisan('watchtower:simulate')
@@ -535,8 +546,21 @@ it('counts who LogScope saw at an auth detector\'s address, since its lines name
     expect(Artisan::call('watchtower:simulate', ['--json' => true]))->toBe(0);
     $json = json_decode(Artisan::output(), true, flags: JSON_THROW_ON_ERROR);
 
-    expect(array_column($json['detectors']['failed_logins']['offenders'], 'logscope_users', 'ip'))
+    expect(array_column($json['detectors'][$detector]['offenders'], 'logscope_users', 'ip'))
         ->toBe(['10.0.0.8' => 0, '10.0.0.9' => 2]);
+})->with(AutoBlockService::USERLESS_DETECTORS);
+
+it('uses the LogScope count for an auth detector\'s scoped and unrecorded warnings too', function () {
+    onlyDetector('failed_logins');
+    wouldHaveBlocked('10.0.0.9', 'failed_logins', 30, ['in_block_mode' => 'blocked_in_scope']);
+    wouldHaveBlocked('10.0.0.8', 'failed_logins', 30, ['in_block_mode' => null]);
+    logEntry('10.0.0.9', ['user_id' => 7, 'occurred_at' => now()->subHour()]);
+    logEntry('10.0.0.8', ['user_id' => 8, 'occurred_at' => now()->subHour()]);
+
+    $this->artisan('watchtower:simulate')
+        ->assertSuccessful()
+        ->expectsOutputToContain('1 more had signed-in users and would have been blocked in the detector\'s scope')
+        ->expectsOutputToContain('1 of these had signed-in users, reported before v0.11.0');
 });
 
 it('keeps the line\'s own users for detectors that see them', function () {

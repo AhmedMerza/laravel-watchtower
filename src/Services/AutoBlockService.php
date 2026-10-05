@@ -52,6 +52,13 @@ class AutoBlockService
      */
     public const WOULD_HAVE_BLOCKED_MESSAGE = 'Watchtower: would-have-blocked (auto-block did not block)';
 
+    /**
+     * Detectors that never see a signed-in user (DetectAuthFailures), so
+     * their would-have-blocked lines carry no user ids and `watchtower:simulate`
+     * asks LogScope who was behind the address instead (#141).
+     */
+    public const USERLESS_DETECTORS = ['failed_logins', 'login_lockouts'];
+
     public function __construct(
         private readonly BlacklistService $blacklist,
         private readonly HitWindow $hits,

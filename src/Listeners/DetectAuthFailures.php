@@ -21,16 +21,11 @@ use Watchtower\Services\AutoBlockService;
  *   fumbling a password, several is someone working through a list.
  *
  * Neither reports a user id to the shared-IP guard, deliberately — see
- * record().
+ * record(). A detector added here belongs in
+ * AutoBlockService::USERLESS_DETECTORS too.
  */
 class DetectAuthFailures
 {
-    /**
-     * Never see a signed-in user, so their would-have-blocked lines carry no
-     * user ids — `watchtower:simulate` asks LogScope instead (#141).
-     */
-    public const DETECTORS = ['failed_logins', 'login_lockouts'];
-
     public function __construct(private readonly AutoBlockService $autoBlock) {}
 
     public function handleFailed(Failed $event): void
