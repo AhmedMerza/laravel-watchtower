@@ -46,6 +46,7 @@ class InstallCommand extends Command
         $this->line('  <comment>WATCHTOWER_NEVER_BLOCK_IPS=127.0.0.1,::1,your.ip.here</comment>');
         $this->line('  <comment>WATCHTOWER_MASTER_URL=https://master.example.com</comment>  (for cross-env sync)');
         $this->line('  <comment>WATCHTOWER_SYNC_SECRET=a-long-random-secret</comment>');
+        $this->line('  <comment>WATCHTOWER_SYNC_ROLE=satellite</comment>  (master on the master)');
         $this->newLine();
 
         if ($logscopeInstalled) {
