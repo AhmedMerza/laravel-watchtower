@@ -87,6 +87,7 @@ A global middleware checks each request against the cache right after `TrustProx
 | **Escalating durations** | Longer blocks for addresses that come back | [Escalation](docs/auto-block.md#escalating-durations) |
 | **Public blocklists** | Imports Spamhaus DROP or FireHOL level1 daily. Off by default, and never imports private ranges | [Feeds](docs/feeds.md) |
 | **Scoped blocks** | Block an address from some routes, such as login, instead of the whole app | [Scoped Blocks](docs/scoped-blocks.md) |
+| **Firewall importer** | Imports antonioribeiro/firewall's blocks, so switching costs one command | [Migrating](docs/migrating-from-firewall.md) |
 | **Webhook** | Posts every block to a URL, e.g. for Slack or n8n | [Configuration](docs/configuration.md#webhook-notification) |
 
 All docs: **[docs/](docs/README.md)** · [Configuration](docs/configuration.md) · [Artisan commands](docs/commands.md) · [Security notes](docs/security.md)
@@ -107,7 +108,7 @@ Run `php artisan migrate` after every upgrade, then read **[Upgrading](docs/upgr
 
 ## Status
 
-Heading to v1.0. Blocking, sync, the management page and API, and the auto-block engine are in place and tested. Still to come: pushing blocks out to Cloudflare or an nginx deny file, and an importer for `antonioribeiro/firewall` users. See the [roadmap](https://github.com/AhmedMerza/laravel-watchtower/issues/26).
+Heading to v1.0. Blocking, sync, the management page and API, the auto-block engine, block targets (Cloudflare and nginx), public blocklist feeds and the `antonioribeiro/firewall` importer are in place and tested. See the [roadmap](https://github.com/AhmedMerza/laravel-watchtower/issues/26).
 
 ## Security
 

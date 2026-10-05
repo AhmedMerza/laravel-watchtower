@@ -4,6 +4,10 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- `watchtower:import-firewall` imports antonioribeiro/firewall's blocks from its `firewall` table and `config/firewall.php`, with or without the old package installed. It is a dry run unless you pass `--commit`, and running it again changes nothing. Netmask, wildcard and dash ranges become CIDR blocks. The whitelist is printed for `never_block`, and `host:` and `country:` entries are listed as skipped. A permanent block it finds already in place is kept; a temporary or feed block for the same target is replaced, so the imported block can't lapse. `--undo` removes what an import added. See [Migrating from antonioribeiro/firewall](docs/migrating-from-firewall.md). (#29)
+
 ## [0.9.0] - 2026-10-04
 
 **Run the migrations after upgrading.** This release adds two: the `hits`/`last_hit_at` columns and the `feed` block source. Re-publish so they land, then migrate: `php artisan vendor:publish --tag=watchtower-migrations && php artisan migrate`. See [Upgrading](docs/upgrading.md).

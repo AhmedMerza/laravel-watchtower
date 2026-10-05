@@ -13,6 +13,7 @@
 | [Attack-Tool User-Agents](user-agents.md) | Rejecting sqlmap, Nikto and friends, and verifying search bots |
 | [Auto-Block](auto-block.md) | Detectors, log rules, modes, the shared-IP guard, escalation, and backtesting with `watchtower:simulate` |
 | [Scoped Blocks](scoped-blocks.md) | Blocking an address from some routes only |
-| [Artisan Commands](commands.md) | `install`, `sync`, `cleanup`, `simulate`, `reconcile`, `import-feeds` |
+| [Artisan Commands](commands.md) | `install`, `sync`, `cleanup`, `simulate`, `reconcile`, `import-feeds`, `import-firewall` |
+| [Migrating from antonioribeiro/firewall](migrating-from-firewall.md) | Importing its blocks and allowlist, and what replaces its middleware and facade |
 | [Upgrading](upgrading.md) | What to check when you upgrade |
 | [Security Notes](security.md) | Proxies, cache outages, request signing |
