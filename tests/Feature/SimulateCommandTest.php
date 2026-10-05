@@ -431,7 +431,7 @@ it('counts a truncated context instead of dropping it silently', function () {
 
     $this->artisan('watchtower:simulate')
         ->assertSuccessful()
-        ->expectsOutputToContain('1 would-have-blocked line(s) had a context that could not be read');
+        ->expectsOutputToContain('1 would-have-blocked line(s) could not be used');
 });
 
 it('says why an enabled detector has no history', function () {
@@ -503,4 +503,113 @@ it('reads back the line the live detector actually writes, not just a hand-built
             [['10.0.0.7', 1, '2026-09-21 12:00', '2026-09-21 12:00', 1, 'blocked']],
         )
         ->expectsOutputToContain('1 of these had signed-in users');
+});
+
+it('merges an address\'s reports: users, first and last, and each outcome', function () {
+    onlyDetector('response_bursts');
+    // Newest inserted first, so id order is not time order.
+    wouldHaveBlocked('10.0.0.9', 'response_bursts', 30, ['user_ids' => [7, 8]]);
+    wouldHaveBlocked('10.0.0.9', 'response_bursts', 120, ['user_ids' => [8, 9]]);
+    wouldHaveBlocked('10.0.0.9', 'response_bursts', 60, ['in_block_mode' => 'shared IP']);
+
+    $this->artisan('watchtower:simulate')
+        ->assertSuccessful()
+        ->expectsTable(
+            ['IP', 'Reports', 'First', 'Last', 'Signed-in users', 'In block mode'],
+            [['10.0.0.9', 3, '2026-09-21 10:00', '2026-09-21 11:30', 3, 'blocked ×2, shared IP ×1']],
+        )
+        ->expectsOutputToContain('1 of these had signed-in users and block mode would have blocked them app-wide');
+});
+
+it('reports block mode\'s own hold-backs as held, not as lock-outs', function () {
+    onlyDetector('response_bursts', ['mode' => 'block']);
+    wouldHaveBlocked('10.0.0.9', 'response_bursts', 30, ['user_ids' => [7, 8, 9], 'not_blocked_because' => 'shared IP']);
+    wouldHaveBlocked('10.0.0.8', 'response_bursts', 30, ['user_ids' => [7], 'not_blocked_because' => null]);
+
+    $this->artisan('watchtower:simulate')
+        ->assertSuccessful()
+        ->expectsTable(
+            ['IP', 'Reports', 'First', 'Last', 'Signed-in users', 'In block mode'],
+            [
+                ['10.0.0.8', 1, '2026-09-21 11:30', '2026-09-21 11:30', 1, 'held: unknown'],
+                ['10.0.0.9', 1, '2026-09-21 11:30', '2026-09-21 11:30', 3, 'held: shared IP'],
+            ],
+        )
+        ->doesntExpectOutputToContain('locked those people out');
+});
+
+it('says a scoped block would have left signed-in users the rest of the app', function () {
+    onlyDetector('response_bursts');
+    wouldHaveBlocked('10.0.0.9', 'response_bursts', 30, ['user_ids' => [7], 'in_block_mode' => 'blocked_in_scope']);
+
+    $this->artisan('watchtower:simulate')
+        ->assertSuccessful()
+        ->expectsOutputToContain('1 more had signed-in users and would have been blocked in the detector\'s scope')
+        ->doesntExpectOutputToContain('locked those people out');
+});
+
+it('explains an empty history in block mode and in disabled mode', function () {
+    onlyDetector('failed_logins', ['mode' => 'block']);
+
+    $this->artisan('watchtower:simulate')
+        ->assertSuccessful()
+        ->expectsOutputToContain('Detector failed_logins [block]')
+        ->expectsOutputToContain('real blocks are in the blacklist');
+
+    onlyDetector('failed_logins', ['mode' => 'disabled']);
+
+    $this->artisan('watchtower:simulate')
+        ->assertSuccessful()
+        ->expectsOutputToContain('Its mode is `disabled`, so it never runs');
+});
+
+it('truncates a long detector table and keeps every address in --json', function () {
+    onlyDetector('scanner_paths');
+
+    for ($i = 1; $i <= 26; $i++) {
+        wouldHaveBlocked("10.0.1.{$i}", 'scanner_paths', 30);
+    }
+
+    $this->artisan('watchtower:simulate')
+        ->assertSuccessful()
+        ->expectsOutputToContain('… and 1 more. Use --json for the full list.');
+
+    expect(Artisan::call('watchtower:simulate', ['--json' => true]))->toBe(0);
+    $json = json_decode(Artisan::output(), true, flags: JSON_THROW_ON_ERROR);
+
+    expect($json['detectors']['scanner_paths']['offenders'])->toHaveCount(26);
+});
+
+it('emits the detector report in --json', function () {
+    onlyDetector('response_bursts');
+    wouldHaveBlocked('10.0.0.9', 'response_bursts', 30, ['user_ids' => [7]]);
+    logEntry('10.0.0.5', ['level' => 'warning', 'message' => AutoBlockService::WOULD_HAVE_BLOCKED_MESSAGE, 'context' => '{"detec']);
+
+    expect(Artisan::call('watchtower:simulate', ['--json' => true]))->toBe(0);
+    $json = json_decode(Artisan::output(), true, flags: JSON_THROW_ON_ERROR);
+
+    expect($json['unreadable_detector_rows'])->toBe(1)
+        ->and($json['detectors']['response_bursts'])->toMatchArray(['enabled' => true, 'mode' => 'warn'])
+        ->and($json['detectors']['response_bursts']['offenders'])->toBe([[
+            'ip'       => '10.0.0.9',
+            'reports'  => 1,
+            'first_at' => '2026-09-21T11:30:00+00:00',
+            'last_at'  => '2026-09-21T11:30:00+00:00',
+            'user_ids' => ['7'],
+            'outcomes' => ['blocked' => 1],
+        ]]);
+});
+
+it('does not trust a forged line: unknown detectors and non-addresses are set aside, markup is printed as text', function () {
+    // The log table is shared; anything can log this message.
+    onlyDetector('response_bursts');
+    wouldHaveBlocked('10.0.0.9', 'made_up', 30);
+    wouldHaveBlocked('not-an-ip', 'response_bursts', 30);
+    wouldHaveBlocked('10.0.0.9', 'response_bursts', 30, ['in_block_mode' => '<error>clean</error>', 'user_ids' => [[1]]]);
+
+    $this->artisan('watchtower:simulate')
+        ->assertSuccessful()
+        ->expectsOutputToContain('<error>clean</error>')
+        ->expectsOutputToContain('2 would-have-blocked line(s) could not be used')
+        ->doesntExpectOutputToContain('made_up');
 });

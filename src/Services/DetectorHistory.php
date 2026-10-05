@@ -7,6 +7,7 @@ namespace Watchtower\Services;
 use Carbon\CarbonInterface;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
+use Watchtower\Support\KeysetStream;
 
 /**
  * What the real-time detectors reported while they ran in `warn` mode.
@@ -30,13 +31,10 @@ class DetectorHistory
     /** The outcome of a warn-mode line written before v0.11.0 recorded one. */
     public const NOT_RECORDED = 'not recorded';
 
-    /** Rows read per page. */
-    private const CHUNK = 1000;
-
     /**
      * Offenders per detector, busiest first, plus how many matching rows
-     * had a context that didn't decode — LogScope truncates large ones, and
-     * a report that silently dropped them would undercount.
+     * couldn't be used — a context LogScope cut short, or one no detector
+     * wrote — since a report that silently dropped them would undercount.
      *
      * @return array{detectors: array<string, list<array<string, mixed>>>, unreadable: int}
      */
@@ -46,33 +44,38 @@ class DetectorHistory
         $byDetector = [];
         $unreadable = 0;
 
-        // (level, occurred_at) is indexed in LogScope's schema; the message
-        // match then only runs over the warnings in range.
-        $rows = DB::table($table)
-            ->select(['id', 'context', 'occurred_at'])
-            ->where('level', 'warning')
-            ->where('message', AutoBlockService::WOULD_HAVE_BLOCKED_MESSAGE)
-            ->whereBetween('occurred_at', [$from, $to])
-            ->lazyById(self::CHUNK, 'id');
+        // Only names the engine could have run: the log table is shared, and
+        // anything can log this message with a context of its choosing.
+        $known = array_keys((array) config('watchtower.auto_block.detectors', []));
 
-        foreach ($rows as $row) {
+        // The (level, occurred_at) index serves the range; the message match
+        // then only runs over the warnings inside it.
+        $query = DB::table($table)
+            ->where('level', 'warning')
+            ->where('message', AutoBlockService::WOULD_HAVE_BLOCKED_MESSAGE);
+
+        foreach (KeysetStream::rows($query, $from, $to, ['context']) as $row) {
             $context = is_string($row->context) ? json_decode($row->context, true) : null;
 
-            if (! is_array($context)) {
+            // The log rules write the same line keyed by 'rule'; those are
+            // replayed properly by RuleSimulator and don't belong here.
+            if (is_array($context) && ! array_key_exists('detector', $context)) {
+                continue;
+            }
+
+            if (! is_array($context)
+                || ! in_array($context['detector'], $known, true)
+                || ! is_string($context['ip'] ?? null)
+                || filter_var($context['ip'], FILTER_VALIDATE_IP) === false) {
                 $unreadable++;
 
                 continue;
             }
 
-            // The log rules write the same line keyed by 'rule'; those are
-            // replayed properly by RuleSimulator and don't belong here.
-            if (! is_string($context['detector'] ?? null) || ! is_string($context['ip'] ?? null)) {
-                continue;
-            }
-
             $detector = $context['detector'];
             $ip = $context['ip'];
-            $at = Carbon::parse($row->occurred_at)->toIso8601String();
+            // Parsed once per address below rather than once per row.
+            $at = (string) $row->occurred_at;
 
             $offender = $byDetector[$detector][$ip] ?? [
                 'ip'       => $ip,
@@ -83,12 +86,14 @@ class DetectorHistory
                 'outcomes' => [],
             ];
 
+            // Rows arrive oldest first, so the first one seen stays first.
             $offender['reports']++;
-            $offender['first_at'] = min($offender['first_at'], $at);
-            $offender['last_at'] = max($offender['last_at'], $at);
+            $offender['last_at'] = $at;
 
             foreach ((array) ($context['user_ids'] ?? []) as $id) {
-                $offender['user_ids'][(string) $id] = true;
+                if (is_int($id) || is_string($id)) {
+                    $offender['user_ids'][(string) $id] = true;
+                }
             }
 
             $outcome = self::outcome($context);
@@ -101,7 +106,9 @@ class DetectorHistory
 
         foreach ($byDetector as $detector => $offenders) {
             $list = array_map(static function (array $o): array {
-                $o['user_ids'] = array_keys($o['user_ids']);
+                $o['user_ids'] = array_map('strval', array_keys($o['user_ids']));
+                $o['first_at'] = Carbon::parse($o['first_at'])->toIso8601String();
+                $o['last_at'] = Carbon::parse($o['last_at'])->toIso8601String();
 
                 return $o;
             }, array_values($offenders));
@@ -130,10 +137,10 @@ class DetectorHistory
      */
     private static function outcome(array $context): string
     {
-        $because = (string) ($context['not_blocked_because'] ?? 'unknown');
+        $because = is_string($context['not_blocked_because'] ?? null) ? $context['not_blocked_because'] : 'unknown';
 
         if ($because === 'warn mode') {
-            return (string) ($context['in_block_mode'] ?? self::NOT_RECORDED);
+            return is_string($context['in_block_mode'] ?? null) ? $context['in_block_mode'] : self::NOT_RECORDED;
         }
 
         return 'held: '.$because;

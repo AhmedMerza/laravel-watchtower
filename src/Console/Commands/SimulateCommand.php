@@ -7,6 +7,7 @@ namespace Watchtower\Console\Commands;
 use Carbon\CarbonInterface;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Schema;
+use Symfony\Component\Console\Formatter\OutputFormatter;
 use Watchtower\Services\AutoBlockService;
 use Watchtower\Services\DetectorHistory;
 use Watchtower\Services\RuleSimulator;
@@ -236,6 +237,7 @@ class SimulateCommand extends Command
                 $this->line('  No would-have-blocked reports.');
                 $this->line(match (true) {
                     ! $engineOn => '  auto_block.enabled is off, so no detector has run. Switch it on with mode `warn` to collect a history.',
+                    $detector['mode'] === 'disabled' => '  Its mode is `disabled`, so it never runs. Set it to `warn` to collect a history.',
                     $detector['mode'] === 'block' => '  In block mode its real blocks are in the blacklist, not here — this only lists what a guard held back.',
                     default => '  Either it never reached its threshold, or LogScope isn\'t capturing `watchtower.log_channel`.',
                 });
@@ -277,6 +279,18 @@ class SimulateCommand extends Command
                 ));
             }
 
+            $scoped = count(array_filter(
+                $offenders,
+                static fn (array $o): bool => $o['user_ids'] !== [] && ! isset($o['outcomes']['blocked']) && isset($o['outcomes']['blocked_in_scope']),
+            ));
+
+            if ($scoped > 0) {
+                $this->warn(sprintf(
+                    '  %d more had signed-in users and would have been blocked in the detector\'s scope — those people would have kept the rest of the app.',
+                    $scoped,
+                ));
+            }
+
             $unknown = count(array_filter(
                 $offenders,
                 static fn (array $o): bool => $o['user_ids'] !== [] && isset($o['outcomes'][DetectorHistory::NOT_RECORDED]),
@@ -293,7 +307,7 @@ class SimulateCommand extends Command
         if ($unreadable > 0) {
             $this->newLine();
             $this->warn(sprintf(
-                '%d would-have-blocked line(s) had a context that could not be read (LogScope truncates large ones), so they are not counted above.',
+                '%d would-have-blocked line(s) could not be used — cut short by LogScope, or not written by a configured detector — so they are not counted above.',
                 $unreadable,
             ));
         }
@@ -306,17 +320,19 @@ class SimulateCommand extends Command
      */
     private static function outcomeCell(array $outcomes): string
     {
-        if (count($outcomes) === 1) {
-            return (string) array_key_first($outcomes);
-        }
-
         arsort($outcomes);
 
-        return implode(', ', array_map(
-            static fn (string $outcome, int $n): string => "{$outcome} ×{$n}",
+        // Outcomes are read out of a shared log table, so they are printed
+        // as text: no control bytes for the terminal, no tags for Console.
+        $cells = array_map(
+            static fn (string|int $outcome, int $n): string => OutputFormatter::escape(
+                (string) preg_replace('/[\x00-\x1F\x7F]/u', '', (string) $outcome),
+            ).(count($outcomes) > 1 ? " ×{$n}" : ''),
             array_keys($outcomes),
             $outcomes,
-        ));
+        );
+
+        return implode(', ', $cells);
     }
 
     /**

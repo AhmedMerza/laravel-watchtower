@@ -9,6 +9,7 @@ use Illuminate\Database\Query\Builder;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Watchtower\Support\BlockScope;
+use Watchtower\Support\KeysetStream;
 use Watchtower\Support\NeverBlockList;
 
 /**
@@ -60,9 +61,6 @@ use Watchtower\Support\NeverBlockList;
  */
 final class RuleSimulator
 {
-    /** Rows per keyset page while streaming one address's history. */
-    private const CHUNK = 1000;
-
     /** The engine's scheduler tick: how soon a held-back address is looked at again. */
     private const TICK_SECONDS = 60;
 
@@ -349,8 +347,8 @@ final class RuleSimulator
         $inWindow = new \SplQueue;
         $users = [];
         $usersAt = function (int $tick) use (&$signedIn, $inWindow, &$users, $table, $ip, $to, $windowSeconds, $moment): int {
-            $signedIn ??= $this->stream(
-                DB::table($table)->whereNotNull('user_id'), $ip, $moment($tick - $windowSeconds), $to, ['user_id'],
+            $signedIn ??= KeysetStream::rows(
+                DB::table($table)->whereNotNull('user_id')->where('ip_address', $ip), $moment($tick - $windowSeconds), $to, ['user_id'],
             );
 
             for (; $signedIn->valid(); $signedIn->next()) {
@@ -380,7 +378,7 @@ final class RuleSimulator
         // row — a held-back address re-checked until its window drains —
         // run through the same loop as the ones between rows.
         $rows = (function () use ($table, $level, $messageContains, $ip, $from, $to): \Generator {
-            foreach ($this->stream($this->matching($table, $level, $messageContains), $ip, $from, $to) as $row) {
+            foreach (KeysetStream::rows($this->matching($table, $level, $messageContains)->where('ip_address', $ip), $from, $to) as $row) {
                 yield Carbon::parse($row->occurred_at);
             }
 
@@ -458,65 +456,6 @@ final class RuleSimulator
             'warnings' => $warnings,
             'span'     => $firstAt === null || $lastAt === null ? null : [$moment($firstAt), $moment($lastAt)],
         ];
-    }
-
-    /**
-     * One address's rows from `$query`, oldest first, a page at a time.
-     *
-     * Keyset rather than `offset`, and on `(occurred_at, id)` rather than
-     * `occurred_at` alone: log rows share a timestamp constantly — a burst
-     * is the entire subject of this command — and a keyset on a non-unique
-     * column either repeats rows or skips them at every page boundary. `id`
-     * is a ULID, so it breaks the tie in insertion order and the pair is
-     * unique.
-     *
-     * @param  list<string>  $columns
-     * @return \Generator<int, \stdClass>
-     */
-    private function stream(
-        Builder $query,
-        string $ip,
-        CarbonInterface $from,
-        CarbonInterface $to,
-        array $columns = [],
-    ): \Generator {
-        $lastAt = null;
-        $lastId = null;
-
-        while (true) {
-            $page = (clone $query)
-                ->where('ip_address', $ip)
-                ->where('occurred_at', '>=', $from)
-                ->where('occurred_at', '<=', $to)
-                ->orderBy('occurred_at')
-                ->orderBy('id')
-                ->limit(self::CHUNK);
-
-            if ($lastAt !== null) {
-                $page->where(function (Builder $q) use ($lastAt, $lastId): void {
-                    $q->where('occurred_at', '>', $lastAt)
-                        ->orWhere(fn (Builder $tie): Builder => $tie
-                            ->where('occurred_at', '=', $lastAt)
-                            ->where('id', '>', $lastId));
-                });
-            }
-
-            $rows = $page->get(['id', 'occurred_at', ...$columns]);
-
-            if ($rows->isEmpty()) {
-                return;
-            }
-
-            yield from $rows;
-
-            $last = $rows->last();
-            $lastAt = $last->occurred_at;
-            $lastId = $last->id;
-
-            if ($rows->count() < self::CHUNK) {
-                return;
-            }
-        }
     }
 
     /**

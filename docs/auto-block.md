@@ -309,12 +309,17 @@ engine works out at the time: `blocked`, `blocked_in_scope`, `shared IP`
 or `not recorded` for a line written before v0.11.0, which didn't record it.
 Those are flagged as possible lock-outs rather than guessed either way. The
 warning line is the one to read before arming: signed-in people behind an
-address block mode would have blocked app-wide.
+address block mode would have blocked app-wide. A separate line counts those
+it would only have blocked in the detector's scope, who keep the rest of the
+app.
 
 This needs a history, so run the detector in `warn` mode for a while first.
-A detector with no reports says why: auto-block is off, it never reached its
-threshold, or — in `block` mode — its real blocks are in the blacklist and
-only the ones a guard held back are listed here. The lines only reach
+A detector with no reports says why: auto-block is off, its mode is
+`disabled`, it never reached its threshold, or — in `block` mode — its real
+blocks are in the blacklist and only the ones a guard held back are listed
+here. The log table is shared, so a line naming a detector that isn't
+configured, or an address that isn't one, is set aside and counted rather
+than reported. The lines only reach
 LogScope if it captures `watchtower.log_channel` (its default `all` capture
 does). `--rule` narrows the report to one rule and leaves the detectors out.
 
