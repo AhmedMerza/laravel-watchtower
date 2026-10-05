@@ -431,10 +431,12 @@ return [
     |   mode           - (optional) override the global mode for this
     |                    detector only.
     |   shared_ip_user_threshold - (optional) override the global one for
-    |                    this detector. Only response_bursts and
-    |                    bad_user_agent ever see a signed-in user: the auth
-    |                    detectors count none (below), and scanner_paths
-    |                    blocks on the first request.
+    |                    this detector. Every detector but the two auth ones
+    |                    (below) counts the signed-in user of the request it
+    |                    sees — scanner_paths included, at its count of 1.
+    |                    ⚠️ So a threshold of 1 on scanner_paths, or a global
+    |                    1, lets a signed-in probe for /.env through. Set 1
+    |                    per detector, where a signed-in signal is innocent.
     |
     | In warn mode, each would-have-blocked line carries `in_block_mode`:
     | what block mode would have done with it — 'blocked',

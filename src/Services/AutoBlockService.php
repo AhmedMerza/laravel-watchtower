@@ -368,9 +368,11 @@ class AutoBlockService
      * immunity bought once. docs/auto-block.md
      * is explicit that this guard is not a control an adversary respects;
      * that is a reason to leave it re-measured, not to make it stickier.
-     * It also needs no hold: it cannot fire at `count => 1`, where at
-     * most the current request's own user is known, so `scanner_paths` never
-     * reaches it.
+     * It also needs no hold at a threshold of 2 or more: it cannot fire at
+     * `count => 1`, where at most the current request's own user is known,
+     * so `scanner_paths` never reaches it. At a threshold of 1 it does, on
+     * every signed-in probe — which is why 1 belongs on a detector whose
+     * signed-in signals are innocent, not on scanner_paths or globally.
      *
      * The flat duration, never the escalated one: escalatedMinutes() is
      * only consulted past every hold-back, because a near miss is not an

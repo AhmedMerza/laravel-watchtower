@@ -13,6 +13,7 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 ### Changed
 
+- **Warn mode holds a near miss the way block mode would.** A warn-mode decision used to hold its whole IPv6 prefix for `block_duration_minutes`, whatever the guards said. One that block mode would hold back as a shared IP is now re-measured and logged on each crossing. One a `never_*` list would refuse holds only the listed address. Expect more warn-mode lines for signed-in `response_bursts` traffic, matching what block mode and `watchtower:simulate` report ([#121](https://github.com/AhmedMerza/laravel-watchtower/issues/121)).
 - **`response_bursts` no longer counts 429 by default,** and ships with `shared_ip_user_threshold => 1`. A 429 is the app's own rate limiter already handling the client, and a threshold below the limiter's let throttling feed a security block. In production data, every signed-in address that tripped the detector was a customer and every scanner had no user. Add `429` back only with `count` above your throttle ([#121](https://github.com/AhmedMerza/laravel-watchtower/issues/121)).
 
 ## [0.10.1] - 2026-10-05

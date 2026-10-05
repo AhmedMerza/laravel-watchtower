@@ -505,7 +505,22 @@ it('predicts in warn mode exactly what block mode then does', function (array $c
         config()->set($key, $value);
     }
 
-    $lines = captureWouldHaveBlocked();
+    // Warnings and debug lines both, and any other log call is harmless:
+    // block mode's never_block outcome is a debug line, and an exception
+    // swallowed by record()'s fail-open must not pass for one.
+    $lines = new ArrayObject;
+    $debug = new ArrayObject;
+    $logChannel = Mockery::mock()->shouldIgnoreMissing();
+    $logChannel->shouldReceive('warning')->andReturnUsing(function (string $message, array $context = []) use ($lines): void {
+        if (($context['would_have_blocked'] ?? false) === true) {
+            $lines[] = $context;
+        }
+    });
+    $logChannel->shouldReceive('debug')->andReturnUsing(function (string $message) use ($debug): void {
+        $debug[] = $message;
+    });
+    $logChannel->shouldReceive('error')->never();
+    Log::shouldReceive('channel')->andReturn($logChannel);
 
     config()->set('watchtower.auto_block.mode', 'warn');
     foreach (range(1, 3) as $i) {
@@ -525,8 +540,9 @@ it('predicts in warn mode exactly what block mode then does', function (array $c
         $row !== null => $row->scope === BlockScope::GLOBAL ? 'blocked' : 'blocked_in_scope',
         count($lines) > $warned => $lines[count($lines) - 1]['not_blocked_because'],
         // The one hold-back block mode reports at debug, not as a
-        // would-have-blocked line: nothing written, nothing logged.
-        default => 'never_block',
+        // would-have-blocked line.
+        in_array('Watchtower: auto-block skipped for whitelisted IP', $debug->getArrayCopy(), true) => 'never_block',
+        default => 'nothing happened',
     };
 
     expect($lines[0]['in_block_mode'])->toBe($expected)
