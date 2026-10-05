@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Watchtower\Support;
 
 use Watchtower\Contracts\BlockTarget;
+use Watchtower\Enums\SyncRole;
 use Watchtower\Targets\CloudflareTarget;
 use Watchtower\Targets\LaravelTarget;
 use Watchtower\Targets\NginxFileTarget;
@@ -33,7 +34,9 @@ final class BlockTargetRegistry
         // reportable state for a vanilla single-environment install — and
         // what keeps `watchtower:reconcile` from claiming it "reconciled"
         // a target that was always going to no-op.
-        if (config('watchtower.sync.master_url')) {
+        //
+        // Not on the master either: there it would push to itself (#36).
+        if (config('watchtower.sync.master_url') && SyncRole::current() !== SyncRole::Master) {
             $targets['laravel'] = app(LaravelTarget::class);
         }
 

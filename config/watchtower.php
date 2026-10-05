@@ -670,6 +670,14 @@ return [
     | same long random value on every environment, and treat it like a
     | password: anyone holding it can block any IP everywhere.
     |
+    | 'role' - 'master' or 'satellite' (#36). The secret can't say which end
+    |                this is, because every environment holds it. A
+    |                satellite serves no sync routes; the master doesn't
+    |                push to itself and refuses watchtower:sync. Left unset,
+    |                an environment does both, as it did before this. An
+    |                unrecognised value counts as 'satellite', and
+    |                watchtower:sync reports it.
+    |
     | 'timestamp_tolerance' - how far a request's signed timestamp may sit
     |                from the master's clock, in seconds. Bounds the window in
     |                which a captured request can be replayed, so keep it
@@ -692,6 +700,7 @@ return [
     'sync' => [
         'master_url'          => env('WATCHTOWER_MASTER_URL', env('GUARD_MASTER_URL')),
         'secret'              => env('WATCHTOWER_SYNC_SECRET', env('GUARD_SYNC_SECRET')),
+        'role'                => env('WATCHTOWER_SYNC_ROLE'),
         'timestamp_tolerance' => (int) env('WATCHTOWER_SYNC_TOLERANCE', 300),
         'queue'               => env('WATCHTOWER_SYNC_QUEUE', env('WATCHTOWER_NOTIFICATION_QUEUE', env('GUARD_NOTIFICATION_QUEUE', 'default'))),
     ],

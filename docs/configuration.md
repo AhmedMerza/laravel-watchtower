@@ -26,6 +26,7 @@ WATCHTOWER_ROUTE_PREFIX=watchtower
 # Cross-environment sync
 WATCHTOWER_MASTER_URL=https://your-master-app.com
 WATCHTOWER_SYNC_SECRET=a-long-random-secret
+WATCHTOWER_SYNC_ROLE=satellite  # master on the master; see docs/sync.md
 WATCHTOWER_SYNC_TOLERANCE=300   # seconds a signed request stays valid
 WATCHTOWER_SYNC_QUEUE=          # queue the push-to-master job runs on;
                                 # falls back to WATCHTOWER_NOTIFICATION_QUEUE, then 'default'

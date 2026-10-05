@@ -8,6 +8,7 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 ### Added
 
+- **`WATCHTOWER_SYNC_ROLE=master|satellite` says which end of sync an environment is.** Every environment holds the sync secret, so the secret alone couldn't tell them apart, and satellites served the master's sync routes too. A satellite now serves neither route, even from a route cache built on the master. The master no longer pushes its own blocks to itself and refuses `watchtower:sync`. Left unset, an environment behaves as before. A satellite that gets HTTP 404 from the master now says the master isn't serving the routes and what to check. See [Sync](docs/sync.md) ([#36](https://github.com/AhmedMerza/laravel-watchtower/issues/36)).
 - **A warn-mode near miss says what block mode would have done.** Every would-have-blocked line in warn mode now carries `in_block_mode`: `blocked`, `blocked_in_scope`, or the hold-back that would have stopped it, spelled as block mode's `not_blocked_because` spells it (`shared IP`, `never_block`, `never_auto_block`). Before, the mode was checked ahead of every guard, so all of them read `warn mode`, and nobody could tell which ones arming would actually block ([#121](https://github.com/AhmedMerza/laravel-watchtower/issues/121)).
 - **A detector or rule can set its own `shared_ip_user_threshold`,** which wins over the global one. `watchtower:simulate` judges each rule by its own value and reports it in `--json` ([#121](https://github.com/AhmedMerza/laravel-watchtower/issues/121)).
 
