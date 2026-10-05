@@ -35,7 +35,8 @@ php artisan watchtower:import-firewall
 php artisan watchtower:import-firewall --commit
 php artisan watchtower:import-firewall --undo --commit   # remove what an import added
 
-# Backtest the auto-block rules against the log history you already have.
+# Backtest the auto-block rules against the log history you already have,
+# and report what the detectors saw in warn mode.
 # Read-only — it writes nothing, whatever mode the rules are in.
 php artisan watchtower:simulate --days=7
 php artisan watchtower:simulate --rule=0 --json

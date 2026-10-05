@@ -4,9 +4,11 @@ declare(strict_types=1);
 
 namespace Watchtower\Console\Commands;
 
+use Carbon\CarbonInterface;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Schema;
 use Watchtower\Services\AutoBlockService;
+use Watchtower\Services\DetectorHistory;
 use Watchtower\Services\RuleSimulator;
 
 /**
@@ -19,8 +21,13 @@ use Watchtower\Services\RuleSimulator;
  * Laravel firewall package can do this, for the plain reason that none of
  * them has the data.
  *
- * READ-ONLY, and structurally so — this talks to RuleSimulator, which has no
- * path to BlacklistService and issues nothing but SELECTs. A backtest that
+ * The real-time detectors can't be replayed — they count signals LogScope
+ * never stored — so for them this reports what they observed in warn mode
+ * instead, and says so (#123). See DetectorHistory.
+ *
+ * READ-ONLY, and structurally so — this talks to RuleSimulator and
+ * DetectorHistory, which have no path to BlacklistService and issue nothing
+ * but SELECTs. A backtest that
  * could block somebody would be a trap, since the reason to run it is that
  * you don't yet trust the rule.
  */
@@ -34,13 +41,15 @@ class SimulateCommand extends Command
 
     protected $signature = 'watchtower:simulate
                             {--days=7 : How far back to replay}
-                            {--rule= : Replay only this rule index}
+                            {--rule= : Replay only this rule index, and skip the detectors}
                             {--json : Emit machine-readable JSON instead of tables}';
 
-    protected $description = 'Backtest the auto-block rules against LogScope history. Writes nothing.';
+    protected $description = 'Backtest the auto-block rules, and report what the detectors saw, from LogScope history. Writes nothing.';
 
-    public function __construct(private readonly RuleSimulator $simulator)
-    {
+    public function __construct(
+        private readonly RuleSimulator $simulator,
+        private readonly DetectorHistory $history,
+    ) {
         parent::__construct();
     }
 
@@ -77,16 +86,6 @@ class SimulateCommand extends Command
             return self::FAILURE;
         }
 
-        if ($rules === []) {
-            $this->warn('No auto-block rules are configured, so there is nothing to backtest.');
-            $this->line('Rules live under `auto_block.rules` in config/watchtower.php.');
-
-            // Not a failure: an app that only runs the real-time detectors
-            // has no rules by design, and a scripted caller shouldn't have
-            // to treat that as an error.
-            return self::SUCCESS;
-        }
-
         $to = now();
         $from = $to->copy()->subDays($days);
         $duration = (int) config('watchtower.auto_block.block_duration_minutes', 60);
@@ -101,6 +100,20 @@ class SimulateCommand extends Command
         // crash the command. AutoBlockService::normaliseMode() has always
         // been total for the same reason.
         $globalMode = $this->mode(config('watchtower.auto_block.mode', 'warn')) ?? 'warn';
+
+        // --rule asks about one rule; the detectors would be noise around it.
+        $detectors = $this->option('rule') === null || $this->option('rule') === ''
+            ? $this->detectors($table, $from, $to, $globalMode)
+            : ['detectors' => [], 'unreadable' => 0];
+
+        if ($rules === [] && $detectors['detectors'] === []) {
+            $this->warn('No auto-block rules or detectors are configured, so there is nothing to backtest.');
+            $this->line('Rules live under `auto_block.rules` and detectors under `auto_block.detectors` in config/watchtower.php.');
+
+            // Not a failure: a scripted caller shouldn't have to treat an
+            // app with auto-block switched off as an error.
+            return self::SUCCESS;
+        }
 
         $results = [];
 
@@ -135,14 +148,175 @@ class SimulateCommand extends Command
                 'block_duration_minutes'   => $duration,
                 'shared_ip_user_threshold' => $sharedIpThreshold,
                 'rules'                    => $results,
+                'detectors'                => $detectors['detectors'],
+                'unreadable_detector_rows' => $detectors['unreadable'],
             ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
 
             return self::SUCCESS;
         }
 
-        $this->report($results, $from->toDateTimeString(), $to->toDateTimeString(), $days, $sharedIpThreshold);
+        if ($results !== []) {
+            $this->report($results, $from->toDateTimeString(), $to->toDateTimeString(), $days, $sharedIpThreshold);
+        }
+
+        if ($detectors['detectors'] !== []) {
+            $this->reportDetectors($detectors['detectors'], $detectors['unreadable'], $days, $results !== []);
+        }
 
         return self::SUCCESS;
+    }
+
+    /**
+     * Every detector that is enabled now, plus any that left reports in the
+     * window and has since been switched off — a report about last week
+     * shouldn't hide what last week's config did.
+     *
+     * @return array{detectors: array<string, array<string, mixed>>, unreadable: int}
+     */
+    private function detectors(string $table, CarbonInterface $from, CarbonInterface $to, string $globalMode): array
+    {
+        $observed = $this->history->observed($table, $from, $to);
+
+        /** @var array<string, mixed> $configured */
+        $configured = (array) config('watchtower.auto_block.detectors', []);
+
+        $names = array_keys(array_filter(
+            $configured,
+            static fn (mixed $settings): bool => is_array($settings) && ($settings['enabled'] ?? false),
+        ));
+        $names = array_values(array_unique([...$names, ...array_keys($observed['detectors'])]));
+        sort($names);
+
+        $detectors = [];
+
+        foreach ($names as $name) {
+            $settings = (array) ($configured[$name] ?? []);
+
+            $detectors[$name] = [
+                'enabled'   => (bool) ($settings['enabled'] ?? false),
+                'mode'      => $this->mode($settings['mode'] ?? null) ?? $globalMode,
+                'offenders' => $observed['detectors'][$name] ?? [],
+            ];
+        }
+
+        return ['detectors' => $detectors, 'unreadable' => $observed['unreadable']];
+    }
+
+    /**
+     * @param  array<string, array<string, mixed>>  $detectors
+     */
+    private function reportDetectors(array $detectors, int $unreadable, int $days, bool $afterRules): void
+    {
+        if ($afterRules) {
+            $this->newLine();
+        }
+
+        $this->info(sprintf('Detectors over %d day(s) — observed, not simulated.', $days));
+        $this->line('They count failed logins, lockouts, response statuses, request paths and User-Agents,');
+        $this->line('none of which LogScope stores, so they can\'t be replayed. This is what they reported');
+        $this->line('live: one would-have-blocked line per block they were held back from.');
+
+        // Listed anyway, as the rules are replayed anyway: the report is how
+        // you decide whether to switch it on. It just can't have history.
+        $engineOn = (bool) config('watchtower.auto_block.enabled', false);
+
+        foreach ($detectors as $name => $detector) {
+            $this->newLine();
+            $this->line(sprintf(
+                'Detector %s [%s]%s',
+                $name,
+                $detector['mode'],
+                $detector['enabled'] ? '' : ' — switched off now',
+            ));
+
+            /** @var list<array<string, mixed>> $offenders */
+            $offenders = $detector['offenders'];
+
+            if ($offenders === []) {
+                $this->line('  No would-have-blocked reports.');
+                $this->line(match (true) {
+                    ! $engineOn => '  auto_block.enabled is off, so no detector has run. Switch it on with mode `warn` to collect a history.',
+                    $detector['mode'] === 'block' => '  In block mode its real blocks are in the blacklist, not here — this only lists what a guard held back.',
+                    default => '  Either it never reached its threshold, or LogScope isn\'t capturing `watchtower.log_channel`.',
+                });
+
+                continue;
+            }
+
+            $this->table(
+                ['IP', 'Reports', 'First', 'Last', 'Signed-in users', 'In block mode'],
+                array_map(static fn (array $o): array => [
+                    $o['ip'],
+                    $o['reports'],
+                    self::minutePrecision($o['first_at']),
+                    self::minutePrecision($o['last_at']),
+                    count($o['user_ids']),
+                    self::outcomeCell($o['outcomes']),
+                ], array_slice($offenders, 0, self::MAX_ROWS)),
+            );
+
+            if (count($offenders) > self::MAX_ROWS) {
+                $this->line(sprintf(
+                    '  … and %d more. Use --json for the full list.',
+                    count($offenders) - self::MAX_ROWS,
+                ));
+            }
+
+            // The number that decides whether a detector is safe to arm:
+            // people who were signed in, behind an address block mode would
+            // have blocked app-wide.
+            $customers = count(array_filter(
+                $offenders,
+                static fn (array $o): bool => $o['user_ids'] !== [] && isset($o['outcomes']['blocked']),
+            ));
+
+            if ($customers > 0) {
+                $this->warn(sprintf(
+                    '  %d of these had signed-in users and block mode would have blocked them app-wide — arming this detector would have locked those people out.',
+                    $customers,
+                ));
+            }
+
+            $unknown = count(array_filter(
+                $offenders,
+                static fn (array $o): bool => $o['user_ids'] !== [] && isset($o['outcomes'][DetectorHistory::NOT_RECORDED]),
+            ));
+
+            if ($unknown > 0) {
+                $this->warn(sprintf(
+                    '  %d of these had signed-in users, reported before v0.11.0 started recording what block mode would do — read them as possible lock-outs.',
+                    $unknown,
+                ));
+            }
+        }
+
+        if ($unreadable > 0) {
+            $this->newLine();
+            $this->warn(sprintf(
+                '%d would-have-blocked line(s) had a context that could not be read (LogScope truncates large ones), so they are not counted above.',
+                $unreadable,
+            ));
+        }
+    }
+
+    /**
+     * `blocked` when every report agrees, else each outcome with its count.
+     *
+     * @param  array<string, int>  $outcomes
+     */
+    private static function outcomeCell(array $outcomes): string
+    {
+        if (count($outcomes) === 1) {
+            return (string) array_key_first($outcomes);
+        }
+
+        arsort($outcomes);
+
+        return implode(', ', array_map(
+            static fn (string $outcome, int $n): string => "{$outcome} ×{$n}",
+            array_keys($outcomes),
+            $outcomes,
+        ));
     }
 
     /**

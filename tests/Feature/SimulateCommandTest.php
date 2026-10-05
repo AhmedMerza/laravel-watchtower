@@ -2,11 +2,14 @@
 
 declare(strict_types=1);
 
+use Illuminate\Log\Events\MessageLogged;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
+use Watchtower\Services\AutoBlockService;
 
 beforeEach(function () {
     Carbon::setTestNow('2026-09-21 12:00:00');
@@ -155,14 +158,14 @@ it('refuses a --days that is not a positive whole number', function () {
     $this->artisan('watchtower:simulate --days=lots')->assertFailed();
 });
 
-it('succeeds quietly when no rules are configured', function () {
+it('succeeds quietly when no rules or detectors are configured', function () {
     config()->set('watchtower.auto_block.rules', []);
 
-    // Not a failure: an app running only the real-time detectors has no
-    // rules by design, and a scripted caller shouldn't treat that as broken.
+    // Not a failure: a scripted caller shouldn't treat an app with
+    // auto-block switched off as broken.
     $this->artisan('watchtower:simulate')
         ->assertSuccessful()
-        ->expectsOutputToContain('No auto-block rules are configured');
+        ->expectsOutputToContain('No auto-block rules or detectors are configured');
 });
 
 it('explains itself when the log table is missing', function () {
@@ -327,4 +330,177 @@ it('reports each rule\'s user threshold in --json', function () {
     $json = json_decode(Artisan::output(), true, flags: JSON_THROW_ON_ERROR);
 
     expect(array_column($json['rules'], 'shared_ip_user_threshold'))->toBe([1, 3]);
+});
+
+/**
+ * A would-have-blocked line as the live engine writes it, $minutesAgo ago.
+ * The context shape is AutoBlockService::detect()'s plus logWouldHaveBlocked().
+ */
+function wouldHaveBlocked(string $ip, string $detector, int $minutesAgo, array $context = []): void
+{
+    logEntry($ip, [
+        'level'       => 'warning',
+        'message'     => AutoBlockService::WOULD_HAVE_BLOCKED_MESSAGE,
+        'occurred_at' => now()->subMinutes($minutesAgo),
+        'context'     => json_encode(array_merge([
+            'would_have_blocked'  => true,
+            'ip'                  => $ip,
+            'detector'            => $detector,
+            'user_ids'            => [],
+            'not_blocked_because' => 'warn mode',
+            'in_block_mode'       => 'blocked',
+        ], $context)),
+    ]);
+}
+
+function onlyDetector(string $name, array $overrides = []): void
+{
+    config()->set('watchtower.auto_block.enabled', true);
+    config()->set('watchtower.auto_block.rules', []);
+    config()->set("watchtower.auto_block.detectors.{$name}", array_merge(['enabled' => true, 'mode' => 'warn'], $overrides));
+}
+
+it('reports what a detector saw in warn mode instead of saying there is nothing to backtest (#123)', function () {
+    onlyDetector('response_bursts');
+    wouldHaveBlocked('10.0.0.9', 'response_bursts', 120);
+    wouldHaveBlocked('10.0.0.9', 'response_bursts', 30);
+
+    $this->artisan('watchtower:simulate')
+        ->assertSuccessful()
+        ->expectsOutputToContain('observed, not simulated')
+        ->expectsOutputToContain('Detector response_bursts [warn]')
+        ->expectsTable(
+            ['IP', 'Reports', 'First', 'Last', 'Signed-in users', 'In block mode'],
+            [['10.0.0.9', 2, '2026-09-21 10:00', '2026-09-21 11:30', 0, 'blocked']],
+        )
+        ->doesntExpectOutputToContain('nothing to backtest');
+});
+
+it('warns when block mode would have locked signed-in users out', function () {
+    onlyDetector('response_bursts');
+    wouldHaveBlocked('10.0.0.9', 'response_bursts', 30, ['user_ids' => [7]]);
+    // Held back by the guard in block mode too: not a lock-out, not counted.
+    wouldHaveBlocked('10.0.0.8', 'response_bursts', 30, ['user_ids' => [8, 9, 10], 'in_block_mode' => 'shared IP']);
+
+    $this->artisan('watchtower:simulate')
+        ->assertSuccessful()
+        ->expectsOutputToContain('1 of these had signed-in users and block mode would have blocked them app-wide');
+});
+
+it('does not guess what block mode would do from a line that predates in_block_mode', function () {
+    // oreem ran v0.6.1 until v0.11.0: a week of its history has no
+    // in_block_mode at all. Reading that as 'blocked' would be invented.
+    onlyDetector('response_bursts');
+    wouldHaveBlocked('10.0.0.9', 'response_bursts', 30, ['user_ids' => [7], 'in_block_mode' => null]);
+
+    $this->artisan('watchtower:simulate')
+        ->assertSuccessful()
+        ->expectsTable(
+            ['IP', 'Reports', 'First', 'Last', 'Signed-in users', 'In block mode'],
+            [['10.0.0.9', 1, '2026-09-21 11:30', '2026-09-21 11:30', 1, 'not recorded']],
+        )
+        ->expectsOutputToContain('1 of these had signed-in users, reported before v0.11.0')
+        ->doesntExpectOutputToContain('would have blocked them app-wide');
+});
+
+it('leaves rule near-misses and old or unrelated lines out of the detector report', function () {
+    onlyDetector('scanner_paths');
+    wouldHaveBlocked('10.0.0.1', 'scanner_paths', 30);
+    wouldHaveBlocked('10.0.0.2', 'scanner_paths', 8 * 24 * 60);             // before --days=7
+    logEntry('10.0.0.3', [                                                  // a rule's near miss
+        'level'   => 'warning',
+        'message' => AutoBlockService::WOULD_HAVE_BLOCKED_MESSAGE,
+        'context' => json_encode(['would_have_blocked' => true, 'ip' => '10.0.0.3', 'rule' => 0]),
+    ]);
+    logEntry('10.0.0.4', ['level' => 'warning', 'context' => json_encode(['detector' => 'scanner_paths', 'ip' => '10.0.0.4'])]);
+
+    expect(Artisan::call('watchtower:simulate', ['--json' => true]))->toBe(0);
+
+    $json = json_decode(Artisan::output(), true, flags: JSON_THROW_ON_ERROR);
+
+    expect(array_column($json['detectors']['scanner_paths']['offenders'], 'ip'))->toBe(['10.0.0.1']);
+});
+
+it('counts a truncated context instead of dropping it silently', function () {
+    onlyDetector('failed_logins');
+    logEntry('10.0.0.5', [
+        'level'   => 'warning',
+        'message' => AutoBlockService::WOULD_HAVE_BLOCKED_MESSAGE,
+        'context' => '{"would_have_blocked":true,"ip":"10.0.0.5","detec',
+    ]);
+
+    $this->artisan('watchtower:simulate')
+        ->assertSuccessful()
+        ->expectsOutputToContain('1 would-have-blocked line(s) had a context that could not be read');
+});
+
+it('says why an enabled detector has no history', function () {
+    onlyDetector('failed_logins');
+
+    $this->artisan('watchtower:simulate')
+        ->assertSuccessful()
+        ->expectsOutputToContain('Either it never reached its threshold');
+
+    config()->set('watchtower.auto_block.enabled', false);
+
+    $this->artisan('watchtower:simulate')
+        ->assertSuccessful()
+        ->expectsOutputToContain('auto_block.enabled is off');
+});
+
+it('still reports a detector switched off since, from its history', function () {
+    onlyDetector('bad_user_agent', ['enabled' => false]);
+    wouldHaveBlocked('10.0.0.6', 'bad_user_agent', 30);
+
+    $this->artisan('watchtower:simulate')
+        ->assertSuccessful()
+        ->expectsOutputToContain('Detector bad_user_agent [warn] — switched off now');
+});
+
+it('skips the detectors when --rule narrows to one rule', function () {
+    onlyDetector('response_bursts');
+    wouldHaveBlocked('10.0.0.9', 'response_bursts', 30);
+    seedBurst('10.0.0.1', 10, 30);
+    oneRule();
+
+    $this->artisan('watchtower:simulate', ['--rule' => '0'])
+        ->assertSuccessful()
+        ->doesntExpectOutputToContain('Detector response_bursts');
+});
+
+it('writes nothing while reading detector history, enforced by the database', function () {
+    onlyDetector('response_bursts');
+    wouldHaveBlocked('10.0.0.9', 'response_bursts', 30);
+    failAllWatchtowerWrites();
+
+    $this->artisan('watchtower:simulate')->assertSuccessful();
+});
+
+it('reads back the line the live detector actually writes, not just a hand-built one', function () {
+    // The helper above writes the context shape by hand, so a rename on the
+    // engine side would leave every test above green. This drives the real
+    // detector and stores its line the way LogScope does — on MessageLogged.
+    onlyDetector('failed_logins', ['count' => 2, 'window_minutes' => 5]);
+
+    Event::listen(MessageLogged::class, function (MessageLogged $log): void {
+        if ($log->message === AutoBlockService::WOULD_HAVE_BLOCKED_MESSAGE) {
+            logEntry($log->context['ip'], [
+                'level'   => $log->level,
+                'message' => $log->message,
+                'context' => json_encode($log->context),
+            ]);
+        }
+    });
+
+    $engine = app(AutoBlockService::class);
+    $engine->record('failed_logins', '10.0.0.7', 7);
+    $engine->record('failed_logins', '10.0.0.7', 7);
+
+    $this->artisan('watchtower:simulate')
+        ->assertSuccessful()
+        ->expectsTable(
+            ['IP', 'Reports', 'First', 'Last', 'Signed-in users', 'In block mode'],
+            [['10.0.0.7', 1, '2026-09-21 12:00', '2026-09-21 12:00', 1, 'blocked']],
+        )
+        ->expectsOutputToContain('1 of these had signed-in users');
 });
