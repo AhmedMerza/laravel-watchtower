@@ -11,6 +11,7 @@ use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 use Symfony\Component\Console\Formatter\OutputFormatter;
 use Watchtower\Enums\BlockSource;
+use Watchtower\Events\IpUnblocked;
 use Watchtower\Models\BlacklistedIp;
 use Watchtower\Services\BlacklistCache;
 use Watchtower\Support\BlockScope;
@@ -40,7 +41,8 @@ class ImportFirewallCommand extends Command
     public const REASON = 'Imported from antonioribeiro/firewall';
 
     protected $signature = 'watchtower:import-firewall
-        {--commit : Write the blocks; without it, only report what would happen}';
+        {--commit : Write the changes; without it, only report what would happen}
+        {--undo : Unblock everything an earlier import added, instead of importing}';
 
     protected $description = 'Import blocks and allowlist entries from antonioribeiro/firewall';
 
@@ -51,6 +53,10 @@ class ImportFirewallCommand extends Command
 
     public function handle(): int
     {
+        if ($this->option('undo')) {
+            return $this->undo();
+        }
+
         $listed = [];
         $allow = [];
 
@@ -100,14 +106,14 @@ class ImportFirewallCommand extends Command
             }
         }
 
-        $kept = $this->kept(array_map('strval', array_keys($blocks)));
+        $existing = $this->existing(array_map('strval', array_keys($blocks)));
         $rows = [];
 
         foreach ($blocks as $target => [$created, $updated]) {
             $target = (string) $target;
             $why = match (true) {
                 IpRange::isTooBroad($target) => 'broader than /'.IpRange::MIN_IPV4_PREFIX.' (IPv4) or /'.IpRange::MIN_IPV6_PREFIX.' (IPv6); block it by hand with force if you meant it',
-                isset($kept[$target])        => 'already blocked',
+                $existing[$target] ?? false  => 'already blocked',
                 default                      => null,
             };
 
@@ -117,7 +123,10 @@ class ImportFirewallCommand extends Command
                 continue;
             }
 
-            $this->report('block', $target);
+            // A temporary or feed row for it is deleted on --commit; say so.
+            isset($existing[$target])
+                ? $this->report('block', $target, 'replaces a temporary or feed block, which would lapse')
+                : $this->report('block', $target);
             $rows[] = [
                 'id'         => (string) Str::ulid(),
                 'ip'         => $target,
@@ -144,7 +153,7 @@ class ImportFirewallCommand extends Command
                 // way for it: an expired or temporary block, or a feed row
                 // the next feed import may drop. The target stays blocked
                 // throughout, so no IpUnblocked; the reconcile below pushes
-                // it again. A permanent block landing since kept() read the
+                // it again. A permanent block landing since existing() read the
                 // table isn't matched, so the insert hits the unique key and
                 // the whole import rolls back rather than overwrite it.
                 $this->replaceable()->whereIn('ip', array_column($chunk, 'ip'))->delete();
@@ -171,29 +180,69 @@ class ImportFirewallCommand extends Command
     }
 
     /**
-     * Which of $targets already hold a block the import should leave alone:
-     * a permanent one that isn't a feed row. Everything else is replaceable().
+     * Which of $targets already have a global row, and whether the import
+     * leaves it alone (true: a permanent block that isn't a feed row) or
+     * replaces it (false: what replaceable() matches).
      *
      * @param  list<string>  $targets
-     * @return array<string, int>
+     * @return array<string, bool>
      */
-    private function kept(array $targets): array
+    private function existing(array $targets): array
     {
-        $kept = [];
+        $existing = [];
 
         // Chunked: one bind per target would pass SQLite's and Postgres'
         // parameter limits on a large list, failing even the dry run.
         foreach (array_chunk($targets, 500) as $chunk) {
-            $kept += BlacklistedIp::where('scope', BlockScope::GLOBAL)
-                ->whereIn('ip', $chunk)
-                ->whereNull('expires_at')
-                ->where('source', '!=', BlockSource::Feed)
-                ->pluck('ip')
-                ->flip()
-                ->all();
+            $rows = BlacklistedIp::where('scope', BlockScope::GLOBAL)->whereIn('ip', $chunk)->get(['ip', 'expires_at', 'source']);
+
+            foreach ($rows as $row) {
+                $existing[$row->ip] = $row->expires_at === null && $row->source !== BlockSource::Feed;
+            }
         }
 
-        return $kept;
+        return $existing;
+    }
+
+    /**
+     * Unblock what an earlier import added: the global rows carrying REASON.
+     *
+     * Not BlacklistService::unblockRecord() per row, which rebuilds the
+     * whole cache each time. As watchtower:cleanup does for the rows it
+     * lapses: delete them all, rebuild once, then announce each so a block
+     * target lifts its rule.
+     */
+    private function undo(): int
+    {
+        $ips = BlacklistedIp::where('scope', BlockScope::GLOBAL)->where('reason', self::REASON)->pluck('ip')->all();
+
+        if (! $this->option('commit')) {
+            $this->info(count($ips).' imported block(s) would be removed. Nothing was written; run again with --undo --commit to remove them.');
+
+            return self::SUCCESS;
+        }
+
+        foreach (array_chunk($ips, 500) as $chunk) {
+            BlacklistedIp::where('scope', BlockScope::GLOBAL)->where('reason', self::REASON)->whereIn('ip', $chunk)->delete();
+        }
+
+        $rebuilt = $this->cache->rebuild();
+
+        // Whether or not the rebuild worked: the rows are gone, so the
+        // targets lift them either way, and a re-run finds nothing to delete.
+        foreach ($ips as $ip) {
+            event(new IpUnblocked($ip));
+        }
+
+        if (! $rebuilt) {
+            $this->error('Removed '.count($ips).' imported block(s), but the cache rebuild failed, so they are still enforced — its DB read error is on the watchtower log channel. Run this again with --undo --commit once the cache is reachable; it rebuilds even with nothing left to remove.');
+
+            return self::FAILURE;
+        }
+
+        $this->info('Removed '.count($ips).' imported block(s).');
+
+        return self::SUCCESS;
     }
 
     /**
@@ -222,13 +271,19 @@ class ImportFirewallCommand extends Command
         $now = (string) now();
         $entries = [];
 
+        // Early Laravel created timestamps() as NOT NULL with a zero-date
+        // default, which strict MySQL refuses to insert back.
+        $time = fn ($value) => $value === null || str_starts_with((string) $value, '0000') ? null : (string) $value;
+
         if (Schema::hasTable('firewall')) {
             foreach (DB::table('firewall')->orderBy('id')->get() as $row) {
+                $created = $time($row->created_at);
+
                 $entries[] = [
                     trim((string) $row->ip_address),
                     (bool) $row->whitelisted,
-                    (string) ($row->created_at ?? $now),
-                    (string) ($row->updated_at ?? $row->created_at ?? $now),
+                    $created ?? $now,
+                    $time($row->updated_at) ?? $created ?? $now,
                     false,
                 ];
             }

@@ -108,7 +108,7 @@ Run `php artisan migrate` after every upgrade, then read **[Upgrading](docs/upgr
 
 ## Status
 
-Heading to v1.0. Blocking, sync, the management page and API, and the auto-block engine are in place and tested. Still to come: pushing blocks out to Cloudflare or an nginx deny file, and an importer for `antonioribeiro/firewall` users. See the [roadmap](https://github.com/AhmedMerza/laravel-watchtower/issues/26).
+Heading to v1.0. Blocking, sync, the management page and API, the auto-block engine, block targets (Cloudflare and nginx), public blocklist feeds and the `antonioribeiro/firewall` importer are in place and tested. See the [roadmap](https://github.com/AhmedMerza/laravel-watchtower/issues/26).
 
 ## Security
 

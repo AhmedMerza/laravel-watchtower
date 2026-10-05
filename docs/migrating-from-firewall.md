@@ -32,23 +32,21 @@ Every skipped entry is listed with its reason. A blacklisted entry is also skipp
 
 - **It's also whitelisted.** The old package let it through.
 - **`never_block` covers it.**
-- **It's wider than a `/16`.** Watchtower makes you confirm those. Block it by hand with `force` if you meant it.
+- **It's wider than a `/16` (IPv4) or `/32` (IPv6).** Watchtower makes you confirm those. Block it by hand with `force` if you meant it.
 - **It's already blocked permanently.** That block is kept exactly as it is. A temporary block, or a [feed](feeds.md) entry, for the same target is replaced by the permanent one, since it would otherwise lapse and let the address back in.
 
-A whitelisted entry wider than a `/16` isn't suggested for `never_block`. The importer names it instead, because pasting a `/0` there would turn blocking off.
+A whitelisted entry that wide isn't suggested for `never_block`. The importer names it instead, because pasting a `/0` there would turn blocking off.
 
 The import doesn't send a webhook or a notification for each block. After writing, it rebuilds the cache once and runs [`watchtower:reconcile`](commands.md) once, so your [block targets](block-targets.md) and, on a satellite, the master get the whole list in one go.
 
-To undo an import, unblock the rows with that reason. Going through `unblockRecord()` updates the cache and tells your block targets, which a plain `delete()` does not:
+To undo an import, run it with `--undo`. It removes every block carrying the import's reason, rebuilds the cache once, and tells your block targets to lift each one. Like the import, it only reports what it would do until you add `--commit`:
 
-```php
-use Watchtower\Console\Commands\ImportFirewallCommand;
-use Watchtower\Models\BlacklistedIp;
-use Watchtower\Services\BlacklistService;
-
-BlacklistedIp::where('reason', ImportFirewallCommand::REASON)
-    ->each(fn ($row) => app(BlacklistService::class)->unblockRecord($row));
+```bash
+php artisan watchtower:import-firewall --undo
+php artisan watchtower:import-firewall --undo --commit
 ```
+
+A block you've re-blocked by hand since the import carries your reason now, not the import's, so `--undo` leaves it alone.
 
 ## 2. Replace the middleware
 

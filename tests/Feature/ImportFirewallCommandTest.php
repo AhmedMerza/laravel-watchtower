@@ -9,6 +9,7 @@ use Illuminate\Support\Facades\Schema;
 use Watchtower\Console\Commands\ImportFirewallCommand;
 use Watchtower\Enums\BlockSource;
 use Watchtower\Events\IpBlocked;
+use Watchtower\Events\IpUnblocked;
 use Watchtower\Models\BlacklistedIp;
 use Watchtower\Services\BlacklistCache;
 use Watchtower\Services\BlacklistService;
@@ -167,6 +168,7 @@ it('keeps a permanent block as it is, and replaces one that would lapse', functi
 
     $this->artisan('watchtower:import-firewall --commit')->assertSuccessful()
         ->expectsOutputToContain('skip   45.9.20.5 — already blocked')
+        ->expectsOutputToContain('block  45.9.20.7 — replaces a temporary or feed block')
         ->expectsOutputToContain('Imported 3 block(s).');
 
     expect(BlacklistedIp::where('ip', '45.9.20.5')->value('reason'))->toBe('mine')
@@ -193,16 +195,21 @@ it('keeps the earliest listing of a target, and fills in missing timestamps', fu
     // The same address again, padded: the column is unique, the trimmed value isn't.
     DB::table('firewall')->insert(['ip_address' => ' 45.9.20.5 ', 'whitelisted' => false, 'created_at' => '2017-01-01 00:00:00', 'updated_at' => null]);
     DB::table('firewall')->where('ip_address', '45.9.20.6')->update(['created_at' => null, 'updated_at' => null]);
+    // A pre-nullable-timestamps table's zero date, which strict MySQL won't take back.
+    DB::table('firewall')->insert(['ip_address' => '45.9.20.7', 'whitelisted' => false, 'created_at' => '0000-00-00 00:00:00', 'updated_at' => '0000-00-00 00:00:00']);
 
     $this->artisan('watchtower:import-firewall --commit')->assertSuccessful();
 
     $rows = BlacklistedIp::get()->keyBy('ip');
-    expect(importedIps())->toBe(['45.9.20.5', '45.9.20.6'])
+    expect(importedIps())->toBe(['45.9.20.5', '45.9.20.6', '45.9.20.7'])
         // Listed by the 2019 row and the 2017 one: the earlier date wins,
         // and its missing updated_at falls back to its created_at.
         ->and((string) $rows['45.9.20.5']->created_at)->toBe('2017-01-01 00:00:00')
         ->and((string) $rows['45.9.20.5']->updated_at)->toBe('2017-01-01 00:00:00')
         ->and($rows['45.9.20.6']->created_at)->not->toBeNull()
+        // The raw column: Carbon would read a zero date back as -0001-11-30.
+        ->and(DB::table('blacklisted_ips')->where('ip', '45.9.20.7')->value('created_at'))->not->toStartWith('0000')
+        ->and(DB::table('blacklisted_ips')->where('ip', '45.9.20.7')->value('updated_at'))->not->toStartWith('0000')
         ->and($rows['45.9.20.6']->source_env)->toBe(app()->environment());
 });
 
@@ -260,4 +267,37 @@ it('handles a list larger than one chunk', function () {
 
     $this->artisan('watchtower:import-firewall --commit')->assertSuccessful()
         ->expectsOutputToContain('Imported 0 block(s).');
+
+    // Undone across chunks too: deleting while paging must not skip rows.
+    $this->artisan('watchtower:import-firewall --undo --commit')->assertSuccessful()
+        ->expectsOutputToContain('Removed 1201 imported block(s).');
+
+    expect(BlacklistedIp::count())->toBe(0);
+});
+
+it('undoes an import, and leaves alone what it did not add', function () {
+    config()->set('firewall.blacklist', ['45.9.20.5', '45.9.20.6', '45.9.20.0/24']);
+    app(BlacklistService::class)->block('45.9.21.1', ['reason' => 'mine']);
+    $this->artisan('watchtower:import-firewall --commit')->assertSuccessful();
+
+    // Re-blocked by hand since: the reason is the admin's now.
+    app(BlacklistService::class)->block('45.9.20.6', ['reason' => 'still bad']);
+
+    $this->artisan('watchtower:import-firewall --undo')->assertSuccessful()
+        ->expectsOutputToContain('2 imported block(s) would be removed. Nothing was written');
+    expect(importedIps())->toBe(['45.9.20.0/24', '45.9.20.5']);
+
+    Event::fake([IpUnblocked::class]);
+    $this->artisan('watchtower:import-firewall --undo --commit')->assertSuccessful()
+        ->expectsOutputToContain('Removed 2 imported block(s).');
+
+    $cache = app(BlacklistCache::class);
+    expect(importedIps())->toBe([])
+        ->and(BlacklistedIp::orderBy('ip')->pluck('ip')->all())->toBe(['45.9.20.6', '45.9.21.1'])
+        ->and($cache->isBlocked('45.9.20.5'))->toBeFalse()
+        ->and($cache->isBlocked('45.9.20.9'))->toBeFalse()
+        ->and($cache->isBlocked('45.9.20.6'))->toBeTrue();
+
+    Event::assertDispatchedTimes(IpUnblocked::class, 2);
+    Event::assertDispatched(IpUnblocked::class, fn ($event) => $event->ip === '45.9.20.0/24');
 });

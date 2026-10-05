@@ -32,6 +32,7 @@ php artisan watchtower:import-feeds --force   # accept a feed that shrank by mor
 # prints its whitelist for never_block. Safe to re-run.
 php artisan watchtower:import-firewall
 php artisan watchtower:import-firewall --commit
+php artisan watchtower:import-firewall --undo --commit   # remove what an import added
 
 # Backtest the auto-block rules against the log history you already have.
 # Read-only — it writes nothing, whatever mode the rules are in.
