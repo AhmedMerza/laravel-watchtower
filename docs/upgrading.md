@@ -40,3 +40,5 @@ Nothing changes for anyone who already set a mode explicitly, per rule or global
 ```
 
 Keep `429` only if `count` sits above your rate limiter's limit; otherwise the limiter itself trips the block. See [Auto-Block](auto-block.md).
+
+**6. A published config keeps the old `scanner_paths` patterns.** Since **v0.12.0** (#122), the default list catches config and secret probes such as `/config/*.yml`, `/serverless.yml`, `/.aws/*` and `/docker-compose*.yml`, and `/.git/*` widens to `/.git*`. A published `config/watchtower.php` keeps the old seven patterns. Copy the new `patterns` array from the package's `config/watchtower.php`, and check each one against your own routes first: `scanner_paths` blocks on a single request. See [Auto-Block](auto-block.md#detectors).
