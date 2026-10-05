@@ -38,6 +38,24 @@ function replaySyncRequest(object $test, object $request): object
     );
 }
 
+it('404s a validly signed request on a satellite whose route table still has the routes', function () {
+    // What a route cache built on the master leaves behind: the routes exist,
+    // but this environment is a satellite and must not serve them (#36).
+    config()->set('watchtower.sync.role', 'satellite');
+
+    $this->withHeaders(signedHeaders('GET', SyncSignature::PULL_PATH, ''))
+        ->get(SyncSignature::PULL_PATH)
+        ->assertNotFound();
+});
+
+it('serves a validly signed pull on the master', function () {
+    config()->set('watchtower.sync.role', 'master');
+
+    $this->withHeaders(signedHeaders('GET', SyncSignature::PULL_PATH, ''))
+        ->get(SyncSignature::PULL_PATH)
+        ->assertOk();
+});
+
 it('rejects an unsigned pull', function () {
     $this->get(SyncSignature::PULL_PATH)
         ->assertStatus(401)

@@ -23,6 +23,13 @@ it('leaves the laravel target out on the master, which would push to itself', fu
     expect((new BlockTargetRegistry)->enabled())->not->toHaveKey('laravel');
 });
 
+it('includes the laravel target on a satellite, and on an unrecognised role', function (string $role) {
+    config()->set('watchtower.sync.master_url', 'https://master.example.com');
+    config()->set('watchtower.sync.role', $role);
+
+    expect((new BlockTargetRegistry)->enabled())->toHaveKey('laravel');
+})->with(['satellite', 'sattelite']);
+
 it('is empty for a vanilla single-environment install', function () {
     config()->set('watchtower.sync.master_url', null);
 

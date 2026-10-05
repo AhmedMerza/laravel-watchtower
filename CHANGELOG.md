@@ -6,7 +6,7 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 ### Added
 
-- **`WATCHTOWER_SYNC_ROLE=master|satellite` says which end of sync an environment is.** Every environment holds the sync secret, so the secret alone couldn't tell them apart, and satellites served the master's sync routes too. A satellite now serves neither route. The master no longer pushes its own blocks to itself and refuses `watchtower:sync`. Left unset, an environment behaves as before. A satellite that gets HTTP 404 from the master now says the master isn't serving the routes and what to check. See [Sync](docs/sync.md) ([#36](https://github.com/AhmedMerza/laravel-watchtower/issues/36)).
+- **`WATCHTOWER_SYNC_ROLE=master|satellite` says which end of sync an environment is.** Every environment holds the sync secret, so the secret alone couldn't tell them apart, and satellites served the master's sync routes too. A satellite now serves neither route, even from a route cache built on the master. The master no longer pushes its own blocks to itself and refuses `watchtower:sync`. Left unset, an environment behaves as before. A satellite that gets HTTP 404 from the master now says the master isn't serving the routes and what to check. See [Sync](docs/sync.md) ([#36](https://github.com/AhmedMerza/laravel-watchtower/issues/36)).
 
 ## [0.10.1] - 2026-10-05
 

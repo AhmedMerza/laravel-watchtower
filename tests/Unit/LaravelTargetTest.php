@@ -35,6 +35,26 @@ it('pushes to master on the queue sync.queue names', function () {
     Queue::assertPushedOn('sync', PushBlockToMaster::class);
 });
 
+it('does not dispatch on the master, which would push to itself', function () {
+    Queue::fake();
+    config()->set('watchtower.sync.master_url', 'https://master.example.com');
+    config()->set('watchtower.sync.role', 'master');
+
+    $this->target->apply(BlacklistedIp::create(['ip' => '1.2.3.4', 'source' => BlockSource::Manual]));
+
+    Queue::assertNothingPushed();
+});
+
+it('dispatches on a satellite, and on an unrecognised role', function (string $role) {
+    Queue::fake();
+    config()->set('watchtower.sync.master_url', 'https://master.example.com');
+    config()->set('watchtower.sync.role', $role);
+
+    $this->target->apply(BlacklistedIp::create(['ip' => '1.2.3.4', 'source' => BlockSource::Manual]));
+
+    Queue::assertPushed(PushBlockToMaster::class);
+})->with(['satellite', 'sattelite']);
+
 it('does not dispatch when master URL is not configured', function () {
     Queue::fake();
     config()->set('watchtower.sync.master_url', null);

@@ -59,6 +59,15 @@ it('says the master is not serving the routes when it answers 404', function () 
         ->expectsOutputToContain('WATCHTOWER_SYNC_ROLE is master or unset');
 });
 
+it('reports a bad role before a missing master URL', function () {
+    config()->set('watchtower.sync.master_url', null);
+    config()->set('watchtower.sync.role', 'sattelite');
+
+    $this->artisan('watchtower:sync')
+        ->assertFailed()
+        ->expectsOutputToContain("WATCHTOWER_SYNC_ROLE is 'sattelite'");
+});
+
 it('refuses to run on the master', function () {
     config()->set('watchtower.sync.role', 'master');
     Http::fake();

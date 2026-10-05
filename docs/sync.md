@@ -53,6 +53,10 @@ more, and `watchtower:sync` reports it. If a satellite's `watchtower:sync` or
 push gets **HTTP 404**, the master isn't serving the routes: check that the
 master has the secret set and its role is `master`, not `satellite`.
 
+The role is also checked on every sync request, not only when the routes are
+registered. A route cache built on the master and deployed to a satellite
+still carries the routes, and the satellite answers them with a 404.
+
 > ⚠️ **Keep your satellites out of the blocklist.** The blocking middleware is
 > global, so it runs on the sync routes as well. If the master ever blocks a
 > satellite's egress IP — an auto-block rule matching its traffic, or a manual

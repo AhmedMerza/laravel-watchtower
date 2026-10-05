@@ -32,12 +32,8 @@ class SyncCommand extends Command
         $masterUrl = config('watchtower.sync.master_url');
         $secret = SyncSignature::secret();
 
-        if (! $masterUrl) {
-            $this->error('WATCHTOWER_MASTER_URL is not configured. Set it in your .env file.');
-
-            return self::FAILURE;
-        }
-
+        // The role first: a bad one is the real problem even when the URL
+        // is missing too.
         if (($invalid = SyncRole::invalid()) !== null) {
             $this->error("WATCHTOWER_SYNC_ROLE is '{$invalid}'; it must be master or satellite, or unset.");
 
@@ -46,6 +42,12 @@ class SyncCommand extends Command
 
         if (SyncRole::current() === SyncRole::Master) {
             $this->error('This environment is the master (WATCHTOWER_SYNC_ROLE=master), and watchtower:sync pulls from the master. Schedule it on the satellites only.');
+
+            return self::FAILURE;
+        }
+
+        if (! $masterUrl) {
+            $this->error('WATCHTOWER_MASTER_URL is not configured. Set it in your .env file.');
 
             return self::FAILURE;
         }

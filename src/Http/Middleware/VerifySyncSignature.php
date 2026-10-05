@@ -7,6 +7,7 @@ namespace Watchtower\Http\Middleware;
 use Closure;
 use Illuminate\Http\Request;
 use Symfony\Component\HttpFoundation\Response;
+use Watchtower\Enums\SyncRole;
 use Watchtower\Support\SyncSignature;
 
 /**
@@ -21,6 +22,14 @@ class VerifySyncSignature
 {
     public function handle(Request $request, Closure $next): Response
     {
+        // A satellite doesn't register these routes, but a route cache built
+        // on an environment that did still carries them — the role is read
+        // at boot, the cache outlives it. Checked per request so the cache
+        // can't make a satellite serve them (#36). A 404, as if absent.
+        if (SyncRole::current() === SyncRole::Satellite) {
+            abort(404);
+        }
+
         $secret = SyncSignature::secret();
 
         // Belt and braces: the routes aren't registered without a secret.

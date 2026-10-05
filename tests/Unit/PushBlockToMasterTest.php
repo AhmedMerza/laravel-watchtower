@@ -55,6 +55,28 @@ it('says the master is not serving the routes when it answers 404', function () 
         ->toThrow(RuntimeException::class, 'the master is not serving the sync routes');
 });
 
+it('adds the routes hint only to a 404', function () {
+    Http::fake([
+        'master.example.com/watchtower/sync/block' => Http::response([], 500),
+    ]);
+
+    try {
+        (new PushBlockToMaster($this->record))->handle();
+        $this->fail('Expected a RuntimeException.');
+    } catch (RuntimeException $e) {
+        expect($e->getMessage())->not->toContain('not serving the sync routes');
+    }
+});
+
+it('pushes from a satellite', function () {
+    config()->set('watchtower.sync.role', 'satellite');
+    Http::fake(['master.example.com/watchtower/sync/block' => Http::response(['ok' => true], 200)]);
+
+    (new PushBlockToMaster($this->record))->handle();
+
+    Http::assertSentCount(1);
+});
+
 it('does not push from the master to itself', function () {
     config()->set('watchtower.sync.role', 'master');
 
