@@ -182,7 +182,7 @@ final class RuleSimulator
             }
 
             [$first, $last] = $replayed['span'];
-            $usersAtFirstBlock = $this->distinctUsers(
+            $usersAtFirstBlock = self::distinctUsers(
                 $table, $ip, $first->copy()->subMinutes($windowMinutes), $first,
             );
 
@@ -197,7 +197,7 @@ final class RuleSimulator
                 // The first and last crossing reported, block or warning.
                 'first_block_at'       => $first->toIso8601String(),
                 'last_block_at'        => $last->toIso8601String(),
-                'distinct_users'       => $this->distinctUsers($table, $ip, $from, $to),
+                'distinct_users'       => self::distinctUsers($table, $ip, $from, $to),
                 'users_at_first_block' => $usersAtFirstBlock,
 
                 // The false-positive signal. Authenticated traffic from this
@@ -466,7 +466,7 @@ final class RuleSimulator
      * tripped it. `count(distinct ...)` skips NULL, so anonymous rows count
      * for nobody.
      */
-    private function distinctUsers(string $table, string $ip, CarbonInterface $from, CarbonInterface $to): int
+    public static function distinctUsers(string $table, string $ip, CarbonInterface $from, CarbonInterface $to): int
     {
         return (int) DB::table($table)
             ->where('ip_address', $ip)

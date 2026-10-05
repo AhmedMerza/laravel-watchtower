@@ -4,6 +4,10 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`watchtower:simulate` no longer reports 0 signed-in users for `failed_logins` and `login_lockouts`.** Those detectors can't see users at all, so the 0 read as "no customers affected" when it meant "not tracked", and the lock-out warning could never fire for them. For these two, the column is now **Users seen at IP**: the distinct signed-in users LogScope saw from each flagged address over `--days` (`logscope_users` in `--json`). A note under the table says the shared-IP guard doesn't cover them and points to `never_auto_block` ([#141](https://github.com/AhmedMerza/laravel-watchtower/issues/141)).
+
 ## [0.13.0] - 2026-10-05
 
 No migrations, no config changes.

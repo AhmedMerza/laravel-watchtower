@@ -8,6 +8,7 @@ use Carbon\CarbonInterface;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Schema;
 use Symfony\Component\Console\Formatter\OutputFormatter;
+use Watchtower\Listeners\DetectAuthFailures;
 use Watchtower\Services\AutoBlockService;
 use Watchtower\Services\DetectorHistory;
 use Watchtower\Services\RuleSimulator;
@@ -245,14 +246,20 @@ class SimulateCommand extends Command
                 continue;
             }
 
+            // The auth detectors never see a user, so their lines would read
+            // 0 signed-in users for an office full of customers (#141). For
+            // them the count is everyone LogScope saw signed in from there.
+            $userless = in_array($name, DetectAuthFailures::DETECTORS, true);
+            $users = static fn (array $o): int => $userless ? (int) ($o['logscope_users'] ?? 0) : count($o['user_ids']);
+
             $this->table(
-                ['IP', 'Reports', 'First', 'Last', 'Signed-in users', 'In block mode'],
+                ['IP', 'Reports', 'First', 'Last', $userless ? 'Users seen at IP' : 'Signed-in users', 'In block mode'],
                 array_map(static fn (array $o): array => [
                     $o['ip'],
                     $o['reports'],
                     self::minutePrecision($o['first_at']),
                     self::minutePrecision($o['last_at']),
-                    count($o['user_ids']),
+                    $users($o),
                     self::outcomeCell($o['outcomes']),
                 ], array_slice($offenders, 0, self::MAX_ROWS)),
             );
@@ -264,12 +271,18 @@ class SimulateCommand extends Command
                 ));
             }
 
+            if ($userless) {
+                $this->line('  This detector can\'t see who is signed in — a failed login has no user — so the shared-IP guard');
+                $this->line(sprintf('  never holds it back. Users seen at IP counts who LogScope saw signed in from the address over the %d day(s).', $days));
+                $this->line('  Put shared addresses (an office, a mobile carrier) in never_auto_block before arming it.');
+            }
+
             // The number that decides whether a detector is safe to arm:
             // people who were signed in, behind an address block mode would
             // have blocked app-wide.
             $customers = count(array_filter(
                 $offenders,
-                static fn (array $o): bool => $o['user_ids'] !== [] && isset($o['outcomes']['blocked']),
+                static fn (array $o): bool => $users($o) > 0 && isset($o['outcomes']['blocked']),
             ));
 
             if ($customers > 0) {
@@ -281,7 +294,7 @@ class SimulateCommand extends Command
 
             $scoped = count(array_filter(
                 $offenders,
-                static fn (array $o): bool => $o['user_ids'] !== [] && ! isset($o['outcomes']['blocked']) && isset($o['outcomes']['blocked_in_scope']),
+                static fn (array $o): bool => $users($o) > 0 && ! isset($o['outcomes']['blocked']) && isset($o['outcomes']['blocked_in_scope']),
             ));
 
             if ($scoped > 0) {
@@ -293,7 +306,7 @@ class SimulateCommand extends Command
 
             $unknown = count(array_filter(
                 $offenders,
-                static fn (array $o): bool => $o['user_ids'] !== [] && isset($o['outcomes'][DetectorHistory::NOT_RECORDED]),
+                static fn (array $o): bool => $users($o) > 0 && isset($o['outcomes'][DetectorHistory::NOT_RECORDED]),
             ));
 
             if ($unknown > 0) {

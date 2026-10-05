@@ -7,6 +7,7 @@ namespace Watchtower\Services;
 use Carbon\CarbonInterface;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
+use Watchtower\Listeners\DetectAuthFailures;
 use Watchtower\Support\KeysetStream;
 
 /**
@@ -105,10 +106,19 @@ class DetectorHistory
         $result = [];
 
         foreach ($byDetector as $detector => $offenders) {
-            $list = array_map(static function (array $o): array {
+            // The auth detectors' lines name no users, so `user_ids` is empty
+            // whoever was behind the address. Who LogScope saw signed in from
+            // it is the number that says whether a block would hit customers.
+            $userless = in_array($detector, DetectAuthFailures::DETECTORS, true);
+
+            $list = array_map(static function (array $o) use ($userless, $table, $from, $to): array {
                 $o['user_ids'] = array_map('strval', array_keys($o['user_ids']));
                 $o['first_at'] = Carbon::parse($o['first_at'])->toIso8601String();
                 $o['last_at'] = Carbon::parse($o['last_at'])->toIso8601String();
+
+                if ($userless) {
+                    $o['logscope_users'] = RuleSimulator::distinctUsers($table, $o['ip'], $from, $to);
+                }
 
                 return $o;
             }, array_values($offenders));

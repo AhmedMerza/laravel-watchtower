@@ -492,17 +492,65 @@ it('reads back the line the live detector actually writes, not just a hand-built
         }
     });
 
+    // No user, as DetectAuthFailures records it; the user is a LogScope row.
+    logEntry('10.0.0.7', ['user_id' => 7, 'occurred_at' => now()->subHour()]);
+
     $engine = app(AutoBlockService::class);
-    $engine->record('failed_logins', '10.0.0.7', 7);
-    $engine->record('failed_logins', '10.0.0.7', 7);
+    $engine->record('failed_logins', '10.0.0.7');
+    $engine->record('failed_logins', '10.0.0.7');
+
+    $this->artisan('watchtower:simulate')
+        ->assertSuccessful()
+        ->expectsTable(
+            ['IP', 'Reports', 'First', 'Last', 'Users seen at IP', 'In block mode'],
+            [['10.0.0.7', 1, '2026-09-21 12:00', '2026-09-21 12:00', 1, 'blocked']],
+        )
+        ->expectsOutputToContain('1 of these had signed-in users');
+});
+
+it('counts who LogScope saw at an auth detector\'s address, since its lines name no one (#141)', function () {
+    onlyDetector('failed_logins');
+    wouldHaveBlocked('10.0.0.9', 'failed_logins', 30);
+    wouldHaveBlocked('10.0.0.8', 'failed_logins', 30);
+    // Two customers behind 10.0.0.9, one of them twice; one only before the window.
+    logEntry('10.0.0.9', ['user_id' => 7, 'occurred_at' => now()->subDays(2)]);
+    logEntry('10.0.0.9', ['user_id' => 7, 'occurred_at' => now()->subDay()]);
+    logEntry('10.0.0.9', ['user_id' => 8, 'occurred_at' => now()->subHour()]);
+    logEntry('10.0.0.9', ['user_id' => 9, 'occurred_at' => now()->subDays(8)]);
+    logEntry('10.0.0.6', ['user_id' => 10, 'occurred_at' => now()->subHour()]);
+
+    $this->artisan('watchtower:simulate')
+        ->assertSuccessful()
+        ->expectsTable(
+            ['IP', 'Reports', 'First', 'Last', 'Users seen at IP', 'In block mode'],
+            [
+                ['10.0.0.8', 1, '2026-09-21 11:30', '2026-09-21 11:30', 0, 'blocked'],
+                ['10.0.0.9', 1, '2026-09-21 11:30', '2026-09-21 11:30', 2, 'blocked'],
+            ],
+        )
+        ->expectsOutputToContain('the shared-IP guard')
+        ->expectsOutputToContain('never_auto_block before arming it')
+        ->expectsOutputToContain('1 of these had signed-in users and block mode would have blocked them app-wide');
+
+    expect(Artisan::call('watchtower:simulate', ['--json' => true]))->toBe(0);
+    $json = json_decode(Artisan::output(), true, flags: JSON_THROW_ON_ERROR);
+
+    expect(array_column($json['detectors']['failed_logins']['offenders'], 'logscope_users', 'ip'))
+        ->toBe(['10.0.0.8' => 0, '10.0.0.9' => 2]);
+});
+
+it('keeps the line\'s own users for detectors that see them', function () {
+    onlyDetector('response_bursts');
+    wouldHaveBlocked('10.0.0.9', 'response_bursts', 30);
+    logEntry('10.0.0.9', ['user_id' => 7, 'occurred_at' => now()->subHour()]);
 
     $this->artisan('watchtower:simulate')
         ->assertSuccessful()
         ->expectsTable(
             ['IP', 'Reports', 'First', 'Last', 'Signed-in users', 'In block mode'],
-            [['10.0.0.7', 1, '2026-09-21 12:00', '2026-09-21 12:00', 1, 'blocked']],
+            [['10.0.0.9', 1, '2026-09-21 11:30', '2026-09-21 11:30', 0, 'blocked']],
         )
-        ->expectsOutputToContain('1 of these had signed-in users');
+        ->doesntExpectOutputToContain('Users seen at IP');
 });
 
 it('merges an address\'s reports: users, first and last, and each outcome', function () {
