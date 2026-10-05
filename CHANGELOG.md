@@ -4,6 +4,10 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- **The sync pull comes in pages, and carries only the columns a satellite reads.** `watchtower:sync` asks for 1,000 blocks at a time and keeps going until the master has no more, so a large blocklist is no longer one response. Mixed versions keep working both ways: an older master sends the whole list as before, and an older satellite, which doesn't ask for pages, still gets the whole list. If a page fails partway through, the blocks already pulled are still cached, and the run reports failure ([#37](https://github.com/AhmedMerza/laravel-watchtower/issues/37)).
+
 ## [0.11.0] - 2026-10-05
 
 No migrations. **If you published `config/watchtower.php`, update `response_bursts` by hand.** The new defaults below don't reach a published config. See [Upgrading](docs/upgrading.md).

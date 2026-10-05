@@ -6,12 +6,15 @@ use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Route;
+use Illuminate\Support\Str;
 use Watchtower\Enums\BlockSource;
 use Watchtower\Events\IpBlocked;
+use Watchtower\Http\Controllers\SyncController;
 use Watchtower\Jobs\PushBlockToMaster;
 use Watchtower\Models\BlacklistedIp;
 use Watchtower\Services\BlacklistCache;
 use Watchtower\Services\BlacklistService;
+use Watchtower\Support\BlockScope;
 use Watchtower\Support\SyncSignature;
 
 /**
@@ -29,9 +32,12 @@ function replaySyncRequest(object $test, object $request): object
         $server[in_array($key, ['CONTENT_TYPE', 'CONTENT_LENGTH'], true) ? $key : 'HTTP_'.$key] = $values[0];
     }
 
+    // The query string travels too: it carries the pull's paging cursor.
+    $query = parse_url($request->url(), PHP_URL_QUERY);
+
     return $test->call(
         $request->method(),
-        (string) parse_url($request->url(), PHP_URL_PATH),
+        parse_url($request->url(), PHP_URL_PATH).($query ? "?{$query}" : ''),
         [], [], [],
         $server,
         $request->body()
@@ -138,6 +144,101 @@ it('serves the active blocklist to a correctly signed pull', function () {
         ->get(SyncSignature::PULL_PATH)
         ->assertOk()
         ->assertJsonPath('data.0.ip', '1.2.3.4');
+});
+
+/** Write $count global manual blocks straight to the DB, in one insert. */
+function seedMasterBlocks(int $count): void
+{
+    BlacklistedIp::insert(array_map(fn (int $i) => [
+        'id'         => (string) Str::ulid(),
+        'ip'         => long2ip(0x0A000000 + $i),
+        'scope'      => BlockScope::GLOBAL,
+        'source'     => BlockSource::Manual->value,
+        'source_env' => 'production',
+        'created_at' => now(),
+        'updated_at' => now(),
+    ], range(1, $count)));
+}
+
+it('pages a pull that asks for pages, and ends on a null cursor', function () {
+    seedMasterBlocks(SyncController::PAGE_SIZE + 1);
+
+    $first = $this->withHeaders(signedHeaders('GET', SyncSignature::PULL_PATH))
+        ->get(SyncSignature::PULL_PATH.'?after=0')
+        ->assertOk()
+        ->assertJsonCount(SyncController::PAGE_SIZE, 'data');
+
+    $cursor = $first->json('next_cursor');
+    expect($cursor)->toBe(BlacklistedIp::orderBy('id')->skip(SyncController::PAGE_SIZE - 1)->value('id'));
+
+    $second = $this->withHeaders(signedHeaders('GET', SyncSignature::PULL_PATH))
+        ->get(SyncSignature::PULL_PATH."?after={$cursor}")
+        ->assertOk()
+        ->assertJsonCount(1, 'data')
+        ->assertJsonPath('next_cursor', null);
+
+    // Together the pages are the blocklist: nothing dropped, nothing twice.
+    $pulled = array_merge(array_column($first->json('data'), 'ip'), array_column($second->json('data'), 'ip'));
+    expect($pulled)->toHaveCount(SyncController::PAGE_SIZE + 1)
+        ->and($pulled)->toEqualCanonicalizing(BlacklistedIp::pluck('ip')->all());
+});
+
+it('ends on the first page when it holds exactly a page of blocks', function () {
+    seedMasterBlocks(SyncController::PAGE_SIZE);
+
+    $this->withHeaders(signedHeaders('GET', SyncSignature::PULL_PATH))
+        ->get(SyncSignature::PULL_PATH.'?after=0')
+        ->assertOk()
+        ->assertJsonCount(SyncController::PAGE_SIZE, 'data')
+        ->assertJsonPath('next_cursor', null);
+});
+
+it('sends the whole list to a satellite too old to ask for pages', function () {
+    // Such a satellite reads only `data`; a first page alone would silently
+    // drop the rest of the blocklist from it.
+    seedMasterBlocks(SyncController::PAGE_SIZE + 1);
+
+    $this->withHeaders(signedHeaders('GET', SyncSignature::PULL_PATH))
+        ->get(SyncSignature::PULL_PATH)
+        ->assertOk()
+        ->assertJsonCount(SyncController::PAGE_SIZE + 1, 'data')
+        ->assertJsonMissingPath('next_cursor');
+});
+
+it('sends only the columns a satellite reads', function (string $query) {
+    BlacklistedIp::create(['ip' => '1.2.3.4', 'source' => BlockSource::Manual, 'source_env' => 'production']);
+
+    $row = $this->withHeaders(signedHeaders('GET', SyncSignature::PULL_PATH))
+        ->get(SyncSignature::PULL_PATH.$query)
+        ->assertOk()
+        ->json('data.0');
+
+    expect(array_keys($row))->toEqualCanonicalizing(['ip', 'reason', 'source_env', 'source', 'expires_at', 'blocked_by']);
+})->with(['paged' => '?after=0', 'unpaged' => '']);
+
+it('rejects a malformed cursor', function () {
+    $this->withHeaders(signedHeaders('GET', SyncSignature::PULL_PATH) + ['Accept' => 'application/json'])
+        ->get(SyncSignature::PULL_PATH.'?after[]=x')
+        ->assertStatus(422);
+});
+
+it('round-trips a pull longer than one page through the real route and middleware', function () {
+    seedMasterBlocks(SyncController::PAGE_SIZE + 1);
+    Cache::flush();
+
+    Http::fake(function ($request) {
+        $replayed = replaySyncRequest($this, $request);
+
+        return Http::response($replayed->getContent(), $replayed->getStatusCode());
+    });
+
+    // The rows are already here (master and satellite share one DB in the
+    // test), so they count as skipped — what matters is every page was read
+    // and the last row made it into the cache.
+    $this->artisan('watchtower:sync')->assertSuccessful();
+
+    Http::assertSentCount(2);
+    expect(app(BlacklistService::class)->isBlocked(BlacklistedIp::orderByDesc('id')->value('ip')))->toBeTrue();
 });
 
 it('records a correctly signed push', function () {

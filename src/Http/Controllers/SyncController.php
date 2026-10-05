@@ -28,6 +28,9 @@ class SyncController extends Controller
 {
     public function __construct(private readonly BlacklistService $service) {}
 
+    /** Rows per page when a satellite asks for pages. */
+    public const PAGE_SIZE = 1000;
+
     /**
      * Satellites pull this to rebuild their local cache.
      *
@@ -36,18 +39,48 @@ class SyncController extends Controller
      * — it may carry that scope somewhere else entirely, or not at all. The
      * payload has no scope field either, so a scoped row sent here would
      * arrive as a global block and take the address off the whole satellite.
-     * `scope` joins the wire format in #37.
+     *
+     * Paged by id when the satellite sends `after` (#37): 0 for the first
+     * page, which sorts before every ULID, then each response's next_cursor
+     * until it is null. An id cursor
+     * rather than an offset, so a block expiring mid-pull doesn't shift the
+     * pages after it, and a block added mid-pull lands on the last one.
+     * Without `after` this is the whole list in one response, as before —
+     * a satellite older than paging reads only `data`, and handing it the
+     * first page would silently drop the rest of the blocklist.
+     *
+     * The query string isn't signed: the signature covers the route URI, and
+     * changing that would break every deployed satellite. A replayed pull
+     * with an edited cursor gets a subset of what the signature already
+     * allowed, so there is nothing to gain from it.
      */
-    public function blocks(): JsonResponse
+    public function blocks(Request $request): JsonResponse
     {
+        // Not feed rows: every environment imports the feeds itself, and
+        // a satellite pulling the master's copy would store thousands of
+        // them as `sync` rows that no import ever cleans up (#21).
+        //
+        // Only the columns SyncCommand reads; the rest is bytes per row per
+        // satellite per tick.
+        $query = BlacklistedIp::active()
+            ->where('scope', BlockScope::GLOBAL)
+            ->where('source', '!=', BlockSource::Feed)
+            ->select(['id', 'ip', 'reason', 'source_env', 'source', 'expires_at', 'blocked_by']);
+
+        if (! $request->has('after')) {
+            return response()->json(['data' => $query->get()->makeHidden('id')]);
+        }
+
+        $after = $request->validate(['after' => ['required', 'string', 'max:26']])['after'];
+
+        // One extra row says whether another page exists without a count().
+        $rows = $query->where('id', '>', $after)->orderBy('id')->limit(self::PAGE_SIZE + 1)->get();
+        $more = $rows->count() > self::PAGE_SIZE;
+        $rows = $rows->take(self::PAGE_SIZE);
+
         return response()->json([
-            // Not feed rows: every environment imports the feeds itself, and
-            // a satellite pulling the master's copy would store thousands of
-            // them as `sync` rows that no import ever cleans up (#21).
-            'data' => BlacklistedIp::active()
-                ->where('scope', BlockScope::GLOBAL)
-                ->where('source', '!=', BlockSource::Feed)
-                ->get(),
+            'data'        => $rows->makeHidden('id')->values(),
+            'next_cursor' => $more ? $rows->last()->id : null,
         ]);
     }
 

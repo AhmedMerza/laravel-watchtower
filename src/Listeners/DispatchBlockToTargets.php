@@ -23,7 +23,7 @@ class DispatchBlockToTargets implements ShouldQueue
         // narrower reason: the sync wire format carries no scope field, so a
         // scoped block pushed to master would be stored there as global and
         // handed to every satellite as an app-wide block nobody asked for
-        // (#37 widens the wire format; until then this is the only guard).
+        // (#133 would widen the wire format; until then this is the only guard).
         // This repo has already paid twice (#38, and twice again inside
         // #27's own review) for the same guard duplicated per call site and
         // left to drift, so it lives in exactly one place.

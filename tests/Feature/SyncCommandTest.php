@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use Illuminate\Database\QueryException;
+use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Http;
@@ -23,7 +24,7 @@ beforeEach(function () {
 
 it('syncs IPs from master and upserts them locally', function () {
     Http::fake([
-        'master.example.com/watchtower/sync/blocks' => Http::response([
+        'master.example.com/watchtower/sync/blocks*' => Http::response([
             'data' => [
                 ['ip' => '1.2.3.4', 'reason' => 'synced', 'source_env' => 'production', 'expires_at' => null, 'blocked_by' => null, 'log_entry_id' => null],
                 ['ip' => '5.6.7.8', 'reason' => null, 'source_env' => 'production', 'expires_at' => null, 'blocked_by' => null, 'log_entry_id' => null],
@@ -41,7 +42,7 @@ it('syncs IPs from master and upserts them locally', function () {
 
 it('fails gracefully when master returns an error', function () {
     Http::fake([
-        'master.example.com/watchtower/sync/blocks' => Http::response([], 500),
+        'master.example.com/watchtower/sync/blocks*' => Http::response([], 500),
     ]);
 
     $this->artisan('watchtower:sync')
@@ -51,7 +52,7 @@ it('fails gracefully when master returns an error', function () {
 
 it('says the master is not serving the routes when it answers 404', function () {
     Http::fake([
-        'master.example.com/watchtower/sync/blocks' => Http::response([], 404),
+        'master.example.com/watchtower/sync/blocks*' => Http::response([], 404),
     ]);
 
     $this->artisan('watchtower:sync')
@@ -100,7 +101,7 @@ it('fails gracefully when master URL is not configured', function () {
 
 it('enforces the synced IPs but still fails when the cache rebuild fails', function () {
     Http::fake([
-        'master.example.com/watchtower/sync/blocks' => Http::response([
+        'master.example.com/watchtower/sync/blocks*' => Http::response([
             'data' => [
                 ['ip' => '1.2.3.4', 'reason' => 'synced', 'source_env' => 'production', 'expires_at' => null, 'blocked_by' => null, 'log_entry_id' => null],
             ],
@@ -128,7 +129,7 @@ it('enforces the synced IPs but still fails when the cache rebuild fails', funct
 
 it('does not duplicate records on repeated syncs', function () {
     Http::fake([
-        'master.example.com/watchtower/sync/blocks' => Http::response([
+        'master.example.com/watchtower/sync/blocks*' => Http::response([
             'data' => [
                 ['ip' => '1.2.3.4', 'reason' => 'initial', 'source_env' => 'production', 'expires_at' => null, 'blocked_by' => null, 'log_entry_id' => null],
             ],
@@ -153,7 +154,7 @@ it('does not overwrite a local scoped block with a synced global one', function 
     ]);
 
     Http::fake([
-        'master.example.com/watchtower/sync/blocks' => Http::response([
+        'master.example.com/watchtower/sync/blocks*' => Http::response([
             'data' => [
                 ['ip' => '1.2.3.4', 'reason' => 'synced', 'source_env' => 'production', 'expires_at' => null, 'blocked_by' => null, 'log_entry_id' => null],
             ],
@@ -194,7 +195,7 @@ it('never writes a block for an address this environment whitelists', function (
     config()->set('watchtower.never_block', ['9.9.9.9']);
 
     Http::fake([
-        'master.example.com/watchtower/sync/blocks' => Http::response([
+        'master.example.com/watchtower/sync/blocks*' => Http::response([
             'data' => [
                 ['ip' => '9.9.9.9', 'reason' => 'blocked on the master', 'source_env' => 'production', 'expires_at' => null, 'blocked_by' => null, 'log_entry_id' => null],
                 ['ip' => '1.2.3.4', 'reason' => 'synced', 'source_env' => 'production', 'expires_at' => null, 'blocked_by' => null, 'log_entry_id' => null],
@@ -221,7 +222,7 @@ it('does not let a synced record downgrade a local manual block', function () {
     ]);
 
     Http::fake([
-        'master.example.com/watchtower/sync/blocks' => Http::response([
+        'master.example.com/watchtower/sync/blocks*' => Http::response([
             'data' => [
                 ['ip' => '1.2.3.4', 'reason' => 'from the master', 'source_env' => 'production', 'expires_at' => null, 'blocked_by' => null, 'log_entry_id' => null],
             ],
@@ -243,7 +244,7 @@ it('announces nothing for the blocks it pulls', function () {
     Event::fake([IpBlocked::class]);
 
     Http::fake([
-        'master.example.com/watchtower/sync/blocks' => Http::response([
+        'master.example.com/watchtower/sync/blocks*' => Http::response([
             'data' => [
                 ['ip' => '1.2.3.4', 'reason' => 'synced', 'source_env' => 'production', 'expires_at' => null, 'blocked_by' => null, 'log_entry_id' => null],
             ],
@@ -286,7 +287,7 @@ it('rebuilds the cache once for the run, not once per record', function () {
     // — a per-record write here would be a rebuild per range, on a list that
     // is the master's entire blocklist.
     Http::fake([
-        'master.example.com/watchtower/sync/blocks' => Http::response([
+        'master.example.com/watchtower/sync/blocks*' => Http::response([
             'data' => [
                 ['ip' => '10.0.0.0/8', 'reason' => 'synced', 'source_env' => 'production', 'expires_at' => null, 'blocked_by' => null, 'log_entry_id' => null],
                 ['ip' => '172.16.0.0/12', 'reason' => 'synced', 'source_env' => 'production', 'expires_at' => null, 'blocked_by' => null, 'log_entry_id' => null],
@@ -303,7 +304,7 @@ it('rebuilds the cache once for the run, not once per record', function () {
 
 it('does not copy the master\'s log_entry_id into the local row', function () {
     Http::fake([
-        'master.example.com/watchtower/sync/blocks' => Http::response([
+        'master.example.com/watchtower/sync/blocks*' => Http::response([
             'data' => [
                 // A real value, because every other fixture here sends null —
                 // which is exactly how this could regress unnoticed.
@@ -330,7 +331,7 @@ it('does not copy the master\'s log_entry_id into the local row', function () {
 function masterBlocks(array $block = []): void
 {
     Http::fake([
-        'master.example.com/watchtower/sync/blocks' => Http::response([
+        'master.example.com/watchtower/sync/blocks*' => Http::response([
             'data' => [array_merge([
                 'ip'         => '5.6.7.8',
                 'reason'     => 'Brute force',
@@ -410,7 +411,7 @@ it('counts every bucket correctly when one pull hits all of them at once', funct
     ]);
 
     Http::fake([
-        'master.example.com/watchtower/sync/blocks' => Http::response([
+        'master.example.com/watchtower/sync/blocks*' => Http::response([
             'data' => [
                 ['ip' => '10.0.0.1', 'source' => 'manual', 'source_env' => 'master', 'expires_at' => null],
                 ['ip' => '10.0.0.2', 'source' => 'manual', 'source_env' => 'master', 'expires_at' => null],
@@ -444,3 +445,75 @@ it('treats a relayed block from the master as unknown, not as automation', funct
 
     expect(BlacklistedIp::where('ip', '5.6.7.8')->exists())->toBeTrue();
 });
+
+it('pulls every page until the master returns a null cursor', function () {
+    Http::fake([
+        'master.example.com/watchtower/sync/blocks*' => Http::sequence()
+            ->push(['data' => [['ip' => '1.2.3.4', 'source' => 'manual']], 'next_cursor' => '01J00000000000000000000001'])
+            ->push(['data' => [['ip' => '5.6.7.8', 'source' => 'manual']], 'next_cursor' => null]),
+    ]);
+
+    $this->artisan('watchtower:sync')
+        ->assertSuccessful()
+        ->expectsOutputToContain('Synced 2 IPs');
+
+    Http::assertSent(fn ($request) => $request['after'] === '0');
+    Http::assertSent(fn ($request) => $request['after'] === '01J00000000000000000000001');
+    expect(app(BlacklistCache::class)->isBlocked('5.6.7.8'))->toBeTrue();
+});
+
+it('makes one request to a master too old to page', function () {
+    // It ignores `after` and sends no next_cursor at all.
+    Http::fake([
+        'master.example.com/watchtower/sync/blocks*' => Http::response(['data' => [['ip' => '1.2.3.4']]]),
+    ]);
+
+    $this->artisan('watchtower:sync')->assertSuccessful();
+
+    Http::assertSentCount(1);
+});
+
+it('fails rather than loop on a cursor that is not a forward ULID', function (mixed $second) {
+    Http::fake([
+        'master.example.com/watchtower/sync/blocks*' => Http::sequence()
+            ->push(['data' => [], 'next_cursor' => '01J00000000000000000000005'])
+            ->push(['data' => [], 'next_cursor' => $second]),
+    ]);
+
+    $this->artisan('watchtower:sync')
+        ->assertFailed()
+        ->expectsOutputToContain('invalid next_cursor');
+
+    Http::assertSentCount(2);
+})->with([
+    'the same cursor'     => '01J00000000000000000000005',
+    'a cursor going back' => '01J00000000000000000000004',
+    'a non-string cursor' => 99999999,
+    'a longer string'     => '01J000000000000000000000050',
+]);
+
+it('caches the pages it applied when a later page fails', function (string $failure) {
+    // Each page defers its cache write to the end-of-run rebuild, which a
+    // failed run never reaches; the middleware reads only the cache. Warm
+    // first: a cold cache rebuilds itself from the DB on the first read,
+    // which would hide the gap.
+    app(BlacklistCache::class)->rebuild();
+
+    $pages = 0;
+
+    Http::fake(function () use (&$pages, $failure) {
+        if (++$pages === 1) {
+            return Http::response(['data' => [['ip' => '1.2.3.4', 'source' => 'manual']], 'next_cursor' => '01J00000000000000000000001']);
+        }
+
+        // Either the master answering badly, or no answer at all — the second
+        // goes through the command's catch rather than its status check.
+        return $failure === 'status'
+            ? Http::response([], 500)
+            : throw new ConnectionException('Connection refused');
+    });
+
+    $this->artisan('watchtower:sync')->assertFailed();
+
+    expect(app(BlacklistCache::class)->isBlocked('1.2.3.4'))->toBeTrue();
+})->with(['status', 'connection']);

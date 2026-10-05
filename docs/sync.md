@@ -82,6 +82,8 @@ Schedule::command('watchtower:sync')->everyFiveMinutes();
 
 Block on staging → staging protected instantly → master updated asynchronously → production/alpha pull it within 5 minutes.
 
+The pull comes in pages of 1,000 blocks. `watchtower:sync` keeps requesting pages until the master says there are no more, then rebuilds the cache once. Mixed versions work both ways: a master older than paging ignores the request and sends the whole list in one response, and a satellite older than paging asks for no pages and gets the whole list. If a page fails partway through, the blocks already pulled are still written to the cache, and the run reports failure.
+
 Both directions apply the same two rules, from one implementation:
 
 - **A synced block never downgrades a local one.** An address already blocked

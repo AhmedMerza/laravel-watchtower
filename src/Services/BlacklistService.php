@@ -123,7 +123,7 @@ class BlacklistService
      *   automated: upgrading one node must never start silently refusing
      *   another's admin decisions (#56).
      * - The scope is always global. The wire format has no scope field, so
-     *   there is nothing else this could write; `scope` joins it in #37.
+     *   there is nothing else this could write; see #133.
      * - An incoming record never downgrades a local manual or auto block.
      *   That is also what makes a master whose own master_url points at
      *   itself a no-op rather than a source rewrite.
