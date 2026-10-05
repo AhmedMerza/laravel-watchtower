@@ -87,6 +87,7 @@ A global middleware checks each request against the cache right after `TrustProx
 | **Escalating durations** | Longer blocks for addresses that come back | [Escalation](docs/auto-block.md#escalating-durations) |
 | **Public blocklists** | Imports Spamhaus DROP or FireHOL level1 daily. Off by default, and never imports private ranges | [Feeds](docs/feeds.md) |
 | **Scoped blocks** | Block an address from some routes, such as login, instead of the whole app | [Scoped Blocks](docs/scoped-blocks.md) |
+| **Firewall importer** | Imports antonioribeiro/firewall's blocks, so switching costs one command | [Migrating](docs/migrating-from-firewall.md) |
 | **Webhook** | Posts every block to a URL, e.g. for Slack or n8n | [Configuration](docs/configuration.md#webhook-notification) |
 
 All docs: **[docs/](docs/README.md)** · [Configuration](docs/configuration.md) · [Artisan commands](docs/commands.md) · [Security notes](docs/security.md)

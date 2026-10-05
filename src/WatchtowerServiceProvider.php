@@ -17,6 +17,7 @@ use Spatie\LaravelPackageTools\Package;
 use Spatie\LaravelPackageTools\PackageServiceProvider;
 use Watchtower\Console\Commands\CleanupCommand;
 use Watchtower\Console\Commands\ImportFeedsCommand;
+use Watchtower\Console\Commands\ImportFirewallCommand;
 use Watchtower\Console\Commands\InstallCommand;
 use Watchtower\Console\Commands\ReconcileCommand;
 use Watchtower\Console\Commands\SimulateCommand;
@@ -65,7 +66,7 @@ class WatchtowerServiceProvider extends PackageServiceProvider
             ->hasMigration('update_blacklisted_ips_table_add_scope')
             ->hasMigration('update_blacklisted_ips_table_source_feed')
             ->hasViews()
-            ->hasCommands([InstallCommand::class, SyncCommand::class, CleanupCommand::class, SimulateCommand::class, ReconcileCommand::class, ImportFeedsCommand::class]);
+            ->hasCommands([InstallCommand::class, SyncCommand::class, CleanupCommand::class, SimulateCommand::class, ReconcileCommand::class, ImportFeedsCommand::class, ImportFirewallCommand::class]);
     }
 
     public function registeringPackage(): void
