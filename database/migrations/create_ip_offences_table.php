@@ -2,6 +2,7 @@
 
 use Illuminate\Database\Migrations\Migration;
 use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 
 return new class extends Migration
@@ -18,6 +19,10 @@ return new class extends Migration
      */
     public function up(): void
     {
+        if ($this->ranFromVendor()) {
+            return;
+        }
+
         Schema::create('ip_offences', function (Blueprint $table) {
             $table->ulid('id')->primary();
             $table->string('ip', 50);
@@ -48,6 +53,24 @@ return new class extends Migration
 
     public function down(): void
     {
+        if ($this->ranFromVendor()) {
+            return;
+        }
+
         Schema::dropIfExists('ip_offences');
+    }
+
+    /**
+     * Whether this already ran under its undated name — loaded straight from
+     * vendor by runsMigrations() before 0.7.0 — so this published, dated
+     * copy is the same migration a second time (#128). It then does nothing,
+     * up or down: rolling it back must not drop what it never created.
+     */
+    private function ranFromVendor(): bool
+    {
+        $table = config('database.migrations');
+        $table = is_array($table) ? ($table['table'] ?? 'migrations') : ($table ?? 'migrations');
+
+        return Schema::hasTable($table) && DB::table($table)->where('migration', 'create_ip_offences_table')->exists();
     }
 };

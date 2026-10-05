@@ -13,6 +13,8 @@ php artisan vendor:publish --tag=watchtower-migrations
 php artisan migrate
 ```
 
+**Installed before 0.7.0 and never published the migrations?** Then they ran straight from vendor, and your `migrations` table lists them without a date (`create_blacklisted_ips_table`, …). Upgrade to **0.10.1 or later** before publishing. From 0.10.1, the published copy of each of those migrations sees the undated record and does nothing, going up or down, so publishing and migrating only adds what you're missing (#128). On an older release the published copies try to create the tables again and fail.
+
 ⚠️ Rolling the `scope` migration *back* fails while any scoped block exists, because the old unique index on `ip` alone cannot hold two rows for one address. Delete the scoped blocks first. That is deliberate — dropping them quietly to make the rollback succeed would remove blocks without telling anyone.
 
 **2. ⚠️ Auto-block now defaults to `warn`, and nothing will tell you.** Since **v0.4.0**, a rule with no explicit `mode` reports the address and lets the request through instead of blocking it. If you were relying on auto-block to actually block, set it as part of the upgrade:
