@@ -29,7 +29,7 @@ Nothing changes for anyone who already set a mode explicitly, per rule or global
 
 **4. ⚠️ `GET /api/blocks` is paginated, so `data` is no longer the whole list.** Since **v0.6.0**, it returns one page (25 rows by default) inside Laravel's paginator body rather than every active block in one array. A script that read `data` as the complete blocklist now silently sees only the first page. Read `total` and follow `next_page_url`, or raise `?per_page=` up to 100. The default filter is still `state=active`, so the first page holds the rows it always did — see [Listing Blocks](api.md#listing-blocks). Nothing else changed shape: `POST /api/block`, `DELETE /api/block/{ip}` and `GET /api/status/{ip}` are untouched.
 
-**5. ⚠️ A published config keeps the old `response_bursts` defaults.** In the next release (#121), `response_bursts` stops counting 429 and ships with its own `shared_ip_user_threshold` of `1`: one signed-in user holds an app-wide block back. Laravel merges a package's config only one level deep, so if you published `config/watchtower.php`, your `detectors` block keeps the old values. Bring them across by hand:
+**5. ⚠️ A published config keeps the old `response_bursts` defaults.** Since **v0.11.0** (#121), `response_bursts` stops counting 429 and ships with its own `shared_ip_user_threshold` of `1`: one signed-in user holds an app-wide block back. Laravel merges a package's config only one level deep, so if you published `config/watchtower.php`, your `detectors` block keeps the old values. Bring them across by hand:
 
 ```php
 'response_bursts' => [
