@@ -4,8 +4,11 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 ## [Unreleased]
 
+**If you published `config/watchtower.php`, copy the new `scanner_paths` patterns by hand.** A published config keeps its old list.
+
 ### Changed
 
+- **`scanner_paths` catches the common config and secret probes by default.** The list now covers `/config/*.yml`, `/serverless.yml`, `/configs.json`, `/.aws/*`, `/.svn/*`, `/.vscode/*`, `/.DS_Store`, `/docker-compose*.yml`, `/phpinfo.php` and `/wp-config.php*`. `/.git/*` also widens to `/.git*`, so `/.gitignore` and `/.git-credentials` are caught too. In production data these probes reached `response_bursts` instead, the loose detector, while the precise one missed them. A test now checks the defaults against paths a real Laravel app serves, since one matching request blocks the address ([#122](https://github.com/AhmedMerza/laravel-watchtower/issues/122)).
 - **The sync pull comes in pages, and carries only the columns a satellite reads.** `watchtower:sync` asks for 1,000 blocks at a time and keeps going until the master has no more, so a large blocklist is no longer one response. Mixed versions keep working both ways: an older master sends the whole list as before, and an older satellite, which doesn't ask for pages, still gets the whole list. If a page fails partway through, the blocks already pulled are still cached, and the run reports failure ([#37](https://github.com/AhmedMerza/laravel-watchtower/issues/37)).
 
 ## [0.11.0] - 2026-10-05

@@ -129,6 +129,39 @@ it('matches exactly what Str::is did, for each pattern in isolation', function (
     }
 })->with('probe paths');
 
+it('catches the probes the default patterns are there for', function (string $path) {
+    $patterns = (array) config('watchtower.auto_block.detectors.scanner_paths.patterns');
+
+    expect(PathMatcher::matchesAny($patterns, $path))->toBeTrue();
+})->with([
+    // Seen in production by response_bursts, which scanner_paths missed (#122).
+    'config/database.yml', 'serverless.yaml', 'configs.json',
+    'config/secrets.yml', 'config/application.yaml', 'serverless.yml',
+    '.gitignore', '.git-credentials', '.gitlab-ci.yml', '.git/config',
+    '.svn/entries', '.svn/wc.db', '.aws/credentials', '.aws/config',
+    '.vscode/sftp.json', '.DS_Store', 'docker-compose.yml',
+    'docker-compose.prod.yml', 'docker-compose.override.yaml', 'phpinfo.php',
+    'wp-config.php', 'wp-config.php.bak', 'wp-config.php~',
+]);
+
+it('lets the paths a real Laravel app serves through', function (string $path) {
+    // scanner_paths blocks on one request, so a default that overlaps any of
+    // these blocks the app's own users (#122).
+    $patterns = (array) config('watchtower.auto_block.detectors.scanner_paths.patterns');
+
+    expect(PathMatcher::matchesAny($patterns, $path))->toBeFalse();
+})->with([
+    '', 'login', 'up', 'favicon.ico', 'robots.txt', 'sitemap.xml',
+    'manifest.json', 'mix-manifest.json', 'build/manifest.json',
+    'build/assets/app.js', 'storage/avatars/a.png', 'vendor/telescope/app.js',
+    'livewire/update', 'livewire/livewire.js', 'sanctum/csrf-cookie',
+    'horizon/api/stats', 'pulse', 'telescope/requests', 'nova/dashboards/main',
+    'filament/login', '.well-known/security.txt', '.well-known/acme-challenge/token',
+    'config', 'configurator', 'config.json', 'api/settings/config', 'settings/config.yml',
+    'auth/github/callback', 'serverless', 'docker-compose', 'phpinfo',
+    'admin/config/app.yml', 'docs/docker-compose.md', 'wp-configurator',
+]);
+
 it('returns no regex for an empty pattern list, and matches nothing', function () {
     expect(PathMatcher::regex([]))->toBeNull()
         ->and(PathMatcher::matchesAny([], '.env'))->toBeFalse();
