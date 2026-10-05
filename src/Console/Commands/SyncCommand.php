@@ -87,10 +87,11 @@ class SyncCommand extends Command
                 $blocks = $response->json('data', []);
                 $next = $response->json('next_cursor');
 
-                // A cursor that doesn't move forward would loop forever.
-                // strcmp, not <=: PHP compares numeric-looking strings as
-                // numbers.
-                if ($next !== null && (! is_string($next) || strcmp($next, $cursor) <= 0)) {
+                // A cursor that doesn't move forward would loop forever, and
+                // one that only grows longer could too, so it must also be a
+                // ULID — the shape the master's ids have. strcmp, not <=: PHP
+                // compares numeric-looking strings as numbers.
+                if ($next !== null && (! is_string($next) || ! preg_match('/^[0-9a-z]{26}$/i', $next) || strcmp($next, $cursor) <= 0)) {
                     $this->error("Sync failed — master returned an invalid next_cursor after {$cursor}.");
 
                     return $this->abandon($written);

@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use Illuminate\Database\QueryException;
+use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Http;
@@ -472,34 +473,47 @@ it('makes one request to a master too old to page', function () {
     Http::assertSentCount(1);
 });
 
-it('fails rather than loop on a cursor that does not move forward', function () {
+it('fails rather than loop on a cursor that is not a forward ULID', function (mixed $second) {
     Http::fake([
-        'master.example.com/watchtower/sync/blocks*' => Http::response(['data' => [], 'next_cursor' => '0']),
+        'master.example.com/watchtower/sync/blocks*' => Http::sequence()
+            ->push(['data' => [], 'next_cursor' => '01J00000000000000000000005'])
+            ->push(['data' => [], 'next_cursor' => $second]),
     ]);
 
     $this->artisan('watchtower:sync')
         ->assertFailed()
         ->expectsOutputToContain('invalid next_cursor');
 
-    Http::assertSentCount(1);
-});
+    Http::assertSentCount(2);
+})->with([
+    'the same cursor'     => '01J00000000000000000000005',
+    'a cursor going back' => '01J00000000000000000000004',
+    'a non-string cursor' => 99999999,
+    'a longer string'     => '01J000000000000000000000050',
+]);
 
-it('caches the pages it applied when a later page fails', function () {
+it('caches the pages it applied when a later page fails', function (string $failure) {
     // Each page defers its cache write to the end-of-run rebuild, which a
     // failed run never reaches; the middleware reads only the cache. Warm
     // first: a cold cache rebuilds itself from the DB on the first read,
     // which would hide the gap.
     app(BlacklistCache::class)->rebuild();
 
-    Http::fake([
-        'master.example.com/watchtower/sync/blocks*' => Http::sequence()
-            ->push(['data' => [['ip' => '1.2.3.4', 'source' => 'manual']], 'next_cursor' => '01J00000000000000000000001'])
-            ->push([], 500),
-    ]);
+    $pages = 0;
 
-    $this->artisan('watchtower:sync')
-        ->assertFailed()
-        ->expectsOutputToContain('HTTP 500');
+    Http::fake(function () use (&$pages, $failure) {
+        if (++$pages === 1) {
+            return Http::response(['data' => [['ip' => '1.2.3.4', 'source' => 'manual']], 'next_cursor' => '01J00000000000000000000001']);
+        }
+
+        // Either the master answering badly, or no answer at all — the second
+        // goes through the command's catch rather than its status check.
+        return $failure === 'status'
+            ? Http::response([], 500)
+            : throw new ConnectionException('Connection refused');
+    });
+
+    $this->artisan('watchtower:sync')->assertFailed();
 
     expect(app(BlacklistCache::class)->isBlocked('1.2.3.4'))->toBeTrue();
-});
+})->with(['status', 'connection']);

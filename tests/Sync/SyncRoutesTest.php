@@ -171,11 +171,25 @@ it('pages a pull that asks for pages, and ends on a null cursor', function () {
     $cursor = $first->json('next_cursor');
     expect($cursor)->toBe(BlacklistedIp::orderBy('id')->skip(SyncController::PAGE_SIZE - 1)->value('id'));
 
-    $this->withHeaders(signedHeaders('GET', SyncSignature::PULL_PATH))
+    $second = $this->withHeaders(signedHeaders('GET', SyncSignature::PULL_PATH))
         ->get(SyncSignature::PULL_PATH."?after={$cursor}")
         ->assertOk()
         ->assertJsonCount(1, 'data')
-        ->assertJsonPath('data.0.ip', BlacklistedIp::orderByDesc('id')->value('ip'))
+        ->assertJsonPath('next_cursor', null);
+
+    // Together the pages are the blocklist: nothing dropped, nothing twice.
+    $pulled = array_merge(array_column($first->json('data'), 'ip'), array_column($second->json('data'), 'ip'));
+    expect($pulled)->toHaveCount(SyncController::PAGE_SIZE + 1)
+        ->and($pulled)->toEqualCanonicalizing(BlacklistedIp::pluck('ip')->all());
+});
+
+it('ends on the first page when it holds exactly a page of blocks', function () {
+    seedMasterBlocks(SyncController::PAGE_SIZE);
+
+    $this->withHeaders(signedHeaders('GET', SyncSignature::PULL_PATH))
+        ->get(SyncSignature::PULL_PATH.'?after=0')
+        ->assertOk()
+        ->assertJsonCount(SyncController::PAGE_SIZE, 'data')
         ->assertJsonPath('next_cursor', null);
 });
 
@@ -191,16 +205,16 @@ it('sends the whole list to a satellite too old to ask for pages', function () {
         ->assertJsonMissingPath('next_cursor');
 });
 
-it('sends only the columns a satellite reads', function () {
+it('sends only the columns a satellite reads', function (string $query) {
     BlacklistedIp::create(['ip' => '1.2.3.4', 'source' => BlockSource::Manual, 'source_env' => 'production']);
 
     $row = $this->withHeaders(signedHeaders('GET', SyncSignature::PULL_PATH))
-        ->get(SyncSignature::PULL_PATH.'?after=0')
+        ->get(SyncSignature::PULL_PATH.$query)
         ->assertOk()
         ->json('data.0');
 
     expect(array_keys($row))->toEqualCanonicalizing(['ip', 'reason', 'source_env', 'source', 'expires_at', 'blocked_by']);
-});
+})->with(['paged' => '?after=0', 'unpaged' => '']);
 
 it('rejects a malformed cursor', function () {
     $this->withHeaders(signedHeaders('GET', SyncSignature::PULL_PATH) + ['Accept' => 'application/json'])
