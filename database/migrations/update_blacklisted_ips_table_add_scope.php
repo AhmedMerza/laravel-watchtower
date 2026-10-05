@@ -2,12 +2,17 @@
 
 use Illuminate\Database\Migrations\Migration;
 use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 
 return new class extends Migration
 {
     public function up(): void
     {
+        if ($this->ranFromVendor()) {
+            return;
+        }
+
         Schema::table('blacklisted_ips', function (Blueprint $table) {
             // '' means global — a block that applies to the whole app, which is
             // every block that existed before this migration. NOT NULL with a
@@ -38,6 +43,10 @@ return new class extends Migration
      */
     public function down(): void
     {
+        if ($this->ranFromVendor()) {
+            return;
+        }
+
         Schema::table('blacklisted_ips', function (Blueprint $table) {
             $table->dropUnique(['ip', 'scope']);
         });
@@ -49,5 +58,19 @@ return new class extends Migration
         Schema::table('blacklisted_ips', function (Blueprint $table) {
             $table->dropColumn('scope');
         });
+    }
+
+    /**
+     * Whether this already ran under its undated name — loaded straight from
+     * vendor by runsMigrations() before 0.7.0 — so this published, dated
+     * copy is the same migration a second time (#128). It then does nothing,
+     * up or down: rolling it back must not drop what it never created.
+     */
+    private function ranFromVendor(): bool
+    {
+        $table = config('database.migrations');
+        $table = is_array($table) ? ($table['table'] ?? 'migrations') : ($table ?? 'migrations');
+
+        return Schema::hasTable($table) && DB::table($table)->where('migration', 'update_blacklisted_ips_table_add_scope')->exists();
     }
 };

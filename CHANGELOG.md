@@ -4,6 +4,14 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-10-05
+
+No new migrations. If you installed before 0.7.0 and never published Watchtower's migrations, publish and migrate after upgrading; see [Upgrading](docs/upgrading.md).
+
+### Fixed
+
+- **An install from before 0.7.0 that never published its migrations can upgrade again.** Those migrations ran from vendor under undated names. After 0.7.0 removed `runsMigrations()`, such an app either never got the 0.9.0 columns (if it didn't publish) or crashed with *table already exists* (if it did). The published copies of `create_blacklisted_ips_table`, `create_ip_offences_table` and `update_blacklisted_ips_table_add_scope` now do nothing, up or down, when their undated record is present. Publishing and migrating then adds only what's missing, and a rollback never drops a table those copies didn't create. See [Upgrading](docs/upgrading.md) ([#128](https://github.com/AhmedMerza/laravel-watchtower/issues/128)).
+
 ## [0.10.0] - 2026-10-05
 
 No migrations and nothing breaking: a `composer update` is enough.
@@ -286,7 +294,8 @@ No migrations and nothing breaking: a `composer update` is enough.
 
 - **There is no transitional `ahmedmerza/logscope-guard` package.** It has been removed from Packagist. To upgrade, `composer remove ahmedmerza/logscope-guard`, `composer require ahmedmerza/watchtower`, then work through the BREAKING entries under Changed.
 
-[Unreleased]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.10.1...HEAD
+[0.10.1]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.7.0...v0.8.0
