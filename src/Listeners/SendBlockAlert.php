@@ -54,6 +54,8 @@ class SendBlockAlert
 
         // Every event, sent or not: the digest is the whole day, and what the
         // throttle or cap held back is exactly what it exists to report.
+        // Nothing is recorded with no route to send it on: the digest
+        // couldn't go anywhere either.
         if ($digest) {
             $this->record($alert, $sent);
         }
@@ -122,23 +124,56 @@ class SendBlockAlert
     }
 
     /**
-     * One row for the digest. Caught like everything else here: a missing
-     * table — the migration not yet run — must not cost the block.
+     * Count the event into its address's open digest row, or start one.
+     * Caught like everything else here: a missing table — the migration not
+     * yet run — must not cost the block.
+     *
+     * By id, not by the matching columns: two events racing to start the
+     * same row can leave two, and an update by columns would then count
+     * every later repeat twice. Two rows the digest adds up; double counts it
+     * can't undo. An update that finds the row sealed by a digest mid-send
+     * changes nothing, and the event starts the next row.
      *
      * @param  array<string, mixed>  $alert
      */
     private function record(array $alert, bool $sent): void
     {
         try {
-            DB::table('watchtower_alert_digest')->insert([
+            $row = [
                 'type'                => $alert['type'],
                 'ip'                  => app(BlacklistService::class)->normalizeTarget($alert['ip']),
                 'scope'               => $alert['scope'] ?? BlockScope::GLOBAL,
                 'reason'              => $alert['reason'],
                 'not_blocked_because' => $alert['not_blocked_because'] ?? null,
-                'sent'                => $sent,
-                'created_at'          => now(),
-            ]);
+            ];
+
+            $open = fn () => DB::table('watchtower_alert_digest')->where('sealed', false);
+
+            $id = $open()
+                ->where('ip', $row['ip'])
+                ->where('type', $row['type'])
+                ->where('scope', $row['scope'])
+                ->where('reason', $row['reason'])
+                ->where(fn ($q) => $row['not_blocked_because'] === null
+                    ? $q->whereNull('not_blocked_because')
+                    : $q->where('not_blocked_because', $row['not_blocked_because']))
+                ->value('id');
+
+            $counted = $id !== null && $open()->where('id', $id)->incrementEach(
+                ['events' => 1, 'held_back' => $sent ? 0 : 1],
+                ['last_at' => now()],
+            ) > 0;
+
+            if (! $counted) {
+                DB::table('watchtower_alert_digest')->insert([
+                    ...$row,
+                    'events'    => 1,
+                    'held_back' => $sent ? 0 : 1,
+                    'sealed'    => false,
+                    'first_at'  => now(),
+                    'last_at'   => now(),
+                ]);
+            }
         } catch (\Throwable $e) {
             Log::channel(config('watchtower.log_channel', 'stack'))->warning('Watchtower: could not record the alert for the digest', [
                 'ip'    => $alert['ip'],

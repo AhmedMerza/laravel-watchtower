@@ -150,7 +150,7 @@ The digest uses the same routes as the instant alerts and is sent by `watchtower
 - Laravel's scheduler must be running.
 - Publish and run the `watchtower_alert_digest` migration.
 
-Each event is stored as one row until the digest that reports it goes out. If the digest can't be sent on any channel, the rows are kept and the next run reports them. The digest lists the 50 busiest addresses and counts the rest.
+Events are stored as one row per address and reason, which counts its repeats, until the digest that reports them goes out. If the digest can't be sent on any channel, the rows are kept and the next run reports them. `watchtower:cleanup` deletes rows that no digest has sent within 7 days, for example because the scheduler has stopped. The digest lists the 50 busiest addresses and counts the rest.
 
 | Setting | Env | Default | |
 |---|---|---|---|

@@ -15,8 +15,9 @@ return new class extends Migration
      * block is deleted from there long before the evening, and a near miss
      * was never stored at all.
      *
-     * One row per event. The digest groups them when it sends, and deletes
-     * the rows it sent.
+     * One row per address and reason, counting its repeats, not one per
+     * event: a near miss behind a shared gateway can fire on every request,
+     * and the table must grow with addresses, not traffic.
      */
     public function up(): void
     {
@@ -36,11 +37,24 @@ return new class extends Migration
             $table->text('reason');
             $table->string('not_blocked_because', 100)->nullable();
 
-            // Whether the instant alert went out for this event, so the
-            // digest can say what the throttle or cap held back.
-            $table->boolean('sent')->default(false);
+            $table->unsignedInteger('events')->default(1);
 
-            $table->timestamp('created_at')->nullable();
+            // How many of those the throttle or cap kept from alerting at
+            // the time.
+            $table->unsignedInteger('held_back')->default(0);
+
+            // Claimed by a digest that is sending. Repeats after that start a
+            // new row, so nothing that happens mid-send is deleted with it.
+            $table->boolean('sealed')->default(false);
+
+            $table->timestamp('first_at')->nullable();
+            $table->timestamp('last_at')->nullable();
+
+            // The listener finds an address's open row by these.
+            $table->index(['ip', 'type']);
+
+            // watchtower:cleanup drops rows no digest ever took.
+            $table->index('last_at');
         });
     }
 

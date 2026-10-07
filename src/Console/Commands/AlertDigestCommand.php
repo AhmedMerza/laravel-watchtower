@@ -8,6 +8,7 @@ use Illuminate\Console\Command;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Notification;
+use Illuminate\Support\Facades\Schema;
 use Watchtower\Notifications\BlockDigest;
 use Watchtower\Support\AlertChannels;
 use Watchtower\Support\BlockScope;
@@ -39,18 +40,24 @@ class AlertDigestCommand extends Command
             return self::SUCCESS;
         }
 
-        // Everything up to here and no further. Rows a block writes while
-        // this sends have a higher id, so the delete below leaves them for
-        // tomorrow's digest instead of dropping them unreported.
-        $last = DB::table('watchtower_alert_digest')->max('id');
+        if (! Schema::hasTable('watchtower_alert_digest')) {
+            $this->error('The watchtower_alert_digest table is missing. Publish and run the migration: php artisan vendor:publish --tag=watchtower-migrations && php artisan migrate');
 
-        if ($last === null) {
+            return self::FAILURE;
+        }
+
+        // Claim what is there now. A block during the send counts into a new,
+        // unsealed row, which the delete below leaves for the next digest.
+        // Rows a failed run sealed stay sealed and go out with the next one.
+        DB::table('watchtower_alert_digest')->where('sealed', false)->update(['sealed' => true]);
+
+        if (! DB::table('watchtower_alert_digest')->where('sealed', true)->exists()) {
             $this->info('Nothing to report since the last digest.');
 
             return self::SUCCESS;
         }
 
-        $digest = $this->digest((int) $last, (bool) ($config['digest']['instant'] ?? true));
+        $digest = $this->digest((bool) ($config['digest']['instant'] ?? true));
         $class = $config['digest']['notification'] ?? BlockDigest::class;
 
         // One channel at a time, as the instant alert does: a broken Slack
@@ -79,68 +86,68 @@ class AlertDigestCommand extends Command
             return self::FAILURE;
         }
 
-        $sent = DB::table('watchtower_alert_digest')->where('id', '<=', $last)->delete();
+        DB::table('watchtower_alert_digest')->where('sealed', true)->delete();
 
         $addresses = array_sum($digest['totals']);
-        $this->info("Sent the digest: {$sent} event(s) across {$addresses} address(es).");
+        $this->info("Sent the digest: {$addresses} address(es).");
 
         return self::SUCCESS;
     }
 
     /**
-     * Grouped in the database, so a busy day costs one row per address here,
-     * not one per event. `sent` is grouped on rather than summed: summing a
-     * boolean is written differently on every driver.
+     * Everything in the database: the listing is the top MAX_ENTRIES, and the
+     * totals are counts, so a day of a thousand addresses costs fifty rows
+     * here, not a thousand.
      *
      * @return array<string, mixed>
      */
-    private function digest(int $last, bool $instant): array
+    private function digest(bool $instant): array
     {
-        $rows = DB::table('watchtower_alert_digest')
-            ->where('id', '<=', $last)
-            ->select(['type', 'ip', 'scope', 'reason', 'not_blocked_because', 'sent'])
-            ->selectRaw('count(*) as events, min(created_at) as first_at, max(created_at) as last_at')
-            ->groupBy(['type', 'ip', 'scope', 'reason', 'not_blocked_because', 'sent'])
-            ->get();
+        $sealed = fn () => DB::table('watchtower_alert_digest')->where('sealed', true);
+        $group = ['type', 'ip', 'scope', 'reason', 'not_blocked_because'];
 
-        $entries = [];
-
-        foreach ($rows as $row) {
-            $key = implode("\0", [$row->type, $row->ip, $row->scope, $row->reason, $row->not_blocked_because]);
-            $entry = $entries[$key] ?? [
+        // Blocks first ('blocked' sorts before 'would_have_blocked'), then
+        // the busiest.
+        $entries = $sealed()
+            ->select($group)
+            ->selectRaw('sum(events) as events, sum(held_back) as held_back, min(first_at) as first_at, max(last_at) as last_at')
+            ->groupBy($group)
+            ->orderBy('type')
+            ->orderByRaw('sum(events) desc')
+            ->orderBy('ip')
+            ->limit(self::MAX_ENTRIES)
+            ->get()
+            ->map(fn ($row) => [
                 'type'                => $row->type,
                 'ip'                  => $row->ip,
                 'scope'               => $row->scope === BlockScope::GLOBAL ? null : $row->scope,
                 'reason'              => $row->reason,
                 'not_blocked_because' => $row->not_blocked_because,
-                'events'              => 0,
-                'held_back'           => 0,
+                'events'              => (int) $row->events,
+                'held_back'           => (int) $row->held_back,
                 'first_at'            => (string) $row->first_at,
                 'last_at'             => (string) $row->last_at,
-            ];
+            ])
+            ->all();
 
-            $entry['events'] += (int) $row->events;
-            $entry['held_back'] += $row->sent ? 0 : (int) $row->events;
-            $entry['first_at'] = min($entry['first_at'], (string) $row->first_at);
-            $entry['last_at'] = max($entry['last_at'], (string) $row->last_at);
-            $entries[$key] = $entry;
-        }
+        $groups = DB::query()->fromSub($sealed()->select($group)->groupBy($group), 'g')->count();
 
-        // Blocks first, then the busiest.
-        usort($entries, fn (array $a, array $b) => [$a['type'] !== 'blocked', $b['events']] <=> [$b['type'] !== 'blocked', $a['events']]);
-
-        $totals = ['blocked' => [], 'would_have_blocked' => []];
-
-        foreach ($entries as $entry) {
-            $totals[$entry['type']][$entry['ip']."\0".$entry['scope']] = true;
-        }
+        $totals = DB::query()
+            ->fromSub($sealed()->select(['type', 'ip', 'scope'])->groupBy(['type', 'ip', 'scope']), 'a')
+            ->select('type')
+            ->selectRaw('count(*) as addresses')
+            ->groupBy('type')
+            ->pluck('addresses', 'type');
 
         return [
-            'since'   => min(array_column($entries, 'first_at')),
+            'since'   => (string) $sealed()->min('first_at'),
             'instant' => $instant,
-            'totals'  => array_map('count', $totals),
-            'entries' => array_slice($entries, 0, self::MAX_ENTRIES),
-            'omitted' => max(0, count($entries) - self::MAX_ENTRIES),
+            'totals'  => [
+                'blocked'            => (int) ($totals['blocked'] ?? 0),
+                'would_have_blocked' => (int) ($totals['would_have_blocked'] ?? 0),
+            ],
+            'entries' => $entries,
+            'omitted' => max(0, $groups - count($entries)),
             'url'     => AlertChannels::link(),
         ];
     }

@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace Watchtower\Console\Commands;
 
 use Illuminate\Console\Command;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use Watchtower\Events\IpUnblocked;
 use Watchtower\Models\BlacklistedIp;
 use Watchtower\Services\BlacklistCache;
@@ -16,6 +18,9 @@ class CleanupCommand extends Command
     protected $signature = 'watchtower:cleanup';
 
     protected $description = 'Delete expired temporary blocks from the database and rebuild the Redis cache';
+
+    /** Alert digest rows older than this, never sent, are dropped. */
+    public const DIGEST_RETENTION_DAYS = 7;
 
     public function __construct(
         private readonly BlacklistCache $cache,
@@ -56,6 +61,14 @@ class CleanupCommand extends Command
             $this->flushHits();
         } catch (\Throwable $e) {
             $this->warn('Could not flush hit counts, carrying on with the blocks: '.$e->getMessage());
+        }
+
+        // Caught like the two above: housekeeping for the alert digest, which
+        // is off by default and whose table may not exist.
+        try {
+            $this->pruneDigest();
+        } catch (\Throwable $e) {
+            $this->warn('Could not prune the alert digest, carrying on with the blocks: '.$e->getMessage());
         }
 
         // Fetched before the bulk delete below: this is the OTHER path a
@@ -107,6 +120,27 @@ class CleanupCommand extends Command
         }
 
         return self::SUCCESS;
+    }
+
+    /**
+     * Drop alert digest rows no digest has taken in DIGEST_RETENTION_DAYS —
+     * the scheduler isn't running, every channel keeps failing, or the
+     * digest was turned off after rows were written. Without this they
+     * would pile up for good.
+     */
+    private function pruneDigest(): void
+    {
+        if (! Schema::hasTable('watchtower_alert_digest')) {
+            return;
+        }
+
+        $pruned = DB::table('watchtower_alert_digest')
+            ->where('last_at', '<', now()->subDays(self::DIGEST_RETENTION_DAYS))
+            ->delete();
+
+        if ($pruned > 0) {
+            $this->info("Dropped {$pruned} alert digest row(s) older than ".self::DIGEST_RETENTION_DAYS.' days that no digest sent.');
+        }
     }
 
     /**
