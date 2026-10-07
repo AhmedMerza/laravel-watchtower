@@ -243,6 +243,26 @@ it('lets an address the cap held back alert once the window turns over', functio
     Notification::assertSentOnDemandTimes(BlockAlert::class, 2);
 });
 
+it('recovers at the next window when the cap counter lost its TTL', function () {
+    // The counter's add() is lost (the key expired or was evicted before
+    // increment()), so increment() recreates it with no TTL — on the array
+    // store and Redis alike. Named by window, it can only mute its own.
+    Cache::extend('watchtower-lossy-counter', fn () => Cache::repository(new WatchtowerTestLossyCounterStore));
+    config()->set('cache.stores.watchtower-lossy-counter', ['driver' => 'watchtower-lossy-counter']);
+    config()->set('watchtower.cache.store', 'watchtower-lossy-counter');
+    config()->set('watchtower.notifications.alerts.max_per_window', 1);
+    $this->travelTo(now()->startOfHour());
+
+    block('198.51.100.1', BlockSource::Auto);
+    block('198.51.100.2', BlockSource::Auto);
+    Notification::assertSentOnDemandTimes(BlockAlert::class, 1);
+
+    $this->travel(61)->minutes();
+    block('198.51.100.3', BlockSource::Auto);
+
+    Notification::assertSentOnDemandTimes(BlockAlert::class, 2);
+});
+
 it('sends the alert without a link when APP_URL is empty', function () {
     config()->set('app.url', '');
 
@@ -459,5 +479,17 @@ class WatchtowerTestBrokenSlackAlert extends BlockAlert
         }
 
         return parent::via($notifiable);
+    }
+}
+
+class WatchtowerTestLossyCounterStore extends ArrayStore
+{
+    public function put($key, $value, $seconds)
+    {
+        // Only the write with a TTL — add()'s. increment() on a missing key
+        // stores it forever (seconds 0), and that write has to land.
+        return str_contains($key, ':alert:') && str_contains($key, ':count') && $seconds > 0
+            ? true
+            : parent::put($key, $value, $seconds);
     }
 }
