@@ -49,7 +49,10 @@ class SendBlockAlert
         }
 
         $minutes = (int) ($config['throttle_minutes'] ?? 60);
-        $slot = null;
+
+        // What this alert has taken so far, filled in step by step, so a
+        // failure at any point hands back exactly that and nothing more.
+        $taken = ['slot' => null, 'counter' => null];
 
         // Everything from the first cache call on is caught, not thrown: this
         // runs inside the block itself, and on the sync queue driver inside
@@ -57,9 +60,7 @@ class SendBlockAlert
         // crash the block it was only meant to report — nor the request a
         // detector is checking.
         try {
-            $slot = $this->claimSlot($alert, $minutes, (int) ($config['max_per_window'] ?? 20));
-
-            if ($slot === false) {
+            if (! $this->claim($alert, $minutes, (int) ($config['max_per_window'] ?? 20), $taken)) {
                 return;
             }
 
@@ -68,10 +69,15 @@ class SendBlockAlert
 
             Notification::routes($routes)->notify(new $class($alert));
         } catch (\Throwable $e) {
-            // Give the slot back, or a mailer that was down for a minute
-            // would silence this address for the rest of the window.
-            if (is_string($slot)) {
-                rescue(fn () => $this->cache()->forget($slot), report: false);
+            // Hand back what was taken, or a mailer that was down for a minute
+            // would silence this address — and use up the cap — for the rest
+            // of the window.
+            if ($taken['slot'] !== null) {
+                rescue(fn () => $this->cache()->forget($taken['slot']), report: false);
+            }
+
+            if ($taken['counter'] !== null) {
+                rescue(fn () => $this->cache()->decrement($taken['counter']), report: false);
             }
 
             Log::channel(config('watchtower.log_channel', 'stack'))->warning('Watchtower: block alert failed', [
@@ -161,32 +167,46 @@ class SendBlockAlert
      *   scanner rotating through a thousand addresses sends $max, not a
      *   thousand. The first one over the cap is logged, once.
      *
-     * Returns the per-address key it claimed (handed back if the send fails),
-     * null when throttling is off, or false when this alert is suppressed.
+     * The cap counts in fixed windows named by their start, not a key whose
+     * TTL is set once by add(): a key that expires between add() and
+     * increment() is recreated by increment() with no TTL on some stores, and
+     * a forever counter would mute the kind for good. Named by window, a key
+     * that loses its TTL belongs to a window already over.
      *
      * @param  array<string, mixed>  $alert
+     * @param  array{slot: ?string, counter: ?string}  $taken
      */
-    private function claimSlot(array $alert, int $minutes, int $max): string|false|null
+    private function claim(array $alert, int $minutes, int $max, array &$taken): bool
     {
         if ($minutes <= 0) {
-            return null;
+            return true;
         }
 
+        $seconds = $minutes * 60;
         $prefix = (string) config('watchtower.cache.key', 'watchtower:blacklist');
         $target = app(BlacklistService::class)->normalizeTarget($alert['ip']);
         $slot = "{$prefix}:alert:{$alert['type']}:".($alert['scope'] ?? '').":{$target}";
 
-        if (! $this->cache()->add($slot, true, $minutes * 60)) {
+        if (! $this->cache()->add($slot, true, $seconds)) {
             return false;
         }
 
+        $taken['slot'] = $slot;
+
         if ($max <= 0) {
-            return $slot;
+            return true;
         }
 
-        $counter = "{$prefix}:alert:{$alert['type']}:count";
-        $this->cache()->add($counter, 0, $minutes * 60);
+        $window = intdiv(now()->getTimestamp(), $seconds);
+        $counter = "{$prefix}:alert:{$alert['type']}:count:{$window}";
+
+        $this->cache()->add($counter, 0, $seconds * 2);
         $sent = (int) $this->cache()->increment($counter);
+        $taken['counter'] = $counter;
+
+        if ($sent <= $max) {
+            return true;
+        }
 
         if ($sent === $max + 1) {
             Log::channel(config('watchtower.log_channel', 'stack'))->warning('Watchtower: alert cap reached, further alerts suppressed', [
@@ -196,7 +216,11 @@ class SendBlockAlert
             ]);
         }
 
-        return $sent > $max ? false : $slot;
+        // Nothing was sent for this address, so it keeps no slot: once the
+        // cap's window turns over, its next block reports like any other.
+        $this->cache()->forget($slot);
+
+        return false;
     }
 
     private function cache(): Repository
@@ -224,8 +248,13 @@ class SendBlockAlert
             return null;
         }
 
-        return $route->getDomain() !== null
-            ? route('watchtower.ui.index')
-            : rtrim((string) config('app.url'), '/').route('watchtower.ui.index', [], false);
+        // An alert without a link beats no alert: a domain with a parameter
+        // in it ({tenant}.example.com) can't be built from here, and an empty
+        // APP_URL would give a link with no host.
+        return rescue(fn () => match (true) {
+            $route->getDomain() !== null           => route('watchtower.ui.index'),
+            (string) config('app.url') === ''      => null,
+            default                                => rtrim((string) config('app.url'), '/').route('watchtower.ui.index', [], false),
+        }, null, report: false);
     }
 }

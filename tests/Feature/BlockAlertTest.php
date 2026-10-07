@@ -186,6 +186,57 @@ it('logs and moves on when the throttle cache itself throws', function () {
     Notification::assertNothingSent();
 });
 
+it('hands the address back when the cache fails after claiming it', function () {
+    WatchtowerTestFlakyCounterStore::$failures = 1;
+    Cache::extend('watchtower-flaky-counter', fn () => Cache::repository(new WatchtowerTestFlakyCounterStore));
+    config()->set('cache.stores.watchtower-flaky-counter', ['driver' => 'watchtower-flaky-counter']);
+    config()->set('watchtower.cache.store', 'watchtower-flaky-counter');
+    config()->set('watchtower.notifications.alerts.would_have_blocked', true);
+
+    // The address's slot is taken, then counting toward the cap throws.
+    event(new WouldHaveBlocked('198.51.100.1', 'test', 'warn mode', BlockScope::GLOBAL));
+    Notification::assertNothingSent();
+
+    event(new WouldHaveBlocked('198.51.100.1', 'test', 'warn mode', BlockScope::GLOBAL));
+    Notification::assertSentOnDemandTimes(BlockAlert::class, 1);
+});
+
+it('does not count a failed send toward the cap', function () {
+    config()->set('watchtower.notifications.alerts.max_per_window', 1);
+    config()->set('watchtower.notifications.alerts.notification', WatchtowerTestFlakyAlert::class);
+    WatchtowerTestFlakyAlert::$failures = 1;
+
+    block('198.51.100.1', BlockSource::Auto);
+    block('198.51.100.2', BlockSource::Auto);
+
+    Notification::assertSentOnDemand(WatchtowerTestFlakyAlert::class, fn ($a) => $a->alert['ip'] === '198.51.100.2');
+});
+
+it('lets an address the cap held back alert once the window turns over', function () {
+    config()->set('watchtower.notifications.alerts.max_per_window', 1);
+    $this->travelTo(now()->startOfHour()->addMinutes(59));
+
+    block('198.51.100.1', BlockSource::Auto);
+    block('198.51.100.2', BlockSource::Auto);
+    Notification::assertSentOnDemandTimes(BlockAlert::class, 1);
+
+    // The cap's window has turned over; .2 never got an alert, so nothing
+    // of its own should still be holding it back.
+    $this->travel(2)->minutes();
+    app(BlacklistService::class)->unblock('198.51.100.2');
+    block('198.51.100.2', BlockSource::Auto);
+
+    Notification::assertSentOnDemandTimes(BlockAlert::class, 2);
+});
+
+it('sends the alert without a link when APP_URL is empty', function () {
+    config()->set('app.url', '');
+
+    block('198.51.100.1', BlockSource::Auto);
+
+    Notification::assertSentOnDemand(BlockAlert::class, fn (BlockAlert $a) => $a->alert['url'] === null);
+});
+
 it('caps alerts per window across addresses, and logs reaching the cap once', function () {
     config()->set('watchtower.notifications.alerts.max_per_window', 2);
     $channel = Mockery::mock()->shouldIgnoreMissing();
@@ -362,5 +413,21 @@ class WatchtowerTestFlakyAlert extends BlockAlert
         }
 
         return parent::via($notifiable);
+    }
+}
+
+class WatchtowerTestFlakyCounterStore extends ArrayStore
+{
+    public static int $failures = 0;
+
+    public function increment($key, $value = 1)
+    {
+        if (self::$failures > 0) {
+            self::$failures--;
+
+            throw new RuntimeException('cache blip');
+        }
+
+        return parent::increment($key, $value);
     }
 }
