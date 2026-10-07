@@ -392,7 +392,7 @@ it('warns when block mode would have locked signed-in users out', function () {
 });
 
 it('does not guess what block mode would do from a line that predates in_block_mode', function () {
-    // oreem ran v0.6.1 until v0.11.0: a week of its history has no
+    // An install upgraded from v0.6.1 has history with no
     // in_block_mode at all. Reading that as 'blocked' would be invented.
     onlyDetector('response_bursts');
     wouldHaveBlocked('10.0.0.9', 'response_bursts', 30, ['user_ids' => [7], 'in_block_mode' => null]);

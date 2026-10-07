@@ -638,7 +638,7 @@ return [
                 'statuses'       => [404],
                 // One signed-in user holds an app-wide block back (#121).
                 // A burst of 404s from a signed-in customer is a page that
-                // asks for things that aren't there — scanners in oreem's
+                // asks for things that aren't there — scanners in production
                 // data had no user at all. A scanner that signs in first gets
                 // past this detector; scanner_paths still catches it, and
                 // its user id is in the would-have-blocked line.

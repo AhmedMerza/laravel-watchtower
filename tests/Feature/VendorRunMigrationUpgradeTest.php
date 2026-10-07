@@ -10,7 +10,7 @@ use Illuminate\Support\Facades\Schema;
 /*
  * An install from before 0.7.0 that never published its migrations: they ran
  * from vendor through runsMigrations(), and Laravel recorded them under their
- * undated names (#128). This is oreem's production state, exactly:
+ * undated names (#128). This is a real production install's state, exactly:
  *
  *   create_blacklisted_ips_table, create_ip_offences_table,
  *   update_blacklisted_ips_table_add_scope — and nothing after.
