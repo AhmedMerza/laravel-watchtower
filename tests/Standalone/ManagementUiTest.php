@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Event;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\Route;
 use Watchtower\Enums\BlockSource;
@@ -480,4 +481,114 @@ it('still lists blocks when the cache store does not answer', function () {
         ->assertOk()
         ->assertSee('198.51.100.1')
         ->assertSee("Couldn't read the detectors' state", false);
+});
+
+it('drops the switch when the global mode changes', function () {
+    armFailedLogins();
+    app(AutoBlockService::class)->switchToWarn('failed_logins', 'admin@example.com');
+
+    config()->set('watchtower.auto_block.mode', 'block');
+
+    expect(app(AutoBlockService::class)->detectorMode('failed_logins'))
+        ->toMatchArray(['mode' => 'block', 'override' => null]);
+});
+
+it('does not bring a spent switch back when the old config is restored', function () {
+    armFailedLogins();
+    app(AutoBlockService::class)->switchToWarn('failed_logins', 'admin@example.com');
+
+    // Re-armed in config, read once under the new config, then reverted.
+    config()->set('watchtower.auto_block.detectors.failed_logins.count', 5);
+    app(AutoBlockService::class)->detectorMode('failed_logins');
+    config()->set('watchtower.auto_block.detectors.failed_logins.count', 1);
+
+    expect(app(AutoBlockService::class)->detectorMode('failed_logins')['override'])->toBeNull();
+});
+
+it('retires a switch whose detector was moved to warn in config, so moving it back to block re-arms it', function () {
+    armFailedLogins();
+    app(AutoBlockService::class)->switchToWarn('failed_logins', 'admin@example.com');
+
+    config()->set('watchtower.auto_block.detectors.failed_logins.mode', 'warn');
+    app(AutoBlockService::class)->detectorMode('failed_logins');
+    config()->set('watchtower.auto_block.detectors.failed_logins.mode', 'block');
+
+    expect(app(AutoBlockService::class)->detectorMode('failed_logins')['mode'])->toBe('block');
+});
+
+it('asks before switching, and only on the row it was asked for', function () {
+    armFailedLogins();
+    config()->set('watchtower.auto_block.detectors.scanner_paths.enabled', true);
+    config()->set('watchtower.auto_block.detectors.scanner_paths.mode', 'block');
+
+    signedInAdmin($this)->get('/watchtower?warn=failed_logins')
+        ->assertOk()
+        ->assertSee('action="'.route('watchtower.ui.detectors.warn').'"', false)
+        ->assertSee('name="detector" value="failed_logins"', false)
+        ->assertDontSee('name="detector" value="scanner_paths"', false)
+        ->assertSee('?warn=scanner_paths', false)
+        ->assertSee('Cancel');
+});
+
+it('offers no switch on a detector that is not blocking, even when asked', function () {
+    armFailedLogins();
+    config()->set('watchtower.auto_block.detectors.failed_logins.mode', 'warn');
+
+    signedInAdmin($this)->get('/watchtower?warn=failed_logins')
+        ->assertOk()
+        ->assertDontSee('name="detector"', false);
+});
+
+it('refuses the switch to a user the app\'s Gate does not allow', function () {
+    armFailedLogins();
+    allowAdminOnly();
+
+    uiPost($this->actingAs(eloquentUser('someone@example.com')), '/watchtower/detectors/warn', ['detector' => 'failed_logins'])
+        ->assertForbidden();
+
+    expect(app(AutoBlockService::class)->detectorMode('failed_logins')['override'])->toBeNull();
+});
+
+it('logs who switched a detector', function () {
+    armFailedLogins();
+    Log::shouldReceive('channel')->once()->andReturnSelf();
+    Log::shouldReceive('warning')->once()->with(
+        'Watchtower: detector switched to warn from the management page',
+        ['detector' => 'failed_logins', 'by' => 'admin@example.com'],
+    );
+
+    expect(app(AutoBlockService::class)->switchToWarn('failed_logins', 'admin@example.com'))->toBeTrue();
+});
+
+it('keeps the first switch when the button is pressed again', function () {
+    armFailedLogins();
+    $this->travelTo(now()->subHour());
+    app(AutoBlockService::class)->switchToWarn('failed_logins', 'first@example.com');
+    $this->travelBack();
+
+    uiPost(signedInAdmin($this), '/watchtower/detectors/warn', ['detector' => 'failed_logins'])
+        ->assertSessionHas('watchtower_status', "failed_logins isn't blocking, so there was nothing to switch.");
+
+    expect(app(AutoBlockService::class)->detectorMode('failed_logins')['override'])
+        ->toMatchArray(['by' => 'first@example.com', 'at' => now()->subHour()->getTimestamp()]);
+});
+
+it('says so instead of failing when the cache store is down at the switch', function () {
+    armFailedLogins();
+    config()->set('watchtower.cache.store', 'no-such-store');
+
+    uiPost(signedInAdmin($this), '/watchtower/detectors/warn', ['detector' => 'failed_logins'])
+        ->assertRedirect('/watchtower')
+        ->assertSessionHasErrors('detector');
+});
+
+it('shows a switch whose cached time is unreadable without failing the page', function () {
+    armFailedLogins();
+    app(AutoBlockService::class)->switchToWarn('failed_logins', 'admin@example.com');
+    $key = 'watchtower:blacklist:detector_warn:failed_logins';
+    Cache::store('array')->forever($key, ['at' => 'not a time'] + Cache::store('array')->get($key));
+
+    signedInAdmin($this)->get('/watchtower')
+        ->assertOk()
+        ->assertSee('switched from block by admin@example.com');
 });

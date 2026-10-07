@@ -204,7 +204,13 @@ class ManagementController extends Controller
         $detector = $validator->validated()['detector'];
         $user = $request->user();
 
-        $switched = $autoBlock->switchToWarn($detector, data_get($user, 'email') ?? data_get($user, 'name'));
+        try {
+            $switched = $autoBlock->switchToWarn($detector, data_get($user, 'email') ?? data_get($user, 'name'));
+        } catch (\Throwable) {
+            return $this->backToList($request)->withErrors([
+                'detector' => "Couldn't switch {$detector}: the cache store didn't answer. Change its mode in config instead.",
+            ]);
+        }
 
         return $this->backToList($request)->with(
             'watchtower_status',
@@ -232,8 +238,9 @@ class ManagementController extends Controller
                 $rows[] = [
                     'name'    => (string) $name,
                     'enabled' => (bool) ($settings['enabled'] ?? false),
-                    'count'   => $settings['count'] ?? null,
-                    'window'  => $settings['window_minutes'] ?? null,
+                    // The engine's own defaults, as detect() applies them.
+                    'count'   => max(1, (int) ($settings['count'] ?? 1)),
+                    'window'  => max(1, (int) ($settings['window_minutes'] ?? 5)),
                     'scope'   => $settings['scope'] ?? null,
                 ] + $autoBlock->detectorMode((string) $name);
             }

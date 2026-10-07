@@ -193,14 +193,32 @@ class SimulateCommand extends Command
         foreach ($names as $name) {
             $settings = (array) ($configured[$name] ?? []);
 
+            $mode = $this->mode($settings['mode'] ?? null) ?? $globalMode;
+            $switched = $mode === 'block' && $this->switchedToWarn($name);
+
             $detectors[$name] = [
-                'enabled'   => (bool) ($settings['enabled'] ?? false),
-                'mode'      => $this->mode($settings['mode'] ?? null) ?? $globalMode,
-                'offenders' => $observed['detectors'][$name] ?? [],
+                'enabled'          => (bool) ($settings['enabled'] ?? false),
+                'mode'             => $switched ? 'warn' : $mode,
+                'switched_to_warn' => $switched,
+                'offenders'        => $observed['detectors'][$name] ?? [],
             ];
         }
 
         return ['detectors' => $detectors, 'unreadable' => $observed['unreadable']];
+    }
+
+    /**
+     * Whether someone switched this detector to warn from the management
+     * page (#142) — it is then writing would-have-blocked lines, not blocks,
+     * and the report must say warn. An unreachable cache store reads as no.
+     */
+    private function switchedToWarn(string $name): bool
+    {
+        try {
+            return app(AutoBlockService::class)->detectorMode($name)['override'] !== null;
+        } catch (\Throwable) {
+            return false;
+        }
     }
 
     /**
@@ -227,7 +245,11 @@ class SimulateCommand extends Command
                 'Detector %s [%s]%s',
                 $name,
                 $detector['mode'],
-                $detector['enabled'] ? '' : ' — switched off now',
+                match (true) {
+                    ! $detector['enabled']        => ' — switched off now',
+                    $detector['switched_to_warn'] => ' — switched to warn on the management page',
+                    default                       => '',
+                },
             ));
 
             /** @var list<array<string, mixed>> $offenders */

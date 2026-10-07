@@ -128,20 +128,21 @@ class AutoBlockService
      * change to either drops it — re-arming happens in config, where the
      * arming happened, and never from the page.
      *
-     * @return array{mode: string, configured: string, override: array{by: ?string, at: string}|null}
+     * @return array{mode: string, configured: string, override: array{by: ?string, at: ?int}|null}
      */
     public function detectorMode(string $detector): array
     {
-        [$configured, $fingerprint] = $this->configuredDetectorMode($detector);
+        [$settings, $global] = $this->detectorConfig($detector);
+        $configured = $this->resolveRuleMode($settings, $global);
 
-        // Only a 'block' detector can hold an override, and changing its mode
-        // changes the fingerprint anyway; the check saves a cache read per
-        // signal for every detector that isn't blocking.
-        $stored = $configured === 'block' ? $this->overrideCache()->get($this->overrideKey($detector)) : null;
+        // Read whatever the mode, not only for 'block': reading is what
+        // retires a spent override (see override()), and a detector moved to
+        // warn or disabled in config is exactly the one that must not keep it.
+        $override = $this->override($detector, $settings, $global);
 
-        $override = is_array($stored) && ($stored['fingerprint'] ?? null) === $fingerprint
-            ? ['by' => $stored['by'] ?? null, 'at' => (string) ($stored['at'] ?? '')]
-            : null;
+        if ($configured !== 'block') {
+            $override = null;
+        }
 
         return [
             'mode'       => $override === null ? $configured : 'warn',
@@ -166,12 +167,12 @@ class AutoBlockService
             return false;
         }
 
-        [, $fingerprint] = $this->configuredDetectorMode($detector);
+        [$settings, $global] = $this->detectorConfig($detector);
 
         $this->overrideCache()->forever($this->overrideKey($detector), [
             'by'          => $by,
-            'at'          => now()->toIso8601String(),
-            'fingerprint' => $fingerprint,
+            'at'          => now()->getTimestamp(),
+            'fingerprint' => $this->fingerprint($settings, $global),
         ]);
 
         try {
@@ -189,18 +190,52 @@ class AutoBlockService
     }
 
     /**
-     * @return array{0: string, 1: string} the configured mode, and the
-     *                                     fingerprint an override is tied to
+     * The stored override, if it was made under the config in force now.
+     *
+     * One made under other config is spent, not dormant, so it is deleted
+     * here: left in place, setting the old config back months later — a
+     * revert, a threshold put back — would silently disarm a detector that
+     * was deliberately re-armed. Only `by` and `at` are trusted from the
+     * cache, and only when they have the type that was written.
+     *
+     * @return array{by: ?string, at: ?int}|null
      */
-    private function configuredDetectorMode(string $detector): array
+    private function override(string $detector, array $settings, string $global): ?array
     {
-        $settings = (array) config("watchtower.auto_block.detectors.{$detector}", []);
-        $global = $this->normaliseMode(config('watchtower.auto_block.mode', 'warn'));
+        $key = $this->overrideKey($detector);
+        $stored = $this->overrideCache()->get($key);
+
+        if ($stored === null) {
+            return null;
+        }
+
+        if (! is_array($stored) || ($stored['fingerprint'] ?? null) !== $this->fingerprint($settings, $global)) {
+            $this->overrideCache()->forget($key);
+
+            return null;
+        }
 
         return [
-            $this->resolveRuleMode($settings, $global),
-            hash('sha256', serialize([$settings, $global])),
+            'by' => is_string($stored['by'] ?? null) ? $stored['by'] : null,
+            'at' => is_int($stored['at'] ?? null) ? $stored['at'] : null,
         ];
+    }
+
+    /**
+     * @return array{0: array<string, mixed>, 1: string} the detector's
+     *                                                   settings, and the global mode
+     */
+    private function detectorConfig(string $detector): array
+    {
+        return [
+            (array) config("watchtower.auto_block.detectors.{$detector}", []),
+            $this->normaliseMode(config('watchtower.auto_block.mode', 'warn')),
+        ];
+    }
+
+    private function fingerprint(array $settings, string $global): string
+    {
+        return hash('sha256', serialize([$settings, $global]));
     }
 
     private function overrideKey(string $detector): string
@@ -231,12 +266,12 @@ class AutoBlockService
             return false;
         }
 
-        $mode = $this->resolveRuleMode(
+        $configuredMode = $this->resolveRuleMode(
             $settings,
             $this->normaliseMode(config('watchtower.auto_block.mode', 'warn')),
         );
 
-        if ($mode === 'disabled') {
+        if ($configuredMode === 'disabled') {
             return false;
         }
 

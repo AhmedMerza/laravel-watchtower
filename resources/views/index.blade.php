@@ -259,11 +259,11 @@
                                 @else
                                     <span class="badge">{{ $detector['mode'] }}</span>
                                     @if ($detector['override'])
-                                        <br><span class="muted">switched from block{{ $detector['override']['by'] ? ' by '.$detector['override']['by'] : '' }}, {{ \Illuminate\Support\Carbon::parse($detector['override']['at'])->diffForHumans() }}</span>
+                                        <br><span class="muted">switched from block{{ $detector['override']['by'] ? ' by '.$detector['override']['by'] : '' }}{{ $detector['override']['at'] ? ', '.\Illuminate\Support\Carbon::createFromTimestamp($detector['override']['at'])->diffForHumans() : '' }}</span>
                                     @endif
                                 @endif
                             </td>
-                            <td class="secondary nowrap">{{ $detector['count'] ?? '—' }} in {{ $detector['window'] ?? '—' }} min</td>
+                            <td class="secondary nowrap">{{ $detector['count'] }} in {{ $detector['window'] }} min</td>
                             <td class="secondary">{{ $detector['scope'] ? $detector['scope'].' routes' : 'The whole app' }}</td>
                             <td class="nowrap" style="text-align: right;">
                                 @if ($detector['enabled'] && $detector['mode'] === 'block')
