@@ -66,25 +66,62 @@ class SendBlockAlert
 
             $alert['url'] = $this->url();
             $class = $config['notification'] ?? BlockAlert::class;
-
-            Notification::routes($routes)->notify(new $class($alert));
+            $notifications = array_map(fn () => new $class($alert), $routes);
         } catch (\Throwable $e) {
-            // Hand back what was taken, or a mailer that was down for a minute
-            // would silence this address — and use up the cap — for the rest
-            // of the window.
-            if ($taken['slot'] !== null) {
-                rescue(fn () => $this->cache()->forget($taken['slot']), report: false);
-            }
+            $this->handBack($taken);
+            $this->logFailure($alert, $e);
 
-            if ($taken['counter'] !== null) {
-                rescue(fn () => $this->cache()->decrement($taken['counter']), report: false);
-            }
-
-            Log::channel(config('watchtower.log_channel', 'stack'))->warning('Watchtower: block alert failed', [
-                'ip'    => $alert['ip'],
-                'error' => $e->getMessage(),
-            ]);
+            return;
         }
+
+        // One channel at a time. Laravel sends an on-demand notification's
+        // channels in turn and stops at the first that throws, so on the sync
+        // driver a broken Slack webhook would cost the mail behind it.
+        $delivered = false;
+
+        foreach ($routes as $channel => $route) {
+            try {
+                Notification::route($channel, $route)->notify($notifications[$channel]);
+                $delivered = true;
+            } catch (\Throwable $e) {
+                $this->logFailure($alert, $e, $channel);
+            }
+        }
+
+        // Handed back only when nothing went out. A mailer down for a minute
+        // must not silence the address — or use up the cap — for the window;
+        // but once one channel has delivered, keeping the slot is what stops
+        // a permanently broken second channel from re-sending the first on
+        // every event.
+        if (! $delivered) {
+            $this->handBack($taken);
+        }
+    }
+
+    /**
+     * @param  array{slot: ?string, counter: ?string}  $taken
+     */
+    private function handBack(array $taken): void
+    {
+        if ($taken['slot'] !== null) {
+            rescue(fn () => $this->cache()->forget($taken['slot']), report: false);
+        }
+
+        if ($taken['counter'] !== null) {
+            rescue(fn () => $this->cache()->decrement($taken['counter']), report: false);
+        }
+    }
+
+    /**
+     * @param  array<string, mixed>  $alert
+     */
+    private function logFailure(array $alert, \Throwable $e, ?string $channel = null): void
+    {
+        Log::channel(config('watchtower.log_channel', 'stack'))->warning('Watchtower: block alert failed', array_filter([
+            'ip'      => $alert['ip'],
+            'channel' => $channel,
+            'error'   => $e->getMessage(),
+        ], fn ($value) => $value !== null));
     }
 
     /**

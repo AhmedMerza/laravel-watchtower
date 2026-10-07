@@ -201,6 +201,20 @@ it('hands the address back when the cache fails after claiming it', function () 
     Notification::assertSentOnDemandTimes(BlockAlert::class, 1);
 });
 
+it('keeps sending on the other channels when one throws, and keeps the slot once one delivered', function () {
+    config()->set('watchtower.notifications.alerts.routes', ['slack' => 'https://hooks.slack.com/x', 'mail' => 'ops@example.com']);
+    config()->set('watchtower.notifications.alerts.notification', WatchtowerTestBrokenSlackAlert::class);
+
+    block('198.51.100.1', BlockSource::Auto);
+    app(BlacklistService::class)->unblock('198.51.100.1');
+    block('198.51.100.1', BlockSource::Auto);
+
+    // Slack, first in line, throws every time. The mail behind it still goes
+    // out, once: having delivered, the alert keeps its slot.
+    Notification::assertSentOnDemandTimes(WatchtowerTestBrokenSlackAlert::class, 1);
+    Notification::assertSentOnDemand(WatchtowerTestBrokenSlackAlert::class, fn ($a, array $via) => $via === ['mail']);
+});
+
 it('does not count a failed send toward the cap', function () {
     config()->set('watchtower.notifications.alerts.max_per_window', 1);
     config()->set('watchtower.notifications.alerts.notification', WatchtowerTestFlakyAlert::class);
@@ -296,17 +310,21 @@ it('alerts on a never_auto_block near miss in block mode', function () {
     Notification::assertSentOnDemand(BlockAlert::class, fn (BlockAlert $a) => $a->alert['not_blocked_because'] === 'never_auto_block');
 });
 
-it('routes to whichever channels have a value', function (array $routes, array $channels, array $expected) {
+it('routes to whichever channels have a value, one send per channel', function (array $routes, array $expected) {
     config()->set('watchtower.notifications.alerts.routes', $routes);
 
     block('198.51.100.1', BlockSource::Auto);
 
-    Notification::assertSentOnDemand(BlockAlert::class, fn (BlockAlert $a, array $via, AnonymousNotifiable $to) => $via === $channels
-        && $to->routes === $expected);
+    Notification::assertSentOnDemandTimes(BlockAlert::class, count($expected));
+
+    foreach ($expected as $channel => $route) {
+        Notification::assertSentOnDemand(BlockAlert::class, fn (BlockAlert $a, array $via, AnonymousNotifiable $to) => $via === [$channel]
+            && $to->routes === [$channel => $route]);
+    }
 })->with([
-    'slack only'      => [['mail' => null, 'slack' => 'https://hooks.slack.com/x'], ['slack'], ['slack' => 'https://hooks.slack.com/x']],
-    'mail as a list'  => [['mail' => ['a@example.com'], 'slack' => []], ['mail'], ['mail' => ['a@example.com']]],
-    'both'            => [['mail' => 'a@example.com', 'slack' => 'https://hooks.slack.com/x'], ['mail', 'slack'], ['mail' => ['a@example.com'], 'slack' => 'https://hooks.slack.com/x']],
+    'slack only'     => [['mail' => null, 'slack' => 'https://hooks.slack.com/x'], ['slack' => 'https://hooks.slack.com/x']],
+    'mail as a list' => [['mail' => ['a@example.com'], 'slack' => []], ['mail' => ['a@example.com']]],
+    'both'           => [['mail' => 'a@example.com', 'slack' => 'https://hooks.slack.com/x'], ['mail' => ['a@example.com'], 'slack' => 'https://hooks.slack.com/x']],
 ]);
 
 it('sends the configured notification class on the notifications queue', function () {
@@ -429,5 +447,17 @@ class WatchtowerTestFlakyCounterStore extends ArrayStore
         }
 
         return parent::increment($key, $value);
+    }
+}
+
+class WatchtowerTestBrokenSlackAlert extends BlockAlert
+{
+    public function via(object $notifiable): array
+    {
+        if (array_key_exists('slack', $notifiable->routes)) {
+            throw new RuntimeException('slack webhook 404');
+        }
+
+        return parent::via($notifiable);
     }
 }
