@@ -15,6 +15,7 @@ use Illuminate\Support\Facades\Route;
 use Illuminate\Support\Facades\Schedule;
 use Spatie\LaravelPackageTools\Package;
 use Spatie\LaravelPackageTools\PackageServiceProvider;
+use Watchtower\Console\Commands\AlertDigestCommand;
 use Watchtower\Console\Commands\CleanupCommand;
 use Watchtower\Console\Commands\ImportFeedsCommand;
 use Watchtower\Console\Commands\ImportFirewallCommand;
@@ -65,11 +66,12 @@ class WatchtowerServiceProvider extends PackageServiceProvider
             // these sorted the order they have to run. MigrationOrderTest pins it.
             ->hasMigration('create_blacklisted_ips_table')
             ->hasMigration('create_ip_offences_table')
+            ->hasMigration('create_watchtower_alert_digest_table')
             ->hasMigration('update_blacklisted_ips_table_add_hits')
             ->hasMigration('update_blacklisted_ips_table_add_scope')
             ->hasMigration('update_blacklisted_ips_table_source_feed')
             ->hasViews()
-            ->hasCommands([InstallCommand::class, SyncCommand::class, CleanupCommand::class, SimulateCommand::class, ReconcileCommand::class, ImportFeedsCommand::class, ImportFirewallCommand::class]);
+            ->hasCommands([InstallCommand::class, SyncCommand::class, CleanupCommand::class, SimulateCommand::class, ReconcileCommand::class, ImportFeedsCommand::class, ImportFirewallCommand::class, AlertDigestCommand::class]);
     }
 
     public function registeringPackage(): void
@@ -123,6 +125,13 @@ class WatchtowerServiceProvider extends PackageServiceProvider
             Schedule::command('watchtower:import-feeds')
                 ->daily()
                 ->name('watchtower:import-feeds')
+                ->withoutOverlapping();
+        }
+
+        if (config('watchtower.notifications.alerts.enabled', false) && config('watchtower.notifications.alerts.digest.enabled', false)) {
+            Schedule::command('watchtower:alert-digest')
+                ->dailyAt((string) config('watchtower.notifications.alerts.digest.at', '08:00'))
+                ->name('watchtower:alert-digest')
                 ->withoutOverlapping();
         }
 

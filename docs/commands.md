@@ -29,6 +29,10 @@ php artisan watchtower:reconcile
 php artisan watchtower:import-feeds
 php artisan watchtower:import-feeds --force   # accept a feed that shrank by more than half
 
+# Send the alert digest: every block and near miss since the last one.
+# Runs automatically at notifications.alerts.digest.at when the digest is on.
+php artisan watchtower:alert-digest
+
 # Import antonioribeiro/firewall's blocks. A dry run unless --commit;
 # prints its whitelist for never_block. Safe to re-run.
 php artisan watchtower:import-firewall

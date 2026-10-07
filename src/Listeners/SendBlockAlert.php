@@ -6,14 +6,15 @@ namespace Watchtower\Listeners;
 
 use Illuminate\Contracts\Cache\Repository;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Notification;
-use Illuminate\Support\Facades\Route;
 use Watchtower\Enums\BlockSource;
 use Watchtower\Events\IpBlocked;
 use Watchtower\Events\WouldHaveBlocked;
 use Watchtower\Notifications\BlockAlert;
 use Watchtower\Services\BlacklistService;
+use Watchtower\Support\AlertChannels;
 use Watchtower\Support\BlockScope;
 
 /**
@@ -42,12 +43,32 @@ class SendBlockAlert
             return;
         }
 
-        $routes = $this->routes($config['routes'] ?? []);
+        $routes = AlertChannels::routes($config['routes'] ?? []);
 
         if ($routes === []) {
             return;
         }
 
+        $digest = (bool) ($config['digest']['enabled'] ?? false);
+        $sent = (! $digest || ($config['digest']['instant'] ?? true)) && $this->alertNow($alert, $routes, $config);
+
+        // Every event, sent or not: the digest is the whole day, and what the
+        // throttle or cap held back is exactly what it exists to report.
+        if ($digest) {
+            $this->record($alert, $sent);
+        }
+    }
+
+    /**
+     * The instant alert, through the throttle and cap. True when at least one
+     * channel took it.
+     *
+     * @param  array<string, mixed>  $alert
+     * @param  array<string, mixed>  $routes
+     * @param  array<string, mixed>  $config
+     */
+    private function alertNow(array $alert, array $routes, array $config): bool
+    {
         $minutes = (int) ($config['throttle_minutes'] ?? 60);
 
         // What this alert has taken so far, filled in step by step, so a
@@ -61,17 +82,17 @@ class SendBlockAlert
         // detector is checking.
         try {
             if (! $this->claim($alert, $minutes, (int) ($config['max_per_window'] ?? 20), $taken)) {
-                return;
+                return false;
             }
 
-            $alert['url'] = $this->url();
+            $alert['url'] = AlertChannels::link();
             $class = $config['notification'] ?? BlockAlert::class;
             $notifications = array_map(fn () => new $class($alert), $routes);
         } catch (\Throwable $e) {
             $this->handBack($taken);
             $this->logFailure($alert, $e);
 
-            return;
+            return false;
         }
 
         // One channel at a time. Laravel sends an on-demand notification's
@@ -95,6 +116,34 @@ class SendBlockAlert
         // every event.
         if (! $delivered) {
             $this->handBack($taken);
+        }
+
+        return $delivered;
+    }
+
+    /**
+     * One row for the digest. Caught like everything else here: a missing
+     * table — the migration not yet run — must not cost the block.
+     *
+     * @param  array<string, mixed>  $alert
+     */
+    private function record(array $alert, bool $sent): void
+    {
+        try {
+            DB::table('watchtower_alert_digest')->insert([
+                'type'                => $alert['type'],
+                'ip'                  => app(BlacklistService::class)->normalizeTarget($alert['ip']),
+                'scope'               => $alert['scope'] ?? BlockScope::GLOBAL,
+                'reason'              => $alert['reason'],
+                'not_blocked_because' => $alert['not_blocked_because'] ?? null,
+                'sent'                => $sent,
+                'created_at'          => now(),
+            ]);
+        } catch (\Throwable $e) {
+            Log::channel(config('watchtower.log_channel', 'stack'))->warning('Watchtower: could not record the alert for the digest', [
+                'ip'    => $alert['ip'],
+                'error' => $e->getMessage(),
+            ]);
         }
     }
 
@@ -176,24 +225,6 @@ class SendBlockAlert
     }
 
     /**
-     * Channel => route, keeping only the ones given a value, so an unset env
-     * var turns its channel off. A comma-separated mail route becomes a list.
-     *
-     * @param  array<string, mixed>  $routes
-     * @return array<string, mixed>
-     */
-    private function routes(array $routes): array
-    {
-        $routes = array_filter($routes, fn ($route) => $route !== null && $route !== '' && $route !== []);
-
-        if (is_string($routes['mail'] ?? null)) {
-            $routes['mail'] = array_values(array_filter(array_map('trim', explode(',', $routes['mail']))));
-        }
-
-        return $routes;
-    }
-
-    /**
      * Two limits, both per kind (blocked, would have blocked) so a near miss
      * can't swallow the alert for the real block that follows:
      *
@@ -265,33 +296,5 @@ class SendBlockAlert
         $store = config('watchtower.cache.store');
 
         return Cache::store(is_string($store) ? $store : null);
-    }
-
-    /**
-     * Resolved here, at the block, not in the queued job, because the
-     * management page is only routed when the UI is on.
-     *
-     * Rooted at APP_URL, never at the current request. A real-time detector
-     * blocks inside the very request it caught, and route() would take that
-     * request's Host header — the attacker's — and put their link in the
-     * operator's security alert. A UI route with its own domain is built from
-     * that domain, which no request can change.
-     */
-    private function url(): ?string
-    {
-        $route = Route::getRoutes()->getByName('watchtower.ui.index');
-
-        if ($route === null) {
-            return null;
-        }
-
-        // An alert without a link beats no alert: a domain with a parameter
-        // in it ({tenant}.example.com) can't be built from here, and an empty
-        // APP_URL would give a link with no host.
-        return rescue(fn () => match (true) {
-            $route->getDomain() !== null           => route('watchtower.ui.index'),
-            (string) config('app.url') === ''      => null,
-            default                                => rtrim((string) config('app.url'), '/').route('watchtower.ui.index', [], false),
-        }, null, report: false);
     }
 }

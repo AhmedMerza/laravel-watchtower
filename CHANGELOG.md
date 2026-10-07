@@ -4,11 +4,12 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 ## [Unreleased]
 
-No migrations. New config: `notifications.alerts`. A published config needs that block copied in by hand.
+New migration: `create_watchtower_alert_digest_table`. Publish and run it with `php artisan vendor:publish --tag=watchtower-migrations && php artisan migrate`. New config: `notifications.alerts`, including `notifications.alerts.digest`. A published config needs that block copied in by hand.
 
 ### Added
 
 - **Mail and Slack alerts on a block, through Laravel Notifications.** These are off by default. Set `WATCHTOWER_ALERTS=true` and a recipient (`WATCHTOWER_ALERT_MAIL`, or a Slack incoming-webhook URL with `laravel/slack-notification-channel` installed). An alert goes out each time an address is auto-blocked, with at most one per address an hour and at most 20 an hour in total. Manual blocks and warn-mode near misses can alert too. Any other notification channel works by extending `BlockAlert`. Near misses now also fire a `Watchtower\Events\WouldHaveBlocked` event. The webhook is unchanged. See [Alerts](docs/configuration.md#alerts-mail-slack-any-notification-channel) ([#124](https://github.com/AhmedMerza/laravel-watchtower/issues/124)).
+- **A daily alert digest.** This is off by default. With `WATCHTOWER_ALERT_DIGEST=true`, `watchtower:alert-digest` sends one message a day, at `WATCHTOWER_ALERT_DIGEST_AT` (default `08:00`). The message lists every block and near miss since the previous one, grouped by address, and says which events the throttle or cap kept from alerting at the time, so the cap no longer loses anything. `WATCHTOWER_ALERT_INSTANT=false` sends the digest only. See [Daily digest](docs/configuration.md#daily-digest) ([#124](https://github.com/AhmedMerza/laravel-watchtower/issues/124)).
 
 ## [0.14.0] - 2026-10-07
 

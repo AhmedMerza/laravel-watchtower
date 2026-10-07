@@ -1,6 +1,7 @@
 <?php
 
 use Watchtower\Notifications\BlockAlert;
+use Watchtower\Notifications\BlockDigest;
 
 return [
 
@@ -920,6 +921,14 @@ return [
         | 'would_have_blocked': also alert on near misses — warn mode, the
         | shared-IP guard, never_auto_block — the same events the
         | `would_have_blocked` log line reports.
+        |
+        | 'digest': one message a day, at 'at' (app timezone), listing every
+        | block and near miss since the last one, grouped by address — and
+        | which of them the throttle or cap kept from alerting at the time.
+        | It goes to the same routes, and needs the scheduler and the
+        | watchtower_alert_digest migration. 'instant' => false sends only
+        | the digest. For a custom channel, point 'notification' at a
+        | subclass of BlockDigest with that channel's toX() method.
         */
         'alerts' => [
             'enabled' => env('WATCHTOWER_ALERTS', false),
@@ -932,6 +941,12 @@ return [
             'manual'             => env('WATCHTOWER_ALERT_MANUAL', false),
             'would_have_blocked' => env('WATCHTOWER_ALERT_WOULD_HAVE_BLOCKED', false),
             'notification'       => BlockAlert::class,
+            'digest'             => [
+                'enabled'      => env('WATCHTOWER_ALERT_DIGEST', false),
+                'at'           => env('WATCHTOWER_ALERT_DIGEST_AT', '08:00'),
+                'instant'      => env('WATCHTOWER_ALERT_INSTANT', true),
+                'notification' => BlockDigest::class,
+            ],
         ],
     ],
 
