@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Watchtower\Console\Commands;
 
 use Illuminate\Console\Command;
+use Illuminate\Database\Query\Builder;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Notification;
@@ -49,15 +50,21 @@ class AlertDigestCommand extends Command
         // Claim what is there now. A block during the send counts into a new,
         // unsealed row, which the delete below leaves for the next digest.
         // Rows a failed run sealed stay sealed and go out with the next one.
+        //
+        // Bounded by the highest id at the seal, so a second run started by
+        // hand alongside the scheduled one can't have its rows deleted by
+        // this one: every row it seals is newer than this ceiling.
         DB::table('watchtower_alert_digest')->where('sealed', false)->update(['sealed' => true]);
+        $ceiling = DB::table('watchtower_alert_digest')->where('sealed', true)->max('id');
 
-        if (! DB::table('watchtower_alert_digest')->where('sealed', true)->exists()) {
+        if ($ceiling === null) {
             $this->info('Nothing to report since the last digest.');
 
             return self::SUCCESS;
         }
 
-        $digest = $this->digest((bool) ($config['digest']['instant'] ?? true));
+        $sealed = fn () => DB::table('watchtower_alert_digest')->where('sealed', true)->where('id', '<=', $ceiling);
+        $digest = $this->digest($sealed, (bool) ($config['digest']['instant'] ?? true));
         $class = $config['digest']['notification'] ?? BlockDigest::class;
 
         // One channel at a time, as the instant alert does: a broken Slack
@@ -86,7 +93,7 @@ class AlertDigestCommand extends Command
             return self::FAILURE;
         }
 
-        DB::table('watchtower_alert_digest')->where('sealed', true)->delete();
+        $sealed()->delete();
 
         $addresses = array_sum($digest['totals']);
         $this->info("Sent the digest: {$addresses} address(es).");
@@ -99,11 +106,11 @@ class AlertDigestCommand extends Command
      * totals are counts, so a day of a thousand addresses costs fifty rows
      * here, not a thousand.
      *
+     * @param  \Closure(): Builder  $sealed
      * @return array<string, mixed>
      */
-    private function digest(bool $instant): array
+    private function digest(\Closure $sealed, bool $instant): array
     {
-        $sealed = fn () => DB::table('watchtower_alert_digest')->where('sealed', true);
         $group = ['type', 'ip', 'scope', 'reason', 'not_blocked_because'];
 
         // Blocks first ('blocked' sorts before 'would_have_blocked'), then

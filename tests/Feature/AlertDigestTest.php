@@ -16,9 +16,11 @@ use Symfony\Component\Mime\Email;
 use Watchtower\Console\Commands\AlertDigestCommand;
 use Watchtower\Console\Commands\CleanupCommand;
 use Watchtower\Enums\BlockSource;
+use Watchtower\Events\WouldHaveBlocked;
 use Watchtower\Notifications\BlockAlert;
 use Watchtower\Notifications\BlockDigest;
 use Watchtower\Services\BlacklistService;
+use Watchtower\Support\BlockScope;
 use Watchtower\Tests\TestCase;
 use Watchtower\WatchtowerServiceProvider;
 
@@ -134,6 +136,45 @@ it('records an instant alert that went out on no channel as held back', function
     digestBlock('198.51.100.1');
 
     expect((int) DB::table('watchtower_alert_digest')->sole()->held_back)->toBe(1);
+});
+
+it('starts a new row when the digest seals the open one between finding and counting it', function () {
+    Notification::fake();
+    digestBlock('198.51.100.1');
+
+    // The digest's seal landing in the gap between the listener's lookup
+    // and its update.
+    $sealed = false;
+    DB::listen(function ($query) use (&$sealed) {
+        if (! $sealed && str_starts_with($query->sql, 'select') && str_contains($query->sql, 'watchtower_alert_digest')) {
+            $sealed = true;
+            DB::table('watchtower_alert_digest')->update(['sealed' => true]);
+        }
+    });
+
+    digestReblock('198.51.100.1');
+
+    expect(DB::table('watchtower_alert_digest')->orderBy('id')->get(['events', 'sealed'])->map(fn ($r) => [(int) $r->events, (bool) $r->sealed])->all())
+        ->toBe([[1, true], [1, false]]);
+});
+
+it('keeps a row per kind, reason and why-not for one address', function () {
+    Notification::fake();
+    $nearMiss = fn (string $reason, string $why) => event(new WouldHaveBlocked('198.51.100.1', $reason, $why, BlockScope::GLOBAL));
+
+    digestRow(['reason' => 'scanner']);
+    $nearMiss('scanner', 'warn mode');
+    $nearMiss('scanner', 'warn mode');
+    $nearMiss('scanner', 'shared IP');
+    $nearMiss('bursts', 'warn mode');
+
+    expect(DB::table('watchtower_alert_digest')->orderBy('id')->get()->map(fn ($r) => [$r->type, $r->reason, $r->not_blocked_because, (int) $r->events])->all())
+        ->toBe([
+            ['blocked', 'scanner', null, 1],
+            ['would_have_blocked', 'scanner', 'warn mode', 2],
+            ['would_have_blocked', 'scanner', 'shared IP', 1],
+            ['would_have_blocked', 'bursts', 'warn mode', 1],
+        ]);
 });
 
 it('records a near miss under its /64, saying why it was not blocked', function () {
@@ -357,6 +398,28 @@ it('reports the span from the first event to the last, across every row of an ad
         && str_ends_with($digest->lines()[1], '2026-10-07 09:12 to 2026-10-07 17:40'));
 });
 
+it('adds up an address split over several rows', function () {
+    Notification::fake();
+    digestRow(['events' => 2, 'held_back' => 1, 'sealed' => true]);
+    digestRow(['events' => 3, 'held_back' => 2]);
+
+    $this->artisan('watchtower:alert-digest')->assertSuccessful();
+
+    Notification::assertSentOnDemand(BlockDigest::class, fn (BlockDigest $digest) => $digest->digest['entries'][0]['events'] === 5
+        && $digest->digest['entries'][0]['held_back'] === 3
+        && str_contains($digest->lines()[1], '(5 times)'));
+});
+
+it('leaves rows another run sealed while this one was sending', function () {
+    config()->set('watchtower.notifications.alerts.digest.instant', false);
+    config()->set('watchtower.notifications.alerts.digest.notification', WatchtowerTestOverlappingRunDigest::class);
+    digestBlock('198.51.100.1');
+
+    $this->artisan('watchtower:alert-digest')->assertSuccessful();
+
+    expect(DB::table('watchtower_alert_digest')->pluck('ip')->all())->toBe(['198.51.100.2']);
+});
+
 it('drops rows no digest took within the retention window on cleanup', function () {
     digestRow(['ip' => '198.51.100.1', 'last_at' => now()->subDays(CleanupCommand::DIGEST_RETENTION_DAYS + 1)]);
     digestRow(['ip' => '198.51.100.2', 'last_at' => now()->subDays(CleanupCommand::DIGEST_RETENTION_DAYS - 1)]);
@@ -364,6 +427,14 @@ it('drops rows no digest took within the retention window on cleanup', function 
     $this->artisan('watchtower:cleanup')->assertSuccessful();
 
     expect(DB::table('watchtower_alert_digest')->pluck('ip')->all())->toBe(['198.51.100.2']);
+});
+
+it('cleans up quietly where the digest was never migrated', function () {
+    Schema::drop('watchtower_alert_digest');
+
+    $this->artisan('watchtower:cleanup')
+        ->doesntExpectOutputToContain('Could not prune the alert digest')
+        ->assertSuccessful();
 });
 
 function digestFixture(bool $instant, ?string $url): BlockDigest
@@ -461,5 +532,19 @@ class WatchtowerTestRecordingChannel
     public function send(object $notifiable, BaseNotification $notification): void
     {
         self::$sent++;
+    }
+}
+
+/**
+ * A second run, started by hand, sealing a newer row — and failing to send
+ * it — while this one is still sending.
+ */
+class WatchtowerTestOverlappingRunDigest extends BlockDigest
+{
+    public function toMail(object $notifiable): MailMessage
+    {
+        digestRow(['ip' => '198.51.100.2', 'sealed' => true]);
+
+        return parent::toMail($notifiable);
     }
 }
