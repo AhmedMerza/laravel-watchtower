@@ -1,5 +1,7 @@
 <?php
 
+use Watchtower\Notifications\BlockAlert;
+
 return [
 
     /*
@@ -890,6 +892,47 @@ return [
     'notifications' => [
         'webhook_url' => env('WATCHTOWER_WEBHOOK_URL', env('GUARD_WEBHOOK_URL')),
         'queue'       => env('WATCHTOWER_NOTIFICATION_QUEUE', env('GUARD_NOTIFICATION_QUEUE', 'default')),
+
+        /*
+        | Alerts (#124) — a Laravel notification, queued on 'queue' above, for
+        | every auto-block. Off by default.
+        |
+        | 'routes' is channel => recipient, and a channel is on when its route
+        | has a value. 'mail' takes a comma-separated list and uses your app's
+        | mailer. 'slack' takes an incoming-webhook URL and needs
+        | `composer require laravel/slack-notification-channel`. For any other
+        | channel (Telegram, Teams, a database notification...), add its route
+        | here and point 'notification' at a subclass of BlockAlert with that
+        | channel's toX() method.
+        |
+        | 'throttle_minutes': at most one alert per address per kind (blocked,
+        | would have blocked) in this window. 0 sends every one and turns the
+        | cap below off too.
+        |
+        | 'max_per_window': at most this many alerts of each kind per window
+        | across all addresses, so a scanner rotating through a thousand
+        | addresses sends this many, not a thousand. Reaching it is logged on
+        | log_channel. 0 means no cap.
+        |
+        | 'manual': also alert on blocks made by hand. Sync and feed blocks
+        | never alert.
+        |
+        | 'would_have_blocked': also alert on near misses — warn mode, the
+        | shared-IP guard, never_auto_block — the same events the
+        | `would_have_blocked` log line reports.
+        */
+        'alerts' => [
+            'enabled' => env('WATCHTOWER_ALERTS', false),
+            'routes'  => [
+                'mail'  => env('WATCHTOWER_ALERT_MAIL'),
+                'slack' => env('WATCHTOWER_ALERT_SLACK_WEBHOOK'),
+            ],
+            'throttle_minutes'   => (int) env('WATCHTOWER_ALERT_THROTTLE_MINUTES', 60),
+            'max_per_window'     => (int) env('WATCHTOWER_ALERT_MAX_PER_WINDOW', 20),
+            'manual'             => env('WATCHTOWER_ALERT_MANUAL', false),
+            'would_have_blocked' => env('WATCHTOWER_ALERT_WOULD_HAVE_BLOCKED', false),
+            'notification'       => BlockAlert::class,
+        ],
     ],
 
     /*

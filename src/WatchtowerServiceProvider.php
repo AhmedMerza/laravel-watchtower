@@ -25,6 +25,7 @@ use Watchtower\Console\Commands\SyncCommand;
 use Watchtower\Enums\SyncRole;
 use Watchtower\Events\IpBlocked;
 use Watchtower\Events\IpUnblocked;
+use Watchtower\Events\WouldHaveBlocked;
 use Watchtower\Http\Controllers\BlockController;
 use Watchtower\Http\Controllers\ManagementController;
 use Watchtower\Http\Controllers\SyncController;
@@ -38,6 +39,7 @@ use Watchtower\Listeners\DetectAuthFailures;
 use Watchtower\Listeners\DispatchBlockToTargets;
 use Watchtower\Listeners\DispatchUnblockToTargets;
 use Watchtower\Listeners\NotifyOnBlock;
+use Watchtower\Listeners\SendBlockAlert;
 use Watchtower\Services\AutoBlockService;
 use Watchtower\Services\BlacklistCache;
 use Watchtower\Services\BlacklistService;
@@ -102,6 +104,7 @@ class WatchtowerServiceProvider extends PackageServiceProvider
         $this->registerSyncRoutes();
 
         Event::listen(IpBlocked::class, NotifyOnBlock::class);
+        Event::listen([IpBlocked::class, WouldHaveBlocked::class], SendBlockAlert::class);
         Event::listen(IpBlocked::class, DispatchBlockToTargets::class);
         Event::listen(IpUnblocked::class, DispatchUnblockToTargets::class);
 

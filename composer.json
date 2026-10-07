@@ -20,18 +20,20 @@
     ],
     "require": {
         "php": "^8.2",
-        "spatie/laravel-package-tools": "^1.16",
-        "illuminate/contracts": "^12.0|^13.0",
-        "illuminate/support": "^12.0|^13.0",
         "illuminate/cache": "^12.0|^13.0",
+        "illuminate/contracts": "^12.0|^13.0",
         "illuminate/http": "^12.0|^13.0",
-        "illuminate/process": "^12.0|^13.0"
+        "illuminate/notifications": "^12.0|^13.0",
+        "illuminate/process": "^12.0|^13.0",
+        "illuminate/support": "^12.0|^13.0",
+        "spatie/laravel-package-tools": "^1.16"
     },
     "require-dev": {
         "ahmedmerza/logscope": ">=1.6.1",
-        "laravel/pint": "^1.14",
-        "nunomaduro/collision": "^8.0",
         "larastan/larastan": "^2.0|^3.0",
+        "laravel/pint": "^1.14",
+        "laravel/slack-notification-channel": "^3.10",
+        "nunomaduro/collision": "^8.0",
         "orchestra/testbench": "^10.0|^11.0",
         "pestphp/pest": "^3.0|^4.0",
         "pestphp/pest-plugin-laravel": "^3.0|^4.0",
@@ -39,7 +41,8 @@
         "phpstan/phpstan-deprecation-rules": "^1.0|^2.0"
     },
     "suggest": {
-        "ahmedmerza/logscope": "If installed, Watchtower mounts its management routes under LogScope's prefix with LogScope's authorization, and its log-based auto-block rules and watchtower:simulate read LogScope's log table. LogScope 1.6.1 to 2.1.x also show a Block-IP button in the log detail panel; 2.2.0 removed it, so block from Watchtower's management page there. Watchtower is fully functional without it."
+        "ahmedmerza/logscope": "If installed, Watchtower mounts its management routes under LogScope's prefix with LogScope's authorization, and its log-based auto-block rules and watchtower:simulate read LogScope's log table. LogScope 1.6.1 to 2.1.x also show a Block-IP button in the log detail panel; 2.2.0 removed it, so block from Watchtower's management page there. Watchtower is fully functional without it.",
+        "laravel/slack-notification-channel": "Needed only to send Watchtower's block alerts to Slack (notifications.alerts.routes.slack)."
     },
     "autoload": {
         "psr-4": {
