@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Watchtower\Services;
 
+use Illuminate\Contracts\Cache\Repository;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Watchtower\Enums\BlockSource;
@@ -118,6 +120,140 @@ class AutoBlockService
     }
 
     /**
+     * The mode a detector runs in: its configured mode, unless someone
+     * switched it to warn from the management page (#142).
+     *
+     * The override only ever stands in for 'block'. It is keyed to a
+     * fingerprint of the detector's settings and the global mode, so any
+     * change to either drops it — re-arming happens in config, where the
+     * arming happened, and never from the page.
+     *
+     * @return array{mode: string, configured: string, override: array{by: ?string, at: ?int}|null}
+     */
+    public function detectorMode(string $detector): array
+    {
+        [$settings, $global] = $this->detectorConfig($detector);
+        $configured = $this->resolveRuleMode($settings, $global);
+
+        // Read whatever the mode, not only for 'block': reading is what
+        // retires a spent override (see override()), and a detector moved to
+        // warn or disabled in config is exactly the one that must not keep it.
+        $override = $this->override($detector, $settings, $global);
+
+        if ($configured !== 'block') {
+            $override = null;
+        }
+
+        return [
+            'mode'       => $override === null ? $configured : 'warn',
+            'configured' => $configured,
+            'override'   => $override,
+        ];
+    }
+
+    /**
+     * The emergency brake: run a blocking detector in warn mode until its
+     * config changes. False when there is nothing to switch — the detector
+     * doesn't block, or someone already switched it.
+     *
+     * Stored forever rather than for `cache.ttl_hours`: an override that
+     * lapsed on its own would re-arm a detector nobody re-armed. A cache
+     * flush still clears it, and so does a per-node store on another node —
+     * docs/management-page.md says so.
+     */
+    public function switchToWarn(string $detector, ?string $by): bool
+    {
+        // A detector that isn't running isn't blocking, whatever its mode says.
+        if (! config('watchtower.auto_block.enabled', false)
+            || ! (config("watchtower.auto_block.detectors.{$detector}.enabled") ?? false)
+            || $this->detectorMode($detector)['mode'] !== 'block') {
+            return false;
+        }
+
+        [$settings, $global] = $this->detectorConfig($detector);
+
+        $this->overrideCache()->forever($this->overrideKey($detector), [
+            'by'          => $by,
+            'at'          => now()->getTimestamp(),
+            'fingerprint' => $this->fingerprint($settings, $global),
+        ]);
+
+        try {
+            Log::channel(config('watchtower.log_channel', 'stack'))
+                ->warning('Watchtower: detector switched to warn from the management page', [
+                    'detector' => $detector,
+                    'by'       => $by,
+                ]);
+        } catch (\Throwable) {
+            // The switch is already in force; a broken log channel must not
+            // turn it into an error page.
+        }
+
+        return true;
+    }
+
+    /**
+     * The stored override, if it was made under the config in force now.
+     *
+     * One made under other config is spent, not dormant, so it is deleted
+     * here: left in place, setting the old config back months later — a
+     * revert, a threshold put back — would silently disarm a detector that
+     * was deliberately re-armed. Only `by` and `at` are trusted from the
+     * cache, and only when they have the type that was written.
+     *
+     * @return array{by: ?string, at: ?int}|null
+     */
+    private function override(string $detector, array $settings, string $global): ?array
+    {
+        $key = $this->overrideKey($detector);
+        $stored = $this->overrideCache()->get($key);
+
+        if ($stored === null) {
+            return null;
+        }
+
+        if (! is_array($stored) || ($stored['fingerprint'] ?? null) !== $this->fingerprint($settings, $global)) {
+            $this->overrideCache()->forget($key);
+
+            return null;
+        }
+
+        return [
+            'by' => is_string($stored['by'] ?? null) ? $stored['by'] : null,
+            'at' => is_int($stored['at'] ?? null) ? $stored['at'] : null,
+        ];
+    }
+
+    /**
+     * @return array{0: array<string, mixed>, 1: string} the detector's
+     *                                                   settings, and the global mode
+     */
+    private function detectorConfig(string $detector): array
+    {
+        return [
+            (array) config("watchtower.auto_block.detectors.{$detector}", []),
+            $this->normaliseMode(config('watchtower.auto_block.mode', 'warn')),
+        ];
+    }
+
+    private function fingerprint(array $settings, string $global): string
+    {
+        return hash('sha256', serialize([$settings, $global]));
+    }
+
+    private function overrideKey(string $detector): string
+    {
+        return config('watchtower.cache.key', 'watchtower:blacklist').":detector_warn:{$detector}";
+    }
+
+    private function overrideCache(): Repository
+    {
+        $store = config('watchtower.cache.store');
+
+        return Cache::store(is_string($store) ? $store : null);
+    }
+
+    /**
      * Count one signal and decide. See record(), which is this behind a
      * fail-open guard.
      */
@@ -133,12 +269,12 @@ class AutoBlockService
             return false;
         }
 
-        $mode = $this->resolveRuleMode(
+        $configuredMode = $this->resolveRuleMode(
             $settings,
             $this->normaliseMode(config('watchtower.auto_block.mode', 'warn')),
         );
 
-        if ($mode === 'disabled') {
+        if ($configuredMode === 'disabled') {
             return false;
         }
 
@@ -190,6 +326,15 @@ class AutoBlockService
         if ($hits < $threshold) {
             return false;
         }
+
+        // Asked only now, and only of a detector that blocks: a switch to
+        // warn from the management page changes what happens at a blocking
+        // detector's threshold and nothing else, so a signal that falls
+        // short, or a warn detector's crossing, pays no cache read for it
+        // (#142). Retiring a spent switch on a detector config moved off
+        // 'block' is left to the panel and to simulate, which read it for
+        // every detector.
+        $mode = $configuredMode === 'block' ? $this->detectorMode($detector)['mode'] : $configuredMode;
 
         $blocked = $this->blockDetected(
             $detector,

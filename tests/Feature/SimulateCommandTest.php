@@ -694,3 +694,15 @@ it('does not trust a forged line: unknown detectors and non-addresses are set as
         ->expectsOutputToContain('2 would-have-blocked line(s) could not be used')
         ->doesntExpectOutputToContain('made_up');
 });
+
+it('says a detector switched to warn from the management page is warning, not blocking (#142)', function () {
+    config()->set('cache.default', 'array');
+    config()->set('watchtower.cache.store', 'array');
+    onlyDetector('failed_logins', ['mode' => 'block']);
+    app(AutoBlockService::class)->switchToWarn('failed_logins', 'admin@example.com');
+
+    $this->artisan('watchtower:simulate')
+        ->expectsOutputToContain('Detector failed_logins [warn] — switched to warn on the management page')
+        ->doesntExpectOutputToContain('In block mode its real blocks')
+        ->assertSuccessful();
+});

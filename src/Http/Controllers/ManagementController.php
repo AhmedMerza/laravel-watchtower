@@ -15,6 +15,7 @@ use Watchtower\Enums\BlockSource;
 use Watchtower\Exceptions\NeverBlockException;
 use Watchtower\Models\BlacklistedIp;
 use Watchtower\Rules\BlockRules;
+use Watchtower\Services\AutoBlockService;
 use Watchtower\Services\BlacklistService;
 use Watchtower\Support\BlockFilters;
 use Watchtower\Support\BlockScope;
@@ -57,7 +58,7 @@ class ManagementController extends Controller
 
     public function __construct(private readonly BlacklistService $service) {}
 
-    public function index(Request $request): View
+    public function index(Request $request, AutoBlockService $autoBlock): View
     {
         [$source, $state] = BlockFilters::fromRequest($request);
 
@@ -69,6 +70,7 @@ class ManagementController extends Controller
         // Which row, if any, is asking "really unblock?". A round trip rather
         // than a confirm() dialog keeps the page working without JavaScript.
         $confirm = $request->query('confirm');
+        $confirmWarn = $request->query('warn');
 
         // Annotated because larastan resolves view names against the app's
         // view paths, and a package namespace registered at boot isn't one of
@@ -88,6 +90,9 @@ class ManagementController extends Controller
             // bare ULID, not a foreign key, so a stored id means nothing
             // about whether there is anywhere to send the operator.
             'logScopeUrl' => Route::has('logscope.index') ? route('logscope.index') : null,
+            'detectors'        => $this->detectors($autoBlock),
+            'autoBlockEnabled' => (bool) config('watchtower.auto_block.enabled', false),
+            'confirmWarn'      => is_string($confirmWarn) ? $confirmWarn : null,
         ]);
     }
 
@@ -178,6 +183,72 @@ class ManagementController extends Controller
             'watchtower_status',
             $lifted ? "Unblocked {$ip}." : 'That block is already gone.',
         );
+    }
+
+    /**
+     * The emergency brake for one detector (#142): run it in warn mode until
+     * its config changes. One-way on purpose — arming and re-arming stay in
+     * config, reviewed and deployed, and nothing on this page can make a
+     * detector stricter.
+     */
+    public function switchToWarn(Request $request, AutoBlockService $autoBlock): RedirectResponse
+    {
+        $validator = Validator::make($request->all(), [
+            'detector' => ['required', 'string', Rule::in(array_keys((array) config('watchtower.auto_block.detectors', [])))],
+        ]);
+
+        if ($validator->fails()) {
+            return $this->backToList($request)->withErrors($validator);
+        }
+
+        $detector = $validator->validated()['detector'];
+        $user = $request->user();
+
+        try {
+            $switched = $autoBlock->switchToWarn($detector, data_get($user, 'email') ?? data_get($user, 'name'));
+        } catch (\Throwable) {
+            return $this->backToList($request)->withErrors([
+                'detector' => "Couldn't switch {$detector}: the cache store didn't answer. Change its mode in config instead.",
+            ]);
+        }
+
+        return $this->backToList($request)->with(
+            'watchtower_status',
+            $switched
+                ? "Switched {$detector} to warn. It stays in warn until its config changes."
+                : "{$detector} isn't blocking, so there was nothing to switch.",
+        );
+    }
+
+    /**
+     * One row per configured detector, for the panel. Null when the cache
+     * store doesn't answer: this page is how an operator unblocks themselves,
+     * so a cache outage costs the panel, not the page.
+     *
+     * @return list<array<string, mixed>>|null
+     */
+    private function detectors(AutoBlockService $autoBlock): ?array
+    {
+        $rows = [];
+
+        try {
+            foreach ((array) config('watchtower.auto_block.detectors', []) as $name => $settings) {
+                $settings = (array) $settings;
+
+                $rows[] = [
+                    'name'    => (string) $name,
+                    'enabled' => (bool) ($settings['enabled'] ?? false),
+                    // The engine's own defaults, as detect() applies them.
+                    'count'   => max(1, (int) ($settings['count'] ?? 1)),
+                    'window'  => max(1, (int) ($settings['window_minutes'] ?? 5)),
+                    'scope'   => $settings['scope'] ?? null,
+                ] + $autoBlock->detectorMode((string) $name);
+            }
+        } catch (\Throwable) {
+            return null;
+        }
+
+        return $rows;
     }
 
     /**

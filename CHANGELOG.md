@@ -4,6 +4,12 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 ## [Unreleased]
 
+No migrations, no config changes.
+
+### Added
+
+- **A detectors panel and an emergency "Switch to warn" on the management page.** The panel shows each detector's mode, threshold and scope from config. Any detector that blocks gets a button that runs it in warn mode, so a misfiring detector can stop turning people away without an env change or a deploy. It's one-way: the page never arms or tightens a detector, and the switch lasts until that detector's config (or the global mode) changes. It's stored in the cache with who pressed it, and logged to `watchtower.log_channel`. `watchtower:simulate` reports a switched detector as warn. See [Management page](docs/management-page.md#switch-a-detector-to-warn) ([#142](https://github.com/AhmedMerza/laravel-watchtower/issues/142)).
+
 ## [0.13.1] - 2026-10-05
 
 No migrations, no config changes.
