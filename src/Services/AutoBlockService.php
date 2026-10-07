@@ -9,6 +9,7 @@ use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Watchtower\Enums\BlockSource;
+use Watchtower\Events\WouldHaveBlocked;
 use Watchtower\Exceptions\NeverAutoBlockException;
 use Watchtower\Exceptions\NeverBlockException;
 use Watchtower\Exceptions\UnknownScopeException;
@@ -602,7 +603,7 @@ class AutoBlockService
         }
 
         if ($notBlockedBecause !== null) {
-            $this->logWouldHaveBlocked($ip, $reason, $notBlockedBecause, $distinctUsers, $context);
+            $this->logWouldHaveBlocked($ip, $reason, $notBlockedBecause, $distinctUsers, $scope, $context);
 
             // A dry run that block mode would have held back is held the way
             // block mode would hold it, so the two keep agreeing past the first
@@ -640,7 +641,7 @@ class AutoBlockService
             // Caught before NeverBlockException, its parent: this one is a
             // rule that fired on real traffic and was held back, which is
             // worth the same visibility as any other near miss.
-            $this->logWouldHaveBlocked($ip, $reason, 'never_auto_block', $distinctUsers, $context);
+            $this->logWouldHaveBlocked($ip, $reason, 'never_auto_block', $distinctUsers, $scope, $context);
 
             return 'never_auto_block';
         } catch (NeverBlockException) {
@@ -1175,6 +1176,7 @@ class AutoBlockService
         string $reason,
         string $notBlockedBecause,
         int $distinctUsers,
+        string $scope,
         array $identity = [],
     ): void {
         $context = [
@@ -1197,5 +1199,9 @@ class AutoBlockService
             self::WOULD_HAVE_BLOCKED_MESSAGE,
             $context,
         );
+
+        // For the alerts (#124). After the log line, so an alert that throws
+        // can't cost the operator the line they'd otherwise have had.
+        event(new WouldHaveBlocked($ip, $reason, $notBlockedBecause, $scope, $identity));
     }
 }
