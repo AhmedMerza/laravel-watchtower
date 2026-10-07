@@ -163,7 +163,10 @@ class AutoBlockService
      */
     public function switchToWarn(string $detector, ?string $by): bool
     {
-        if ($this->detectorMode($detector)['mode'] !== 'block') {
+        // A detector that isn't running isn't blocking, whatever its mode says.
+        if (! config('watchtower.auto_block.enabled', false)
+            || ! (config("watchtower.auto_block.detectors.{$detector}.enabled") ?? false)
+            || $this->detectorMode($detector)['mode'] !== 'block') {
             return false;
         }
 
@@ -324,10 +327,14 @@ class AutoBlockService
             return false;
         }
 
-        // Asked only now: a switch to warn from the management page changes
-        // what happens at the threshold, not the counting before it, so a
-        // signal that falls short shouldn't pay a cache read for it (#142).
-        $mode = $this->detectorMode($detector)['mode'];
+        // Asked only now, and only of a detector that blocks: a switch to
+        // warn from the management page changes what happens at a blocking
+        // detector's threshold and nothing else, so a signal that falls
+        // short, or a warn detector's crossing, pays no cache read for it
+        // (#142). Retiring a spent switch on a detector config moved off
+        // 'block' is left to the panel and to simulate, which read it for
+        // every detector.
+        $mode = $configuredMode === 'block' ? $this->detectorMode($detector)['mode'] : $configuredMode;
 
         $blocked = $this->blockDetected(
             $detector,

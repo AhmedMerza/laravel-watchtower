@@ -140,3 +140,20 @@ it('still deletes the user set when one was actually opened', function () {
     expect($this->store->opsMatching('users:scanner_paths:203.0.113.43'))
         ->toContain('forget users:scanner_paths:203.0.113.43');
 });
+
+it('asks a blocking detector about a switch to warn once, at its threshold (#142)', function () {
+    $this->withServerVariables(['REMOTE_ADDR' => '203.0.113.50'])->get('/.env');
+
+    expect($this->store->opsMatching('detector_warn'))->toBe([
+        'get detector_warn:scanner_paths',
+    ]);
+});
+
+it('never asks a warn detector about a switch to warn (#142)', function () {
+    config()->set('watchtower.auto_block.detectors.scanner_paths.mode', 'warn');
+
+    $this->withServerVariables(['REMOTE_ADDR' => '203.0.113.51'])->get('/.env');
+    $this->withServerVariables(['REMOTE_ADDR' => '203.0.113.51'])->get('/.env');
+
+    expect($this->store->opsMatching('detector_warn'))->toBe([]);
+});

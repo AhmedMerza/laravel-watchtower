@@ -592,3 +592,14 @@ it('shows a switch whose cached time is unreadable without failing the page', fu
         ->assertOk()
         ->assertSee('switched from block by admin@example.com');
 });
+
+it('has nothing to switch on a detector that is not running', function (string $off) {
+    armFailedLogins();
+    config()->set($off, false);
+
+    expect(app(AutoBlockService::class)->switchToWarn('failed_logins', 'admin@example.com'))->toBeFalse()
+        ->and(Cache::store('array')->get('watchtower:blacklist:detector_warn:failed_logins'))->toBeNull();
+})->with([
+    'detector off'   => 'watchtower.auto_block.detectors.failed_logins.enabled',
+    'auto-block off' => 'watchtower.auto_block.enabled',
+]);
