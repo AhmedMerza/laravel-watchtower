@@ -4,7 +4,13 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 ## [Unreleased]
 
-New migration: `create_watchtower_alert_digest_table`. Publish and run it with `php artisan vendor:publish --tag=watchtower-migrations && php artisan migrate`. New config: `notifications.alerts`, including `notifications.alerts.digest`. A published config needs that block copied in by hand.
+## [0.15.0] - 2026-10-07
+
+**Upgrading:**
+
+1. Publish the new migration, `create_watchtower_alert_digest_table`: `php artisan vendor:publish --tag=watchtower-migrations`.
+2. Run it: `php artisan migrate`. The table is only used once the digest is turned on, but run the migration anyway so turning it on later needs no deploy step.
+3. If you've published the config, copy the new `notifications.alerts` block into it by hand, including `digest`. Without the block, alerts stay off.
 
 ### Added
 
@@ -354,7 +360,8 @@ No migrations and nothing breaking: a `composer update` is enough.
 
 - **There is no transitional `ahmedmerza/logscope-guard` package.** It has been removed from Packagist. To upgrade, `composer remove ahmedmerza/logscope-guard`, `composer require ahmedmerza/watchtower`, then work through the BREAKING entries under Changed.
 
-[Unreleased]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.14.0...HEAD
+[Unreleased]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.15.0...HEAD
+[0.15.0]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.13.1...v0.14.0
 [0.13.1]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.12.0...v0.13.0
