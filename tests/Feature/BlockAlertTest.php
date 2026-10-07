@@ -7,15 +7,18 @@ use GuzzleHttp\Handler\MockHandler;
 use GuzzleHttp\HandlerStack;
 use GuzzleHttp\Middleware;
 use GuzzleHttp\Psr7\Response;
+use Illuminate\Cache\ArrayStore;
 use Illuminate\Notifications\AnonymousNotifiable;
 use Illuminate\Notifications\ChannelManager;
 use Illuminate\Notifications\SlackChannelServiceProvider;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Notification;
 use Watchtower\Enums\BlockSource;
 use Watchtower\Events\WouldHaveBlocked;
 use Watchtower\Notifications\BlockAlert;
 use Watchtower\Services\BlacklistService;
+use Watchtower\Support\BlockScope;
 use Watchtower\Tests\TestCase;
 
 // Real traffic through a real detector, so the alert is proven against the
@@ -39,6 +42,7 @@ beforeEach(function () {
         'enabled'            => true,
         'routes'             => ['mail' => 'ops@example.com, oncall@example.com', 'slack' => null],
         'throttle_minutes'   => 60,
+        'max_per_window'     => 20,
         'manual'             => false,
         'would_have_blocked' => false,
         'notification'       => BlockAlert::class,
@@ -135,21 +139,133 @@ it('alerts on a warn-mode near miss only when asked, saying why nothing was bloc
 it('throttles a near miss and a block separately, so the block still alerts', function () {
     config()->set('watchtower.notifications.alerts.would_have_blocked', true);
 
-    event(new WouldHaveBlocked('198.51.100.1', 'test', 'warn mode', ''));
+    event(new WouldHaveBlocked('198.51.100.1', 'test', 'warn mode', BlockScope::GLOBAL));
     block('198.51.100.1', BlockSource::Auto);
 
     Notification::assertSentOnDemandTimes(BlockAlert::class, 2);
 });
 
-it('keeps the block when the alert throws, and logs why it did not send', function () {
-    config()->set('watchtower.notifications.alerts.notification', 'NoSuchAlertClass');
+it('keeps the block when the send fails, logs it, and gives the address its slot back', function () {
+    config()->set('watchtower.notifications.alerts.notification', WatchtowerTestFlakyAlert::class);
+    WatchtowerTestFlakyAlert::$failures = 1;
     Log::shouldReceive('channel')->andReturnSelf();
     Log::shouldReceive('warning')->once()->withArgs(fn (string $msg, array $ctx) => $msg === 'Watchtower: block alert failed'
-        && $ctx['ip'] === '198.51.100.1');
+        && $ctx['ip'] === '198.51.100.1'
+        && $ctx['error'] === 'mailer down');
+
+    block('198.51.100.1', BlockSource::Auto);
+    $this->assertDatabaseHas('blacklisted_ips', ['ip' => '198.51.100.1']);
+    Notification::assertNothingSent();
+
+    // The failed send must not have used up the window: the next block of
+    // the same address is still reported.
+    app(BlacklistService::class)->unblock('198.51.100.1');
+    block('198.51.100.1', BlockSource::Auto);
+
+    Notification::assertSentOnDemandTimes(WatchtowerTestFlakyAlert::class, 1);
+});
+
+it('logs and moves on when the throttle cache itself throws', function () {
+    Cache::extend('watchtower-broken', fn () => Cache::repository(new class extends ArrayStore
+    {
+        public function put($key, $value, $seconds)
+        {
+            throw new RuntimeException('cache down');
+        }
+    }));
+    config()->set('cache.stores.watchtower-broken', ['driver' => 'watchtower-broken']);
+    config()->set('watchtower.cache.store', 'watchtower-broken');
+    config()->set('watchtower.notifications.alerts.would_have_blocked', true);
+    Log::shouldReceive('channel')->andReturnSelf();
+    Log::shouldReceive('warning')->once()->withArgs(fn (string $msg, array $ctx) => $msg === 'Watchtower: block alert failed'
+        && $ctx['error'] === 'cache down');
+
+    // The near-miss path runs inside the request a detector is checking.
+    event(new WouldHaveBlocked('198.51.100.1', 'test', 'warn mode', BlockScope::GLOBAL));
+
+    Notification::assertNothingSent();
+});
+
+it('caps alerts per window across addresses, and logs reaching the cap once', function () {
+    config()->set('watchtower.notifications.alerts.max_per_window', 2);
+    $channel = Mockery::mock()->shouldIgnoreMissing();
+    $channel->shouldReceive('warning')->once()->withArgs(fn (string $msg, array $ctx) => $msg === 'Watchtower: alert cap reached, further alerts suppressed'
+        && $ctx['type'] === 'blocked' && $ctx['max_per_window'] === 2);
+    Log::shouldReceive('channel')->andReturn($channel);
+
+    foreach (['198.51.100.1', '198.51.100.2', '198.51.100.3', '198.51.100.4'] as $ip) {
+        block($ip, BlockSource::Auto);
+    }
+
+    Notification::assertSentOnDemandTimes(BlockAlert::class, 2);
+
+    // Its own count: near misses are not crowded out by the blocks.
+    config()->set('watchtower.notifications.alerts.would_have_blocked', true);
+    event(new WouldHaveBlocked('198.51.100.5', 'test', 'warn mode', BlockScope::GLOBAL));
+
+    Notification::assertSentOnDemandTimes(BlockAlert::class, 3);
+});
+
+it('sends every alert when throttle_minutes is 0', function () {
+    config()->set('watchtower.notifications.alerts.throttle_minutes', 0);
+    config()->set('watchtower.notifications.alerts.max_per_window', 1);
+
+    block('198.51.100.1', BlockSource::Auto);
+    app(BlacklistService::class)->unblock('198.51.100.1');
+    block('198.51.100.1', BlockSource::Auto);
+    block('198.51.100.2', BlockSource::Auto);
+
+    Notification::assertSentOnDemandTimes(BlockAlert::class, 3);
+});
+
+it('throttles a near miss by its /64 and scope, and keeps the rule config out of the queued payload', function () {
+    config()->set('watchtower.notifications.alerts.would_have_blocked', true);
+    $context = ['rule_index' => 0, 'rule' => ['message_contains' => 'x'], 'threshold' => 3];
+
+    event(new WouldHaveBlocked('2001:db8::1', 'test', 'warn mode', 'auth', $context));
+    event(new WouldHaveBlocked('2001:db8::2', 'test', 'warn mode', 'auth', $context));
+    event(new WouldHaveBlocked('2001:db8::3', 'test', 'warn mode', BlockScope::GLOBAL, $context));
+
+    Notification::assertSentOnDemandTimes(BlockAlert::class, 2);
+    Notification::assertSentOnDemand(BlockAlert::class, function (BlockAlert $alert) {
+        return $alert->alert['scope'] === 'auth'
+            && ! array_key_exists('rule', $alert->alert['context'])
+            && $alert->alert['context']['rule_index'] === 0
+            && unserialize(serialize($alert))->alert === $alert->alert;
+    });
+});
+
+it('alerts on a never_auto_block near miss in block mode', function () {
+    config()->set('watchtower.never_auto_block', ['203.0.113.12']);
+    config()->set('watchtower.notifications.alerts.would_have_blocked', true);
+
+    probe('203.0.113.12');
+
+    $this->assertDatabaseMissing('blacklisted_ips', ['ip' => '203.0.113.12']);
+    Notification::assertSentOnDemand(BlockAlert::class, fn (BlockAlert $a) => $a->alert['not_blocked_because'] === 'never_auto_block');
+});
+
+it('routes to whichever channels have a value', function (array $routes, array $channels, array $expected) {
+    config()->set('watchtower.notifications.alerts.routes', $routes);
 
     block('198.51.100.1', BlockSource::Auto);
 
-    $this->assertDatabaseHas('blacklisted_ips', ['ip' => '198.51.100.1']);
+    Notification::assertSentOnDemand(BlockAlert::class, fn (BlockAlert $a, array $via, AnonymousNotifiable $to) => $via === $channels
+        && $to->routes === $expected);
+})->with([
+    'slack only'      => [['mail' => null, 'slack' => 'https://hooks.slack.com/x'], ['slack'], ['slack' => 'https://hooks.slack.com/x']],
+    'mail as a list'  => [['mail' => ['a@example.com'], 'slack' => []], ['mail'], ['mail' => ['a@example.com']]],
+    'both'            => [['mail' => 'a@example.com', 'slack' => 'https://hooks.slack.com/x'], ['mail', 'slack'], ['mail' => ['a@example.com'], 'slack' => 'https://hooks.slack.com/x']],
+]);
+
+it('sends the configured notification class on the notifications queue', function () {
+    config()->set('watchtower.notifications.queue', 'alerts');
+    config()->set('watchtower.notifications.alerts.notification', WatchtowerTestFlakyAlert::class);
+    WatchtowerTestFlakyAlert::$failures = 0;
+
+    block('198.51.100.1', BlockSource::Auto);
+
+    Notification::assertSentOnDemand(WatchtowerTestFlakyAlert::class, fn ($alert) => $alert->queue === 'alerts');
 });
 
 it('renders a block alert as mail', function () {
@@ -167,6 +283,32 @@ it('renders a block alert as mail', function () {
     expect($mail->subject)->toBe('Watchtower blocked 198.51.100.1')
         ->and($mail->introLines)->toContain('Address: 198.51.100.1', 'Scope: auth', 'Expires: 2026-10-07T12:00:00+00:00')
         ->and($mail->actionUrl)->toBe('https://app.test/watchtower');
+});
+
+it('renders a rule near miss, a permanent block, and no link when the UI is off', function () {
+    $nearMiss = new BlockAlert([
+        'type'                => 'would_have_blocked',
+        'ip'                  => '198.51.100.1',
+        'reason'              => 'Log rule',
+        'scope'               => null,
+        'not_blocked_because' => 'warn mode',
+        'context'             => ['rule_index' => 2, 'in_block_mode' => 'shared IP'],
+        'url'                 => 'https://app.test/watchtower',
+    ]);
+    $permanent = (new BlockAlert([
+        'type'       => 'blocked',
+        'ip'         => '198.51.100.2',
+        'reason'     => 'by hand',
+        'scope'      => null,
+        'source'     => 'manual',
+        'expires_at' => null,
+        'url'        => null,
+    ]))->toMail(new AnonymousNotifiable);
+
+    expect($nearMiss->lines())->toContain('Rule: auto_block.rules[2]', 'In block mode: shared IP', 'Not blocked because: warn mode')
+        ->and($nearMiss->toSlack(new AnonymousNotifiable)->toArray()['text'])->toContain('<https://app.test/watchtower|Open Watchtower>')
+        ->and($permanent->introLines)->toContain('Expires: never', 'Source: manual')
+        ->and($permanent->actionUrl)->toBeNull();
 });
 
 it('posts a Slack alert to the incoming-webhook URL through the official channel', function () {
@@ -198,3 +340,27 @@ it('posts a Slack alert to the incoming-webhook URL through the official channel
     expect((string) $request->getUri())->toBe('https://hooks.slack.com/services/T/B/X')
         ->and($text)->toContain('Watchtower would have blocked 198.51.100.1', 'Detector: scanner_paths', 'Scope: whole app', 'In block mode: it would have been blocked');
 });
+
+it('builds the alert link from APP_URL, not the Host header of the request that tripped the detector', function () {
+    config()->set('app.url', 'https://app.test');
+
+    $this->withServerVariables(['REMOTE_ADDR' => '203.0.113.8'])->get('http://evil.test/.env');
+
+    Notification::assertSentOnDemand(BlockAlert::class, fn (BlockAlert $a) => $a->alert['url'] === 'https://app.test'.route('watchtower.ui.index', [], false));
+});
+
+class WatchtowerTestFlakyAlert extends BlockAlert
+{
+    public static int $failures = 0;
+
+    public function via(object $notifiable): array
+    {
+        if (self::$failures > 0) {
+            self::$failures--;
+
+            throw new RuntimeException('mailer down');
+        }
+
+        return parent::via($notifiable);
+    }
+}

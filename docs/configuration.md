@@ -126,11 +126,12 @@ WATCHTOWER_ALERT_MAIL=ops@example.com,oncall@example.com
 
 A channel is on when its route has a value. Mail goes out through your app's own mailer. Slack takes an incoming-webhook URL and needs `composer require laravel/slack-notification-channel`. Alerts are queued on `WATCHTOWER_NOTIFICATION_QUEUE`, so a worker has to be consuming that queue. If an alert can't be sent, it's logged on `WATCHTOWER_LOG_CHANNEL` and the block still stands.
 
-Each alert gives the address, the reason, which detector or rule fired, the scope, when the block expires, and a link to the [management page](management-page.md) when the UI is on.
+Each alert gives the address, the reason, which detector or rule fired, the scope, when the block expires, and a link to the [management page](management-page.md) when the UI is on. The link is built from `APP_URL`, so set it to the app's public address.
 
 | Setting | Env | Default | |
 |---|---|---|---|
-| `throttle_minutes` | `WATCHTOWER_ALERT_THROTTLE_MINUTES` | `60` | Sends at most one alert per address in this window, so a scanner rotating through IPs can't flood the inbox. Blocks and near misses are counted separately. `0` sends every one. |
+| `throttle_minutes` | `WATCHTOWER_ALERT_THROTTLE_MINUTES` | `60` | Sends at most one alert per address and scope in this window. An IPv6 address counts as its /64, the same as a block does. Blocks and near misses are counted separately. `0` sends every one and also turns off the cap below. |
+| `max_per_window` | `WATCHTOWER_ALERT_MAX_PER_WINDOW` | `20` | Sends at most this many alerts of each kind per window across all addresses, so a scanner rotating through a thousand addresses sends 20 alerts, not a thousand. Reaching the cap is logged on `WATCHTOWER_LOG_CHANNEL`. `0` means no cap. |
 | `manual` | `WATCHTOWER_ALERT_MANUAL` | `false` | Also alerts on blocks made by hand. Blocks from sync and feeds never alert. |
 | `would_have_blocked` | `WATCHTOWER_ALERT_WOULD_HAVE_BLOCKED` | `false` | Also alerts on near misses: the same events as the `would_have_blocked` log line (warn mode, the shared-IP guard, `never_auto_block`), each with why nothing was blocked. Useful while a warn-mode round is running. |
 
