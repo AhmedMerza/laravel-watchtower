@@ -111,6 +111,9 @@ return [
     |                against an existing block counts at
     |                `{key}:blockhits:{ip}` — `watchtower:cleanup` moves the
     |                total into that block's `hits`/`last_hit_at` columns.
+    |                A detector switched to warn from the management page
+    |                is held at `{key}:detector_warn:{detector}`, with no
+    |                TTL — it clears when that detector's config changes.
     |                Change the prefix only if it conflicts with another
     |                package's cache keys.
     |

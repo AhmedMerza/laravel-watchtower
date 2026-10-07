@@ -309,6 +309,7 @@ class WatchtowerServiceProvider extends PackageServiceProvider
                 Route::get('/', [ManagementController::class, 'index'])->name('index');
                 Route::post('/block', [ManagementController::class, 'block'])->name('block');
                 Route::post('/unblock', [ManagementController::class, 'unblock'])->name('unblock');
+                Route::post('/detectors/warn', [ManagementController::class, 'switchToWarn'])->name('detectors.warn');
             });
         }
     }

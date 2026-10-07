@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Watchtower\Services;
 
+use Illuminate\Contracts\Cache\Repository;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Watchtower\Enums\BlockSource;
@@ -118,6 +120,102 @@ class AutoBlockService
     }
 
     /**
+     * The mode a detector runs in: its configured mode, unless someone
+     * switched it to warn from the management page (#142).
+     *
+     * The override only ever stands in for 'block'. It is keyed to a
+     * fingerprint of the detector's settings and the global mode, so any
+     * change to either drops it — re-arming happens in config, where the
+     * arming happened, and never from the page.
+     *
+     * @return array{mode: string, configured: string, override: array{by: ?string, at: string}|null}
+     */
+    public function detectorMode(string $detector): array
+    {
+        [$configured, $fingerprint] = $this->configuredDetectorMode($detector);
+
+        // Only a 'block' detector can hold an override, and changing its mode
+        // changes the fingerprint anyway; the check saves a cache read per
+        // signal for every detector that isn't blocking.
+        $stored = $configured === 'block' ? $this->overrideCache()->get($this->overrideKey($detector)) : null;
+
+        $override = is_array($stored) && ($stored['fingerprint'] ?? null) === $fingerprint
+            ? ['by' => $stored['by'] ?? null, 'at' => (string) ($stored['at'] ?? '')]
+            : null;
+
+        return [
+            'mode'       => $override === null ? $configured : 'warn',
+            'configured' => $configured,
+            'override'   => $override,
+        ];
+    }
+
+    /**
+     * The emergency brake: run a blocking detector in warn mode until its
+     * config changes. False when there is nothing to switch — the detector
+     * doesn't block, or someone already switched it.
+     *
+     * Stored forever rather than for `cache.ttl_hours`: an override that
+     * lapsed on its own would re-arm a detector nobody re-armed. A cache
+     * flush still clears it, and so does a per-node store on another node —
+     * docs/management-page.md says so.
+     */
+    public function switchToWarn(string $detector, ?string $by): bool
+    {
+        if ($this->detectorMode($detector)['mode'] !== 'block') {
+            return false;
+        }
+
+        [, $fingerprint] = $this->configuredDetectorMode($detector);
+
+        $this->overrideCache()->forever($this->overrideKey($detector), [
+            'by'          => $by,
+            'at'          => now()->toIso8601String(),
+            'fingerprint' => $fingerprint,
+        ]);
+
+        try {
+            Log::channel(config('watchtower.log_channel', 'stack'))
+                ->warning('Watchtower: detector switched to warn from the management page', [
+                    'detector' => $detector,
+                    'by'       => $by,
+                ]);
+        } catch (\Throwable) {
+            // The switch is already in force; a broken log channel must not
+            // turn it into an error page.
+        }
+
+        return true;
+    }
+
+    /**
+     * @return array{0: string, 1: string} the configured mode, and the
+     *                                     fingerprint an override is tied to
+     */
+    private function configuredDetectorMode(string $detector): array
+    {
+        $settings = (array) config("watchtower.auto_block.detectors.{$detector}", []);
+        $global = $this->normaliseMode(config('watchtower.auto_block.mode', 'warn'));
+
+        return [
+            $this->resolveRuleMode($settings, $global),
+            hash('sha256', serialize([$settings, $global])),
+        ];
+    }
+
+    private function overrideKey(string $detector): string
+    {
+        return config('watchtower.cache.key', 'watchtower:blacklist').":detector_warn:{$detector}";
+    }
+
+    private function overrideCache(): Repository
+    {
+        $store = config('watchtower.cache.store');
+
+        return Cache::store(is_string($store) ? $store : null);
+    }
+
+    /**
      * Count one signal and decide. See record(), which is this behind a
      * fail-open guard.
      */
@@ -190,6 +288,11 @@ class AutoBlockService
         if ($hits < $threshold) {
             return false;
         }
+
+        // Asked only now: a switch to warn from the management page changes
+        // what happens at the threshold, not the counting before it, so a
+        // signal that falls short shouldn't pay a cache read for it (#142).
+        $mode = $this->detectorMode($detector)['mode'];
 
         $blocked = $this->blockDetected(
             $detector,

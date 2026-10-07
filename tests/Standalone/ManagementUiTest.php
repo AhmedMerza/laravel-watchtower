@@ -2,12 +2,14 @@
 
 declare(strict_types=1);
 
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\Route;
 use Watchtower\Enums\BlockSource;
 use Watchtower\Http\Middleware\Authorize;
 use Watchtower\Models\BlacklistedIp;
+use Watchtower\Services\AutoBlockService;
 use Watchtower\Support\BlockScope;
 
 beforeEach(function () {
@@ -382,4 +384,100 @@ it('offers no log entry link when LogScope is not installed', function () {
     signedInAdmin($this)->get('/watchtower')
         ->assertOk()
         ->assertDontSee('View log entry');
+});
+
+/**
+ * failed_logins armed in block mode, one failure to trip it, on a cache that
+ * the override and the hit counters share.
+ */
+function armFailedLogins(): void
+{
+    config()->set('cache.default', 'array');
+    config()->set('watchtower.cache.store', 'array');
+    Cache::flush();
+    config()->set('watchtower.auto_block.enabled', true);
+    config()->set('watchtower.auto_block.mode', 'warn');
+    config()->set('watchtower.auto_block.detectors.failed_logins.enabled', true);
+    config()->set('watchtower.auto_block.detectors.failed_logins.mode', 'block');
+    config()->set('watchtower.auto_block.detectors.failed_logins.count', 1);
+}
+
+it('shows each detector with its mode, threshold and scope', function () {
+    armFailedLogins();
+
+    signedInAdmin($this)->get('/watchtower')
+        ->assertOk()
+        ->assertSee('failed_logins')
+        ->assertSee('bad_user_agent')
+        ->assertSee('1 in 5 min')
+        ->assertSee('?warn=failed_logins', false);
+});
+
+it('switches a blocking detector to warn, and the detector then only warns', function () {
+    armFailedLogins();
+
+    uiPost(signedInAdmin($this), '/watchtower/detectors/warn', ['detector' => 'failed_logins'])
+        ->assertRedirect('/watchtower')
+        ->assertSessionHas('watchtower_status', 'Switched failed_logins to warn. It stays in warn until its config changes.');
+
+    $mode = app(AutoBlockService::class)->detectorMode('failed_logins');
+
+    expect($mode['mode'])->toBe('warn')
+        ->and($mode['configured'])->toBe('block')
+        ->and($mode['override']['by'])->toBe('admin@example.com');
+
+    app(AutoBlockService::class)->record('failed_logins', '203.0.113.7');
+
+    expect(BlacklistedIp::count())->toBe(0);
+
+    $this->get('/watchtower')->assertSee('switched from block by admin@example.com');
+});
+
+it('re-arms the detector when its config changes, not from the page', function () {
+    armFailedLogins();
+
+    uiPost(signedInAdmin($this), '/watchtower/detectors/warn', ['detector' => 'failed_logins']);
+
+    config()->set('watchtower.auto_block.detectors.failed_logins.count', 2);
+
+    expect(app(AutoBlockService::class)->detectorMode('failed_logins'))
+        ->toMatchArray(['mode' => 'block', 'override' => null]);
+});
+
+it('blocks normally when nobody switched the detector', function () {
+    armFailedLogins();
+
+    app(AutoBlockService::class)->record('failed_logins', '203.0.113.7');
+
+    expect(BlacklistedIp::count())->toBe(1);
+});
+
+it('has nothing to switch on a detector that does not block', function () {
+    armFailedLogins();
+    config()->set('watchtower.auto_block.detectors.failed_logins.mode', 'disabled');
+
+    uiPost(signedInAdmin($this), '/watchtower/detectors/warn', ['detector' => 'failed_logins'])
+        ->assertSessionHas('watchtower_status', "failed_logins isn't blocking, so there was nothing to switch.");
+
+    config()->set('watchtower.auto_block.detectors.failed_logins.mode', 'block');
+
+    expect(app(AutoBlockService::class)->detectorMode('failed_logins')['override'])->toBeNull();
+});
+
+it('refuses a detector that is not configured', function () {
+    armFailedLogins();
+
+    uiPost(signedInAdmin($this), '/watchtower/detectors/warn', ['detector' => 'nope'])
+        ->assertSessionHasErrors('detector');
+});
+
+it('still lists blocks when the cache store does not answer', function () {
+    armFailedLogins();
+    blockRow('198.51.100.1');
+    config()->set('watchtower.cache.store', 'no-such-store');
+
+    signedInAdmin($this)->get('/watchtower')
+        ->assertOk()
+        ->assertSee('198.51.100.1')
+        ->assertSee("Couldn't read the detectors' state", false);
 });

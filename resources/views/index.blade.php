@@ -26,7 +26,7 @@
     <header>
         <h1>Watchtower <span class="dot">·</span> Blocked Addresses</h1>
         {{-- Fully qualified: a package view can't assume the app kept Laravel's class aliases. --}}
-        <span class="muted">{{ $blocks->total() }} {{ \Illuminate\Support\Str::plural('block', $blocks->total()) }} {{ $state === 'all' ? 'in total' : $state }}</span>
+        <span class="muted">{{ $blocks->total() }} {{ \Illuminate\Support\Str::plural('block', $blocks->total()) }} {{ $state === 'all' ? 'in total' : $state }} · <a href="#detectors">Detectors</a></span>
     </header>
 
     @if (session('watchtower_status'))
@@ -223,6 +223,72 @@
                     @endif
                 </div>
             @endif
+        @endif
+    </div>
+
+    {{--
+        Detectors (#142): read-only, plus one way out. Arming, thresholds and
+        re-arming stay in config; the only action here makes a blocking
+        detector warn, and it confirms by round trip like Unblock does.
+    --}}
+    <div class="panel" id="detectors">
+        <h2>Detectors</h2>
+        @if ($detectors === null)
+            <div class="empty">Couldn't read the detectors' state: the cache store didn't answer.</div>
+        @else
+            @unless ($autoBlockEnabled)
+                <p class="muted">Auto-blocking is off (<span class="mono">auto_block.enabled</span>), so no detector is counting.</p>
+            @endunless
+            <table>
+                <thead>
+                    <tr>
+                        <th>Detector</th>
+                        <th>Mode</th>
+                        <th>Threshold</th>
+                        <th>Scope</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach ($detectors as $detector)
+                        <tr>
+                            <td class="mono nowrap">{{ $detector['name'] }}</td>
+                            <td class="nowrap">
+                                @if (! $detector['enabled'])
+                                    <span class="muted">off</span>
+                                @else
+                                    <span class="badge">{{ $detector['mode'] }}</span>
+                                    @if ($detector['override'])
+                                        <br><span class="muted">switched from block{{ $detector['override']['by'] ? ' by '.$detector['override']['by'] : '' }}, {{ \Illuminate\Support\Carbon::parse($detector['override']['at'])->diffForHumans() }}</span>
+                                    @endif
+                                @endif
+                            </td>
+                            <td class="secondary nowrap">{{ $detector['count'] ?? '—' }} in {{ $detector['window'] ?? '—' }} min</td>
+                            <td class="secondary">{{ $detector['scope'] ? $detector['scope'].' routes' : 'The whole app' }}</td>
+                            <td class="nowrap" style="text-align: right;">
+                                @if ($detector['enabled'] && $detector['mode'] === 'block')
+                                    @if ($confirmWarn === $detector['name'])
+                                        <form method="POST" action="{{ route('watchtower.ui.detectors.warn') }}" class="inline-form">
+                                            @csrf
+                                            <input type="hidden" name="detector" value="{{ $detector['name'] }}">
+                                            <input type="hidden" name="source" value="{{ $source }}">
+                                            <input type="hidden" name="state" value="{{ $state }}">
+                                            <button type="submit" class="primary">Switch to warn</button>
+                                        </form>
+                                        <a href="{{ route('watchtower.ui.index', $filters) }}#detectors">Cancel</a>
+                                    @else
+                                        <a href="{{ route('watchtower.ui.index', $filters + ['warn' => $detector['name']]) }}#detectors">Switch to warn</a>
+                                    @endif
+                                @endif
+                            </td>
+                        </tr>
+                    @endforeach
+                </tbody>
+            </table>
+            <p class="muted" style="margin-top: 0.75rem;">
+                Switch to warn keeps a detector in warn mode until that detector's config changes; it can't be undone here.
+                To see what each detector would have blocked, run <span class="mono">php artisan watchtower:simulate</span>.
+            </p>
         @endif
     </div>
 @endsection
