@@ -135,6 +135,30 @@ Each alert gives the address, the reason, which detector or rule fired, the scop
 | `manual` | `WATCHTOWER_ALERT_MANUAL` | `false` | Also alerts on blocks made by hand. Blocks from sync and feeds never alert. |
 | `would_have_blocked` | `WATCHTOWER_ALERT_WOULD_HAVE_BLOCKED` | `false` | Also alerts on near misses: the same events as the `would_have_blocked` log line (warn mode, the shared-IP guard, `never_auto_block`), each with why nothing was blocked. Useful while a warn-mode round is running. |
 
+### Daily digest
+
+The digest is one message a day listing every block and near miss since the previous digest, grouped by address. Each address shows how many times it was hit, when it was first and last seen, and how many of its events the throttle or the cap kept from alerting at the time. Instant alerts drop anything over the cap, and the digest is where those dropped alerts get reported.
+
+```dotenv
+WATCHTOWER_ALERT_DIGEST=true
+# WATCHTOWER_ALERT_DIGEST_AT=08:00
+# WATCHTOWER_ALERT_INSTANT=false
+```
+
+The digest uses the same routes as the instant alerts and is sent by `watchtower:alert-digest`, which is scheduled daily at `at` in the app timezone. Before turning it on:
+
+- Laravel's scheduler must be running.
+- Publish and run the `watchtower_alert_digest` migration.
+
+Events are stored as one row per address and reason, which counts its repeats, until the digest that reports them goes out. If the digest can't be sent on any channel, the rows are kept and the next run reports them. `watchtower:cleanup` deletes rows that no digest has sent within 7 days, for example because the scheduler has stopped. The digest lists the 50 busiest addresses and counts the rest.
+
+| Setting | Env | Default | |
+|---|---|---|---|
+| `digest.enabled` | `WATCHTOWER_ALERT_DIGEST` | `false` | Records events and schedules the digest. Needs `WATCHTOWER_ALERTS=true`. |
+| `digest.at` | `WATCHTOWER_ALERT_DIGEST_AT` | `08:00` | The time of day the digest is sent. |
+| `digest.instant` | `WATCHTOWER_ALERT_INSTANT` | `true` | `false` sends only the digest, with no instant alerts. |
+| `digest.notification` | | `BlockDigest::class` | The notification class to send. For another channel, extend `BlockDigest` the way the next section extends `BlockAlert`. |
+
 ### Another channel
 
 To use any other notification channel, extend `BlockAlert`, add that channel's `toX()` method, and give it a route. `subject()` and `lines()` hold the text the built-in channels send. For example, with a Telegram notification channel package installed:

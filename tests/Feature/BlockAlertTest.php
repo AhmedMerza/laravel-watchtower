@@ -8,6 +8,7 @@ use GuzzleHttp\HandlerStack;
 use GuzzleHttp\Middleware;
 use GuzzleHttp\Psr7\Response;
 use Illuminate\Cache\ArrayStore;
+use Illuminate\Console\Scheduling\Schedule;
 use Illuminate\Notifications\AnonymousNotifiable;
 use Illuminate\Notifications\ChannelManager;
 use Illuminate\Notifications\SlackChannelServiceProvider;
@@ -436,6 +437,11 @@ it('builds the alert link from APP_URL, not the Host header of the request that 
     $this->withServerVariables(['REMOTE_ADDR' => '203.0.113.8'])->get('http://evil.test/.env');
 
     Notification::assertSentOnDemand(BlockAlert::class, fn (BlockAlert $a) => $a->alert['url'] === 'https://app.test'.route('watchtower.ui.index', [], false));
+});
+
+it('does not schedule the digest while it is off', function () {
+    expect(collect(app(Schedule::class)->events())
+        ->contains(fn ($event) => $event->description === 'watchtower:alert-digest'))->toBeFalse();
 });
 
 class WatchtowerTestFlakyAlert extends BlockAlert
