@@ -115,6 +115,55 @@ jobs:
       - name: Run PHPStan
         run: vendor/bin/phpstan analyse --no-progress --memory-limit=1G
 
+  # The README promises every Laravel major composer.json permits is exercised
+  # by CI. Widening the illuminate/* constraint without adding matrix rows would
+  # make that silently false, so fail the build instead. jq and yq ship on
+  # ubuntu-latest; no composer install needed.
+  supported-majors:
+    name: Supported Laravel majors
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Every permitted major has a matrix row
+        run: |
+          set -euo pipefail
+          ci=.github/workflows/ci.yml
+
+          constraints=$(jq -r '.require | to_entries[] | select(.key | startswith("illuminate/")) | .value' composer.json | sort -u)
+          if [ "$(wc -l <<<"$constraints")" -ne 1 ]; then
+            echo "::error file=composer.json::The illuminate/* constraints in composer.json disagree: $(paste -sd ' ' <<<"$constraints"). Give every illuminate/* package the same range."
+            exit 1
+          fi
+
+          majors=()
+          for part in $(tr '|' ' ' <<<"$constraints"); do
+            if [[ $part =~ ^[~^]?([0-9]+)(\.[0-9*]+)*$ ]]; then
+              majors+=("${BASH_REMATCH[1]}")
+            else
+              echo "::error file=composer.json::Can't expand '$part' (in illuminate/* '$constraints') to a single Laravel major. Use ^N.0 terms or update this check in $ci."
+              exit 1
+            fi
+          done
+
+          failed=0
+          for job in tests static-analysis; do
+            if [ "$job" = tests ]; then
+              rows=$(yq '.jobs.tests.strategy.matrix.include[].laravel' "$ci")
+            else
+              rows=$(yq '.jobs.static-analysis.strategy.matrix.laravel[]' "$ci")
+            fi
+            for major in "${majors[@]}"; do
+              if ! grep -qx "$major" <<<"$rows"; then
+                echo "::error file=$ci::composer.json permits Laravel $major (illuminate/* '$constraints') but the $job matrix in $ci has no laravel: '$major' row. Add one, or narrow the range in composer.json."
+                failed=1
+              fi
+            done
+          done
+          [ "$failed" -eq 0 ] && echo "Laravel ${majors[*]} each have a tests and static-analysis row."
+          exit "$failed"
+
   code-style:
     name: Code style (Pint)
     runs-on: ubuntu-latest
