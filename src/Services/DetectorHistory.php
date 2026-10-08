@@ -47,7 +47,7 @@ class DetectorHistory
     {
         /** @var array<string, array<string, array{ip: string, reports: int, first_at: string, last_at: string, user_ids: array<string, true>, outcomes: array<string, int>}>> $byDetector */
         $byDetector = [];
-        /** @var array<string, array<string, array{ip: string, blocks: int, first_at: string, last_at: string, minutes: int, expires_at: mixed, scopes: array<string, true>, user_ids: array<string, true>}>> $blocksByDetector */
+        /** @var array<string, array<string, array{ip: string, blocks: int, first_at: string, last_at: string, minutes: int, expires_at: ?string, scopes: array<string, true>, user_ids: array<string, true>}>> $blocksByDetector */
         $blocksByDetector = [];
         $unreadable = 0;
 
@@ -103,8 +103,11 @@ class DetectorHistory
                 $block['minutes'] += is_int($duration) && $duration >= 0 ? $duration : 0;
                 // The latest block's expiry, unusable or not: it is the one
                 // that could still be on, and an older one in its place would
-                // be a confident wrong answer. Parsed once per address below.
-                $block['expires_at'] = $context['expires_at'] ?? null;
+                // be a confident wrong answer. Parsed once per address below;
+                // held as a short string, since a forged line can carry any
+                // size or shape and it is kept until the stream ends.
+                $expires = $context['expires_at'] ?? null;
+                $block['expires_at'] = is_string($expires) ? substr($expires, 0, 64) : null;
                 $block['scopes'][is_string($context['scope'] ?? null) ? $context['scope'] : ''] = true;
 
                 foreach ((array) ($context['user_ids'] ?? []) as $id) {
