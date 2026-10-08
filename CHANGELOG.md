@@ -4,6 +4,10 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-10-08
+
+No migrations, no config changes.
+
 ### Added
 
 - **`watchtower:simulate` lists each detector's real auto-blocks next to its near misses.** It reads the `Watchtower: auto-blocked` lines added in v0.16.0 over `--days`, grouped by address: how many blocks, when, total minutes, scope and when the latest one expires. `--json` has them under each detector's `blocks`. One command now shows what block mode did, not only what it held back ([#154](https://github.com/AhmedMerza/laravel-watchtower/issues/154)).
@@ -386,7 +390,8 @@ No migrations and nothing breaking: a `composer update` is enough.
 
 - **There is no transitional `ahmedmerza/logscope-guard` package.** It has been removed from Packagist. To upgrade, `composer remove ahmedmerza/logscope-guard`, `composer require ahmedmerza/watchtower`, then work through the BREAKING entries under Changed.
 
-[Unreleased]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.16.0...HEAD
+[Unreleased]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.13.1...v0.14.0
