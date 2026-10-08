@@ -186,7 +186,7 @@ class SimulateCommand extends Command
             $configured,
             static fn (mixed $settings): bool => is_array($settings) && ($settings['enabled'] ?? false),
         ));
-        $names = array_values(array_unique([...$names, ...array_keys($observed['detectors'])]));
+        $names = array_values(array_unique([...$names, ...array_keys($observed['detectors']), ...array_keys($observed['blocks'])]));
         sort($names);
 
         $detectors = [];
@@ -205,6 +205,7 @@ class SimulateCommand extends Command
                 // over a scope typo the engine already refuses loudly.
                 'scope'            => is_scalar($settings['scope'] ?? null) ? trim((string) $settings['scope']) : BlockScope::GLOBAL,
                 'offenders'        => $observed['detectors'][$name] ?? [],
+                'blocks'           => $observed['blocks'][$name] ?? [],
             ];
         }
 
@@ -237,7 +238,8 @@ class SimulateCommand extends Command
         $this->info(sprintf('Detectors over %d day(s) — observed, not simulated.', $days));
         $this->line('They count failed logins, lockouts, response statuses, request paths and User-Agents,');
         $this->line('none of which LogScope stores, so they can\'t be replayed. This is what they reported');
-        $this->line('live: one would-have-blocked line per block they were held back from.');
+        $this->line('live: one would-have-blocked line per block they were held back from, and since');
+        $this->line('v0.16.0 one auto-blocked line per real block.');
 
         // Listed anyway, as the rules are replayed anyway: the report is how
         // you decide whether to switch it on. It just can't have history.
@@ -259,12 +261,19 @@ class SimulateCommand extends Command
             /** @var list<array<string, mixed>> $offenders */
             $offenders = $detector['offenders'];
 
+            $this->reportRealBlocks($detector['blocks']);
+
             if ($offenders === []) {
                 $this->line('  No would-have-blocked reports.');
+
+                if ($detector['blocks'] !== []) {
+                    continue;
+                }
+
                 $this->line(match (true) {
                     ! $engineOn => '  auto_block.enabled is off, so no detector has run. Switch it on with mode `warn` to collect a history.',
                     $detector['mode'] === 'disabled' => '  Its mode is `disabled`, so it never runs. Set it to `warn` to collect a history.',
-                    $detector['mode'] === 'block' => '  In block mode its real blocks are in the blacklist, not here — this only lists what a guard held back.',
+                    $detector['mode'] === 'block' => '  No real block was logged either. A block written before v0.16.0 logged no line — look in the blacklist for those.',
                     default => '  Either it never reached its threshold, or LogScope isn\'t capturing `watchtower.log_channel`.',
                 });
 
@@ -363,9 +372,48 @@ class SimulateCommand extends Command
         if ($unreadable > 0) {
             $this->newLine();
             $this->warn(sprintf(
-                '%d would-have-blocked line(s) could not be used — cut short by LogScope (a rule\'s line looks the same once cut), or not naming a configured detector — so they are not counted above.',
+                '%d would-have-blocked or auto-blocked line(s) could not be used — cut short by LogScope (a rule\'s line looks the same once cut), or not naming a configured detector — so they are not counted above.',
                 $unreadable,
             ));
+        }
+    }
+
+    /**
+     * The blocks a detector really wrote (#154): the proof that block mode
+     * acted, which near misses alone can't give.
+     *
+     * @param  list<array<string, mixed>>  $blocks
+     */
+    private function reportRealBlocks(array $blocks): void
+    {
+        if ($blocks === []) {
+            return;
+        }
+
+        $this->line(sprintf(
+            '  %d real block(s) on %d address(es):',
+            array_sum(array_column($blocks, 'blocks')),
+            count($blocks),
+        ));
+
+        $this->table(
+            ['IP', 'Blocks', 'First', 'Last', 'Minutes', 'Scope', 'Last expires'],
+            array_map(static fn (array $b): array => [
+                $b['ip'],
+                $b['blocks'],
+                self::minutePrecision($b['first_at']),
+                self::minutePrecision($b['last_at']),
+                $b['minutes'],
+                implode(', ', array_map(
+                    static fn (string $scope): string => $scope === BlockScope::GLOBAL ? 'app-wide' : self::plain($scope),
+                    $b['scopes'],
+                )),
+                $b['expires_at'] === null ? '?' : self::minutePrecision($b['expires_at']),
+            ], array_slice($blocks, 0, self::MAX_ROWS)),
+        );
+
+        if (count($blocks) > self::MAX_ROWS) {
+            $this->line(sprintf('  … and %d more. Use --json for the full list.', count($blocks) - self::MAX_ROWS));
         }
     }
 
@@ -378,13 +426,8 @@ class SimulateCommand extends Command
     {
         arsort($outcomes);
 
-        // Outcomes are read out of a shared log table, so they are printed
-        // as text: no control or bidi characters for the terminal, no tags
-        // for Console.
         $cells = array_map(
-            static fn (string|int $outcome, int $n): string => OutputFormatter::escape(
-                (string) preg_replace('/[\p{Cc}\p{Cf}]/u', '', (string) $outcome),
-            ).(count($outcomes) > 1 ? " ×{$n}" : ''),
+            static fn (string|int $outcome, int $n): string => self::plain((string) $outcome).(count($outcomes) > 1 ? " ×{$n}" : ''),
             array_keys($outcomes),
             $outcomes,
         );
@@ -570,6 +613,15 @@ class SimulateCommand extends Command
     private static function minutePrecision(string $iso): string
     {
         return str_replace('T', ' ', substr($iso, 0, 16));
+    }
+
+    /**
+     * Text read out of a shared log table, printed as text: no control or
+     * bidi characters for the terminal, no tags for Console.
+     */
+    private static function plain(string $text): string
+    {
+        return OutputFormatter::escape((string) preg_replace('/[\p{Cc}\p{Cf}]/u', '', $text));
     }
 
     /** @param  array<string, mixed>  $result */

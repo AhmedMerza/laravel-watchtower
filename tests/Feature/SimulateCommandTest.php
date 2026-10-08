@@ -435,7 +435,7 @@ it('counts a truncated context instead of dropping it silently', function () {
 
     $this->artisan('watchtower:simulate')
         ->assertSuccessful()
-        ->expectsOutputToContain('1 would-have-blocked line(s) could not be used');
+        ->expectsOutputToContain('1 would-have-blocked or auto-blocked line(s) could not be used');
 });
 
 it('says why an enabled detector has no history', function () {
@@ -635,13 +635,187 @@ it('says a scoped detector would have blocked signed-in users on its routes, not
         ->doesntExpectOutputToContain('1 more had signed-in users');
 });
 
+function autoBlocked(string $ip, string $detector, int $minutesAgo, array $context = []): void
+{
+    logEntry($ip, [
+        'level'       => 'warning',
+        'message'     => AutoBlockService::AUTO_BLOCKED_MESSAGE,
+        'occurred_at' => now()->subMinutes($minutesAgo),
+        'context'     => json_encode(array_merge([
+            'auto_blocked'     => true,
+            'ip'               => $ip,
+            'detector'         => $detector,
+            'user_ids'         => [],
+            'target'           => $ip,
+            'scope'            => '',
+            'duration_minutes' => 1,
+            'expires_at'       => now()->subMinutes($minutesAgo - 1)->toIso8601String(),
+        ], $context)),
+    ]);
+}
+
+it('lists the blocks a detector really wrote next to its near misses (#154)', function () {
+    config()->set('watchtower.scopes', ['auth']);
+    onlyDetector('failed_logins', ['mode' => 'block', 'scope' => 'auth']);
+    autoBlocked('10.0.0.9', 'failed_logins', 120, ['scope' => 'auth', 'duration_minutes' => 1]);
+    autoBlocked('10.0.0.9', 'failed_logins', 30, ['scope' => 'auth', 'duration_minutes' => 15]);
+    autoBlocked('10.0.0.8', 'failed_logins', 60, ['scope' => 'auth', 'expires_at' => 'not a time']);
+    // A rule's real block is RuleSimulator's business, not a detector's.
+    logEntry('10.0.0.7', [
+        'level'       => 'warning',
+        'message'     => AutoBlockService::AUTO_BLOCKED_MESSAGE,
+        'occurred_at' => now()->subMinutes(10),
+        'context'     => json_encode(['auto_blocked' => true, 'ip' => '10.0.0.7', 'rule' => 'x', 'duration_minutes' => 5]),
+    ]);
+    wouldHaveBlocked('10.0.0.6', 'failed_logins', 30, ['not_blocked_because' => 'never_auto_block']);
+
+    $this->artisan('watchtower:simulate')
+        ->assertSuccessful()
+        ->expectsOutputToContain('3 real block(s) on 2 address(es):')
+        ->expectsTable(
+            ['IP', 'Blocks', 'First', 'Last', 'Minutes', 'Scope', 'Last expires'],
+            [
+                ['10.0.0.9', 2, '2026-09-21 10:00', '2026-09-21 11:30', 16, 'auth', '2026-09-21 11:31'],
+                ['10.0.0.8', 1, '2026-09-21 11:00', '2026-09-21 11:00', 1, 'auth', '?'],
+            ],
+        )
+        ->expectsTable(
+            ['IP', 'Reports', 'First', 'Last', 'Users seen at IP', 'In block mode'],
+            [['10.0.0.6', 1, '2026-09-21 11:30', '2026-09-21 11:30', 0, 'held: never_auto_block']],
+        )
+        ->doesntExpectOutputToContain('10.0.0.7')
+        ->doesntExpectOutputToContain('could not be used');
+
+    expect(Artisan::call('watchtower:simulate', ['--json' => true]))->toBe(0);
+    $json = json_decode(Artisan::output(), true, flags: JSON_THROW_ON_ERROR);
+
+    expect($json['detectors']['failed_logins']['blocks'][0])->toMatchArray([
+        'ip'      => '10.0.0.9',
+        'blocks'  => 2,
+        'minutes' => 16,
+        'scopes'  => ['auth'],
+    ]);
+});
+
+it('reports a detector that only really blocked, without explaining an empty history (#154)', function () {
+    onlyDetector('scanner_paths', ['mode' => 'block']);
+    autoBlocked('10.0.0.9', 'scanner_paths', 30);
+
+    $this->artisan('watchtower:simulate')
+        ->assertSuccessful()
+        ->expectsOutputToContain('1 real block(s) on 1 address(es):')
+        ->expectsTable(
+            ['IP', 'Blocks', 'First', 'Last', 'Minutes', 'Scope', 'Last expires'],
+            [['10.0.0.9', 1, '2026-09-21 11:30', '2026-09-21 11:30', 1, 'app-wide', '2026-09-21 11:31']],
+        )
+        ->expectsOutputToContain('No would-have-blocked reports.')
+        ->doesntExpectOutputToContain('No real block was logged either');
+});
+
+it('reads back the line a real auto-block writes, not just a hand-built one (#154)', function () {
+    // autoBlocked() writes the context by hand, so a renamed key on the
+    // engine side would leave the tests above green. This blocks for real
+    // and stores the line the way LogScope does — on MessageLogged.
+    config()->set('watchtower.scopes', ['auth']);
+    onlyDetector('scanner_paths', ['mode' => 'block', 'count' => 1, 'window_minutes' => 5, 'patterns' => ['/.env'], 'scope' => 'auth']);
+
+    Event::listen(MessageLogged::class, function (MessageLogged $log): void {
+        if ($log->message === AutoBlockService::AUTO_BLOCKED_MESSAGE) {
+            logEntry($log->context['ip'], [
+                'level'   => $log->level,
+                'message' => $log->message,
+                'context' => json_encode($log->context),
+            ]);
+        }
+    });
+
+    app(AutoBlockService::class)->record('scanner_paths', '10.0.0.9', 7);
+
+    $this->artisan('watchtower:simulate')
+        ->assertSuccessful()
+        ->expectsOutputToContain('1 real block(s) on 1 address(es):')
+        ->expectsTable(
+            ['IP', 'Blocks', 'First', 'Last', 'Minutes', 'Scope', 'Last expires'],
+            [['10.0.0.9', 1, '2026-09-21 12:00', '2026-09-21 12:00', 60, 'auth', '2026-09-21 13:00']],
+        );
+
+    expect(Artisan::call('watchtower:simulate', ['--json' => true]))->toBe(0);
+    $json = json_decode(Artisan::output(), true, flags: JSON_THROW_ON_ERROR);
+
+    expect($json['detectors']['scanner_paths']['blocks'][0]['user_ids'])->toBe(['7']);
+});
+
+it('prints what a forged auto-blocked line carries as text, and sums only real minutes (#154)', function () {
+    onlyDetector('scanner_paths', ['mode' => 'block']);
+    autoBlocked('10.0.0.9', 'scanner_paths', 60, ['scope' => "au\u{202E}th<error>x</error>", 'duration_minutes' => 10, 'user_ids' => [5, '7']]);
+    // The latest line's expiry is unusable, so the older valid one must not stand in for it.
+    autoBlocked('10.0.0.9', 'scanner_paths', 30, ['scope' => 'api', 'duration_minutes' => -50, 'expires_at' => 'garbage', 'user_ids' => [5, ['x']]]);
+    autoBlocked('10.0.0.8', 'scanner_paths', 30, ['scope' => ['x'], 'duration_minutes' => 'abc']);
+
+    $this->artisan('watchtower:simulate')
+        ->assertSuccessful()
+        ->expectsOutputToContain('auth<error>x</error>, api')
+        ->doesntExpectOutputToContain("\u{202E}");
+
+    expect(Artisan::call('watchtower:simulate', ['--json' => true]))->toBe(0);
+    $json = json_decode(Artisan::output(), true, flags: JSON_THROW_ON_ERROR);
+    $blocks = array_column($json['detectors']['scanner_paths']['blocks'], null, 'ip');
+
+    expect($blocks['10.0.0.9'])->toMatchArray(['blocks' => 2, 'minutes' => 10, 'expires_at' => null, 'user_ids' => ['5', '7']])
+        ->and($blocks['10.0.0.8'])->toMatchArray(['minutes' => 0, 'scopes' => ['']]);
+});
+
+it('counts a forged or cut-short auto-blocked line as unreadable instead of reporting it (#154)', function () {
+    onlyDetector('scanner_paths', ['mode' => 'block']);
+    autoBlocked('10.0.0.9', 'made_up', 30);
+    logEntry('10.0.0.8', [
+        'level'       => 'warning',
+        'message'     => AutoBlockService::AUTO_BLOCKED_MESSAGE,
+        'occurred_at' => now()->subMinutes(30),
+        'context'     => '{"auto_blocked":true,"ip":"10.0',
+    ]);
+
+    $this->artisan('watchtower:simulate')
+        ->assertSuccessful()
+        ->expectsOutputToContain('2 would-have-blocked or auto-blocked line(s) could not be used')
+        ->doesntExpectOutputToContain('made_up')
+        ->doesntExpectOutputToContain('real block(s)');
+});
+
+it('keeps a switched-off detector\'s blocks, truncates the table and orders ties by address (#154)', function () {
+    onlyDetector('response_bursts');
+    config()->set('watchtower.auto_block.detectors.scanner_paths', ['enabled' => false]);
+
+    $ips = array_map(static fn (int $i): string => "10.0.0.{$i}", range(1, 26));
+
+    foreach ($ips as $ip) {
+        autoBlocked($ip, 'scanner_paths', 30);
+    }
+
+    $this->artisan('watchtower:simulate')
+        ->assertSuccessful()
+        ->expectsOutputToContain('— switched off now')
+        ->expectsOutputToContain('26 real block(s) on 26 address(es):')
+        ->expectsOutputToContain('… and 1 more. Use --json for the full list.')
+        // Last in address order, so the one the table cuts.
+        ->doesntExpectOutputToContain('10.0.0.9 ');
+
+    expect(Artisan::call('watchtower:simulate', ['--json' => true]))->toBe(0);
+    $json = json_decode(Artisan::output(), true, flags: JSON_THROW_ON_ERROR);
+
+    $sorted = $ips;
+    sort($sorted, SORT_STRING);
+
+    expect(array_column($json['detectors']['scanner_paths']['blocks'], 'ip'))->toBe($sorted);
+});
+
 it('explains an empty history in block mode and in disabled mode', function () {
     onlyDetector('failed_logins', ['mode' => 'block']);
 
     $this->artisan('watchtower:simulate')
         ->assertSuccessful()
         ->expectsOutputToContain('Detector failed_logins [block]')
-        ->expectsOutputToContain('real blocks are in the blacklist');
+        ->expectsOutputToContain('No real block was logged either');
 
     onlyDetector('failed_logins', ['mode' => 'disabled']);
 
@@ -706,7 +880,7 @@ it('does not trust a forged line: unknown detectors and non-addresses are set as
     $this->artisan('watchtower:simulate')
         ->assertSuccessful()
         ->expectsOutputToContain('<error>clean</error>')
-        ->expectsOutputToContain('2 would-have-blocked line(s) could not be used')
+        ->expectsOutputToContain('2 would-have-blocked or auto-blocked line(s) could not be used')
         ->doesntExpectOutputToContain('made_up');
 });
 

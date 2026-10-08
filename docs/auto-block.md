@@ -321,11 +321,32 @@ the distinct signed-in users LogScope saw from the address over `--days`
 mobile carrier, and a block there hits all of them; put it in
 `never_auto_block` before arming the detector.
 
+**Real blocks are listed too.** Since v0.16.0 every real auto-block writes a
+`Watchtower: auto-blocked` line, and `simulate` lists a detector's above its
+near misses, grouped by address — whatever its mode is now, so blocks written
+before you switched it to warn still show:
+
+```
+Detector failed_logins [block]
+  3 real block(s) on 2 address(es):
++-------------+--------+------------------+------------------+---------+-------+------------------+
+| IP          | Blocks | First            | Last             | Minutes | Scope | Last expires     |
++-------------+--------+------------------+------------------+---------+-------+------------------+
+| 203.0.113.9 | 2      | 2026-10-08 09:12 | 2026-10-08 14:40 | 16      | auth  | 2026-10-08 14:55 |
+| 192.0.2.44  | 1      | 2026-10-09 07:03 | 2026-10-09 07:03 | 1       | auth  | 2026-10-09 07:04 |
++-------------+--------+------------------+------------------+---------+-------+------------------+
+```
+
+**Minutes** adds up every block's length, and **Last expires** is when the
+latest one ran out (or runs out). This is the proof that block mode acted —
+the rows themselves are deleted by `watchtower:cleanup` once they expire. A
+block written before v0.16.0 logged no line, so it isn't here; look in the
+blacklist for those. `--json` has the same list under each detector's
+`blocks`, with the `user_ids` each block's line named.
+
 This needs a history, so run the detector in `warn` mode for a while first.
 A detector with no reports says why: auto-block is off, its mode is
-`disabled`, it never reached its threshold, or — in `block` mode — its real
-blocks are in the blacklist and only the ones a guard held back are listed
-here. The log table is shared, so a line naming a detector that isn't
+`disabled`, or it never reached its threshold. The log table is shared, so a line naming a detector that isn't
 configured, or an address that isn't one, is set aside and counted rather
 than reported. The lines only reach
 LogScope if it captures `watchtower.log_channel` (its default `all` capture
