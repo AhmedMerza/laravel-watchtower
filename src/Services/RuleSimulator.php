@@ -39,12 +39,10 @@ use Watchtower\Support\NeverBlockList;
  *
  * ## Why two passes
  *
- * The issue this was built for assumed an `(ip_address, occurred_at)` index.
- * LogScope doesn't have one — `ip_address` and `occurred_at` are indexed
- * separately, and the composites are all `(something, occurred_at)`. So the
- * shape that would have been natural (walk the period one window at a time,
- * carrying per-address state) would hold state for every address seen in the
- * period, which on a busy week is the thing the memory criterion rules out.
+ * The shape that would have been natural — walk the period one window at a
+ * time, carrying per-address state — holds state for every address seen in
+ * the period, which on a busy week is the thing the memory criterion rules
+ * out.
  *
  * Instead:
  *
@@ -55,12 +53,25 @@ use Watchtower\Support\NeverBlockList;
  *    rides `(level, occurred_at)`; one that doesn't rides `occurred_at`.
  *    Either way the counting happens in the database and no rows reach PHP.
  *
- * 2. REPLAY. Per surviving address, stream only that address's rows in time
- *    order and slide the window over them. One address at a time, so peak
- *    memory is one address's ring buffer rather than the table.
+ * 2. REPLAY. Surviving addresses in batches: one time-ordered stream of the
+ *    batch's rows, each row handed to its own address's replay, which slides
+ *    the window over it. Peak memory is one ring buffer per address in the
+ *    batch rather than the table.
+ *
+ * The narrowing pass is a weak filter — 10 rows spread over a week survive a
+ * 10-in-5-minutes rule they can never trip — so on busy traffic candidates
+ * far outnumber offenders, and one stream per address paid a query for each
+ * of them (#77). A batch is packed by the row counts the narrowing pass
+ * already has, up to one keyset page: an `in (...)` list sorted by time can't
+ * ride LogScope's `(ip_address, occurred_at)` index, so every page sorts the
+ * whole batch, and a batch that fits one page sorts once. An address busier
+ * than a page goes alone, which is a single-value `in` and rides the index.
  */
 final class RuleSimulator
 {
+    /** Most candidate addresses replayed off one stream, whatever their rows. */
+    private const BATCH = 200;
+
     /** The engine's scheduler tick: how soon a held-back address is looked at again. */
     private const TICK_SECONDS = 60;
 
@@ -158,67 +169,93 @@ final class RuleSimulator
         $offenders = [];
         $neverBlocked = [];
 
-        foreach ($this->candidates($table, $level, $messageContains, $readFrom, $to, $threshold) as $ip) {
-            $replayed = $this->replay(
-                $table, $level, $messageContains, $ip, $readFrom, $to,
-                $windowMinutes, $threshold, $durationMinutes, $from,
-                $scope === null ? $sharedIpThreshold : 0,
-            );
+        foreach ($this->batches($this->candidates($table, $level, $messageContains, $readFrom, $to, $threshold)) as $batch) {
+            $replays = [];
+            $folded = [];
 
-            if ($replayed['span'] === null) {
-                continue;
+            foreach ($batch as $ip) {
+                $replays[$ip] = $this->replay(
+                    $table, $ip, $readFrom, $to,
+                    $windowMinutes, $threshold, $durationMinutes, $from,
+                    $scope === null ? $sharedIpThreshold : 0,
+                );
+                $folded[strtolower(rtrim($ip))] ??= $replays[$ip];
             }
 
-            // The engine would have refused this one whatever the rule said:
-            // BlacklistService::block() throws for either allow-list and
-            // blockOrReport() catches it. Reporting it as a would-be block
-            // would point the operator at an address that is already safe —
-            // and these are exactly the addresses (their own office, a
-            // partner) they most need an accurate answer about.
-            if (NeverBlockList::refusesAutoBlock($ip)) {
-                $neverBlocked[] = $ip;
+            $rows = $this->matching($table, $level, $messageContains)->whereIn('ip_address', $batch);
 
-                continue;
+            foreach (KeysetStream::rows($rows, $readFrom, $to, ['ip_address']) as $row) {
+                // `in` matches under the column's collation, so on MySQL's
+                // case-insensitive default a row can come back spelled
+                // differently from the address the grouped pass returned for
+                // it. The old per-address `where` counted those rows for that
+                // address; dropping them would under-report.
+                $ip = (string) $row->ip_address;
+                ($replays[$ip] ?? $folded[strtolower(rtrim($ip))])->send(Carbon::parse($row->occurred_at));
             }
 
-            [$first, $last] = $replayed['span'];
-            $usersAtFirstBlock = $this->distinctUsers(
-                $table, $ip, $first->copy()->subMinutes($windowMinutes), $first,
-            );
+            foreach ($replays as $ip => $replay) {
+                $ip = (string) $ip;
+                // The trailing null runs the evaluations still pending after
+                // the address's last row, then ends the replay.
+                $replay->send(null);
+                $replayed = $replay->getReturn();
 
-            $offenders[] = [
-                'ip'     => $ip,
-                'blocks' => $replayed['blocks'],
+                if ($replayed['span'] === null) {
+                    continue;
+                }
 
-                // Crossings the shared-IP guard held back on a global rule:
-                // one per simulated tick, as the engine logs one per tick.
-                'warnings' => $replayed['warnings'],
+                // The engine would have refused this one whatever the rule said:
+                // BlacklistService::block() throws for either allow-list and
+                // blockOrReport() catches it. Reporting it as a would-be block
+                // would point the operator at an address that is already safe —
+                // and these are exactly the addresses (their own office, a
+                // partner) they most need an accurate answer about.
+                if (NeverBlockList::refusesAutoBlock($ip)) {
+                    $neverBlocked[] = $ip;
 
-                // The first and last crossing reported, block or warning.
-                'first_block_at'       => $first->toIso8601String(),
-                'last_block_at'        => $last->toIso8601String(),
-                'distinct_users'       => $this->distinctUsers($table, $ip, $from, $to),
-                'users_at_first_block' => $usersAtFirstBlock,
+                    continue;
+                }
 
-                // The false-positive signal. Authenticated traffic from this
-                // address that never matched the rule is, by construction,
-                // somebody signed in doing something the rule has no quarrel
-                // with — and a block would have taken it away from them.
-                'authenticated_rows_not_matching' => $this->authenticatedRows($table, $ip, $from, $to, null, null)
-                    - $this->authenticatedRows($table, $ip, $from, $to, $level, $messageContains),
+                [$first, $last] = $replayed['span'];
+                $usersAtFirstBlock = $this->distinctUsers(
+                    $table, $ip, $first->copy()->subMinutes($windowMinutes), $first,
+                );
 
-                // Mirrors blockOrReport()'s `$downgraded`: on a scoped rule a
-                // shared address is the case scopes exist for, so the engine
-                // blocks it in scope rather than holding it back. A label
-                // only — every crossing of a scoped rule is already counted
-                // as a block either way. Computed against the window the
-                // LIVE guard would have read, not the period-wide figure,
-                // which is an upper bound and would predict downgrades that
-                // never happen.
-                'downgraded_to_scope' => $scope !== null && $sharedIpThreshold > 0 && $usersAtFirstBlock >= $sharedIpThreshold
-                    ? $scope
-                    : null,
-            ];
+                $offenders[] = [
+                    'ip'     => $ip,
+                    'blocks' => $replayed['blocks'],
+
+                    // Crossings the shared-IP guard held back on a global rule:
+                    // one per simulated tick, as the engine logs one per tick.
+                    'warnings' => $replayed['warnings'],
+
+                    // The first and last crossing reported, block or warning.
+                    'first_block_at'       => $first->toIso8601String(),
+                    'last_block_at'        => $last->toIso8601String(),
+                    'distinct_users'       => $this->distinctUsers($table, $ip, $from, $to),
+                    'users_at_first_block' => $usersAtFirstBlock,
+
+                    // The false-positive signal. Authenticated traffic from this
+                    // address that never matched the rule is, by construction,
+                    // somebody signed in doing something the rule has no quarrel
+                    // with — and a block would have taken it away from them.
+                    'authenticated_rows_not_matching' => $this->authenticatedRows($table, $ip, $from, $to, null, null)
+                        - $this->authenticatedRows($table, $ip, $from, $to, $level, $messageContains),
+
+                    // Mirrors blockOrReport()'s `$downgraded`: on a scoped rule a
+                    // shared address is the case scopes exist for, so the engine
+                    // blocks it in scope rather than holding it back. A label
+                    // only — every crossing of a scoped rule is already counted
+                    // as a block either way. Computed against the window the
+                    // LIVE guard would have read, not the period-wide figure,
+                    // which is an upper bound and would predict downgrades that
+                    // never happen.
+                    'downgraded_to_scope' => $scope !== null && $sharedIpThreshold > 0 && $usersAtFirstBlock >= $sharedIpThreshold
+                        ? $scope
+                        : null,
+                ];
+            }
         }
 
         // Busiest first: the report is read top-down and the address with the
@@ -243,7 +280,7 @@ final class RuleSimulator
      * aggregate is what stops this from touching the table again per address
      * it was never going to report.
      *
-     * @return list<string>
+     * @return array<string, int> matching rows per address, read from `$from`
      */
     private function candidates(
         string $table,
@@ -253,17 +290,53 @@ final class RuleSimulator
         CarbonInterface $to,
         int $threshold,
     ): array {
-        /** @var list<string> */
-        return $this->matching($table, $level, $messageContains)
+        $counts = [];
+
+        $this->matching($table, $level, $messageContains)
             ->select('ip_address')
+            ->selectRaw('count(*) as matched')
             ->whereNotNull('ip_address')
             ->where('occurred_at', '>=', $from)
             ->where('occurred_at', '<=', $to)
             ->groupBy('ip_address')
             ->havingRaw('count(*) >= ?', [$threshold])
-            ->pluck('ip_address')
-            ->map(static fn ($ip): string => (string) $ip)
-            ->all();
+            ->get()
+            ->each(function (\stdClass $row) use (&$counts): void {
+                $counts[(string) $row->ip_address] = (int) $row->matched;
+            });
+
+        return $counts;
+    }
+
+    /**
+     * Candidates grouped so each batch's rows fit one keyset page, at most
+     * BATCH addresses apiece.
+     *
+     * @param  array<string, int>  $candidates  matching rows per address
+     * @return list<non-empty-list<string>>
+     */
+    private function batches(array $candidates): array
+    {
+        $batches = [];
+        $batch = [];
+        $rows = 0;
+
+        foreach ($candidates as $ip => $count) {
+            if ($batch !== [] && ($rows + $count > KeysetStream::CHUNK || count($batch) === self::BATCH)) {
+                $batches[] = $batch;
+                $batch = [];
+                $rows = 0;
+            }
+
+            $batch[] = (string) $ip;
+            $rows += $count;
+        }
+
+        if ($batch !== []) {
+            $batches[] = $batch;
+        }
+
+        return $batches;
     }
 
     /**
@@ -298,13 +371,13 @@ final class RuleSimulator
      * visible at all — but a crossing before it belongs to the week the
      * operator didn't ask about, so it is not reported.
      *
-     * @return array{blocks: int, warnings: int, span: array{CarbonInterface, CarbonInterface}|null}
-     *                                                                                               span is the first and last crossing reported, block or warning
+     * Fed one address's matching rows by send(), oldest first, then a null.
+     *
+     * @return \Generator<int, null, CarbonInterface|null, array{blocks: int, warnings: int, span: array{CarbonInterface, CarbonInterface}|null}>
+     *                                                                                                                                            span is the first and last crossing reported, block or warning
      */
     private function replay(
         string $table,
-        ?string $level,
-        ?string $messageContains,
         string $ip,
         CarbonInterface $from,
         CarbonInterface $to,
@@ -313,7 +386,7 @@ final class RuleSimulator
         int $durationMinutes,
         CarbonInterface $reportFrom,
         int $sharedIpThreshold,
-    ): array {
+    ): \Generator {
         $windowSeconds = $windowMinutes * 60;
         $durationSeconds = $durationMinutes * 60;
         $reportFromAt = $reportFrom->getTimestamp();
@@ -374,18 +447,12 @@ final class RuleSimulator
             return count($users);
         };
 
-        // A trailing null, so the evaluations still pending after the last
-        // row — a held-back address re-checked until its window drains —
-        // run through the same loop as the ones between rows.
-        $rows = (function () use ($table, $level, $messageContains, $ip, $from, $to): \Generator {
-            foreach (KeysetStream::rows($this->matching($table, $level, $messageContains)->where('ip_address', $ip), $from, $to) as $row) {
-                yield Carbon::parse($row->occurred_at);
-            }
-
-            yield null;
-        })();
-
-        foreach ($rows as $occurredAt) {
+        // Rows arrive by send(), in time order, ending with a null so the
+        // evaluations still pending after the last row — a held-back address
+        // re-checked until its window drains — run through the same loop as
+        // the ones between rows.
+        while (true) {
+            $occurredAt = yield;
             $at = $occurredAt?->getTimestamp() ?? $to->getTimestamp();
 
             // Evaluate before this row joins the buffer: a tick earlier than

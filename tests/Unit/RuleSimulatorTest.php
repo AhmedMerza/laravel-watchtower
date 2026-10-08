@@ -367,6 +367,155 @@ it('streams an address whose history spans many keyset pages', function () {
         ->and($pages)->toBe(3);
 });
 
+it('streams candidates in batches rather than one query per address (#77)', function () {
+    // 250 candidates — two rows each, a day apart — pass the period-wide
+    // narrowing pass for a 2-row rule and can never trip its 5-minute window.
+    // That weak filter is the busy-traffic shape: one stream per candidate
+    // paid 250 queries here to report nothing.
+    $rows = [];
+
+    for ($i = 0; $i < 250; $i++) {
+        foreach ([60, 60 * 25] as $minutesAgo) {
+            $rows[] = [
+                'id'          => (string) Str::ulid(),
+                'level'       => 'error',
+                'message'     => 'Boom',
+                'ip_address'  => '10.0.'.intdiv($i, 256).'.'.($i % 256),
+                'user_id'     => null,
+                'occurred_at' => now()->copy()->subMinutes($minutesAgo),
+                'created_at'  => now(),
+                'updated_at'  => now(),
+            ];
+        }
+    }
+
+    foreach (array_chunk($rows, 100) as $chunk) {
+        DB::table('log_entries')->insert($chunk);
+    }
+
+    $streams = 0;
+
+    DB::listen(function ($query) use (&$streams): void {
+        if (str_contains($query->sql, 'order by') && str_contains($query->sql, 'limit')) {
+            $streams++;
+        }
+    });
+
+    $result = ($this->run)(['count' => 2, 'window_minutes' => 5]);
+
+    // 250 candidates at 200 per batch: two streams, each one short page.
+    expect($result['offenders'])->toBe([])
+        ->and($streams)->toBe(2);
+});
+
+it('keeps each address in a batch on its own window, however their rows interleave (#77)', function () {
+    // Each address has 3 rows in the same minute and 3 more a day earlier:
+    // 6 in the period, so both are candidates for a 6-row rule, but neither
+    // has 6 inside one window. Together, interleaved in the one stream, the
+    // minute holds 6 — a replay that shared state across addresses fires.
+    foreach (['10.0.0.1', '10.0.0.2'] as $ip) {
+        burst($ip, 3, 60 * 24);
+        burst($ip, 3, 30);
+    }
+
+    $result = ($this->run)(['count' => 6, 'window_minutes' => 5]);
+
+    expect($result['offenders'])->toBe([]);
+});
+
+it('reports offenders and protected addresses from every batch, next to candidates that never fire (#77)', function () {
+    config()->set('watchtower.never_block', ['0.0.0.2', '9.9.9.8']);
+
+    // 250 never-firing candidates fill the 200-address first batch, so the
+    // addresses that sort before them land in batch one and those after in
+    // batch two — each sharing its batch with ones that report nothing.
+    for ($i = 0; $i < 250; $i++) {
+        $ip = '10.0.'.intdiv($i, 256).'.'.($i % 256);
+        logEntry($ip, ['occurred_at' => now()->copy()->subMinutes(60)]);
+        logEntry($ip, ['occurred_at' => now()->copy()->subDay()]);
+    }
+
+    foreach (['0.0.0.1', '0.0.0.2', '9.9.9.8', '9.9.9.9'] as $ip) {
+        burst($ip, 3, 30);
+    }
+
+    $result = ($this->run)(['count' => 2, 'window_minutes' => 5]);
+
+    expect(array_column($result['offenders'], 'ip'))->toBe(['0.0.0.1', '9.9.9.9'])
+        ->and(array_column($result['offenders'], 'blocks'))->toBe([1, 1])
+        ->and($result['never_blocked'])->toBe(['0.0.0.2', '9.9.9.8']);
+});
+
+it('gives an address busier than one page a stream of its own (#77)', function () {
+    // Three addresses of 600 rows: any two together pass the 1000-row page,
+    // so packing by rows streams each alone — where a 200-address batch
+    // would sort all 1800 rows on each of its two pages.
+    $rows = [];
+
+    foreach (['10.0.0.1', '10.0.0.2', '10.0.0.3'] as $ip) {
+        for ($i = 0; $i < 600; $i++) {
+            $rows[] = [
+                'id'          => (string) Str::ulid(),
+                'level'       => 'error',
+                'message'     => 'Boom',
+                'ip_address'  => $ip,
+                'user_id'     => null,
+                'occurred_at' => now()->copy()->subHours(110)->addMinutes($i * 10),
+                'created_at'  => now(),
+                'updated_at'  => now(),
+            ];
+        }
+    }
+
+    foreach (array_chunk($rows, 300) as $chunk) {
+        DB::table('log_entries')->insert($chunk);
+    }
+
+    $streams = [];
+
+    DB::listen(function ($query) use (&$streams): void {
+        if (str_contains($query->sql, 'order by') && str_contains($query->sql, 'limit')) {
+            $streams[] = count(array_filter($query->bindings, static fn ($b): bool => is_string($b) && str_starts_with($b, '10.')));
+        }
+    });
+
+    $result = ($this->run)(['count' => 5, 'window_minutes' => 5]);
+
+    expect($result['offenders'])->toBe([])
+        ->and($streams)->toBe([1, 1, 1]);
+});
+
+it('replays a case variant of an address with the address its collation groups it under (#77)', function () {
+    // MySQL's default collation is case-insensitive: the grouped pass returns
+    // one spelling, and `in` hands back rows in both. SQLite's NOCASE column
+    // reproduces it. Routing rows by exact string sent the second spelling
+    // to no replay at all, and the run died on a null.
+    DB::statement('DROP TABLE log_entries');
+    DB::statement('
+        CREATE TABLE log_entries (
+            id VARCHAR(26) PRIMARY KEY,
+            level VARCHAR(20) NOT NULL,
+            message TEXT NOT NULL,
+            ip_address VARCHAR(50) COLLATE NOCASE,
+            user_id BIGINT,
+            context TEXT,
+            occurred_at DATETIME NOT NULL,
+            created_at DATETIME,
+            updated_at DATETIME
+        )
+    ');
+
+    burst('2001:DB8::1', 3, 30);
+    burst('2001:db8::1', 3, 29);
+
+    $result = ($this->run)(['count' => 6, 'window_minutes' => 5]);
+
+    // Six rows inside two minutes, under whichever spelling the group kept.
+    expect($result['offenders'])->toHaveCount(1)
+        ->and(strtolower($result['offenders'][0]['ip']))->toBe('2001:db8::1')
+        ->and($result['offenders'][0]['blocks'])->toBe(1);
+});
+
 /*
 |--------------------------------------------------------------------------
 | Engine parity — the cases where the simulation used to disagree with the
