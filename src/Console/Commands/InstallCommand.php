@@ -63,7 +63,12 @@ class InstallCommand extends Command
      */
     private function reportRoutes(): void
     {
-        $route = Route::getRoutes()->getByName('watchtower.api.blocks');
+        // A grouped route's name is set after it's added, so the name index
+        // is stale until refreshed. Apps refresh it from their routing
+        // provider; one without that would read as having no routes.
+        $routes = Route::getRoutes();
+        $routes->refreshNameLookups();
+        $route = $routes->getByName('watchtower.api.blocks');
 
         if ($route === null) {
             $this->line('Watchtower\'s routes aren\'t registered — <info>WATCHTOWER_ROUTES_ENABLED=false</info>, or a stale');
@@ -72,7 +77,8 @@ class InstallCommand extends Command
             return;
         }
 
-        $prefix = (string) $route->getPrefix();
+        // The route keeps the prefix as configured; only its URI is trimmed.
+        $prefix = trim((string) $route->getPrefix(), '/');
 
         if (in_array(Authorize::class, $route->middleware(), true)) {
             $this->line("Standalone mode — Watchtower routes mounted at <info>/{$prefix}</info>");

@@ -11,7 +11,7 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 ### Changed
 
 - **`watchtower:simulate` replays many addresses per query, not one query per address.** A rule's first pass keeps every address with enough matching rows anywhere in the period, and on busy traffic most of those can never trip the rule's window. Each one used to cost its own query. Now addresses share a query up to 1000 rows or 200 addresses, and an address busier than that still gets its own. The report itself is unchanged ([#77](https://github.com/AhmedMerza/laravel-watchtower/issues/77)).
-- **`watchtower:install` reports the routes the provider actually mounted.** It used to decide LogScope or standalone mode with its own class check and rebuild the prefix from config. Now it reads both off the registered route, so its guidance can't disagree with what's served. When no route is registered, because `WATCHTOWER_ROUTES_ENABLED=false` or the route cache predates the install, it says so instead of printing a URL that 404s ([#51](https://github.com/AhmedMerza/laravel-watchtower/issues/51)).
+- **`watchtower:install` reports the routes the provider actually mounted.** It used to decide LogScope or standalone mode with its own class check and rebuild the prefix from config. Now it reads both off the registered route, so its guidance can't disagree with what's served, and a prefix configured with slashes no longer prints as `//ops/wt/`. When no route is registered, because `WATCHTOWER_ROUTES_ENABLED=false` or the route cache predates the install, it says so instead of printing a URL that 404s ([#51](https://github.com/AhmedMerza/laravel-watchtower/issues/51)).
 
 ## [0.16.0] - 2026-10-08
 
