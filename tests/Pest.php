@@ -7,6 +7,7 @@ use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use Watchtower\Support\SyncSignature;
 use Watchtower\Tests\InstallTestCase;
+use Watchtower\Tests\StandaloneInstallTestCase;
 use Watchtower\Tests\StandaloneTestCase;
 use Watchtower\Tests\SyncTestCase;
 use Watchtower\Tests\TestCase;
@@ -16,6 +17,10 @@ uses(TestCase::class)->in(__DIR__.'/Feature', __DIR__.'/Unit');
 // A genuinely empty app: TestCase pre-creates every table directly, which
 // would hide a migration double-registering (#104).
 uses(InstallTestCase::class)->in(__DIR__.'/Install');
+
+// The same empty app, without LogScope. Its own directory: Pest allows one
+// test case per file, and the provider is chosen before beforeEach() runs.
+uses(StandaloneInstallTestCase::class)->in(__DIR__.'/InstallStandalone');
 
 // A master environment. Sync routes are registered from config at boot, so
 // these need the secret in place before the app comes up — which is what

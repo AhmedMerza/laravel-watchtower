@@ -6,6 +6,8 @@ namespace Watchtower\Console\Commands;
 
 use Composer\InstalledVersions;
 use Illuminate\Console\Command;
+use Illuminate\Support\Facades\Route;
+use Watchtower\Http\Middleware\Authorize;
 use Watchtower\Support\BlockScope;
 
 class InstallCommand extends Command
@@ -36,8 +38,6 @@ class InstallCommand extends Command
             $this->line('   Migrate any customisations into the new file, then delete the old one.');
         }
 
-        $logscopeInstalled = class_exists('LogScope\\LogScope');
-
         $this->newLine();
         $this->info('✓ Watchtower installed!');
         $this->line('');
@@ -49,28 +49,55 @@ class InstallCommand extends Command
         $this->line('  <comment>WATCHTOWER_SYNC_ROLE=satellite</comment>  (master on the master)');
         $this->newLine();
 
-        if ($logscopeInstalled) {
-            $logscopePrefix = (string) config('logscope.routes.prefix', 'logscope');
-            $this->line("LogScope detected — Watchtower routes mounted under <info>/{$logscopePrefix}/watchtower</info>");
-            if ($this->logScopeEmbedsBlockButton()) {
-                $this->line('Block-IP button has been added to your LogScope log detail panel.');
-            } else {
-                $this->line("LogScope 2.2+ has no Block-IP button — block from <info>/{$logscopePrefix}/watchtower</info> instead.");
-            }
-            $this->line('LogScope\'s own authorization guards those routes; Watchtower\'s <comment>routes.middleware</comment>');
-            $this->line('and <comment>viewWatchtower</comment> Gate apply to standalone installs only and are inert here.');
-        } else {
-            $prefix = (string) config('watchtower.routes.prefix', 'watchtower');
+        $this->reportRoutes();
+
+        $this->reportScopes();
+
+        return self::SUCCESS;
+    }
+
+    /**
+     * Say where the management routes are and what guards them, read off the
+     * route the provider registered rather than re-deciding it here: the
+     * provider is what mounts them, so its answer is the one that's true.
+     */
+    private function reportRoutes(): void
+    {
+        // A grouped route's name is set after it's added, so the name index
+        // is stale until refreshed. Apps refresh it from their routing
+        // provider; one without that would read as having no routes.
+        $routes = Route::getRoutes();
+        $routes->refreshNameLookups();
+        $route = $routes->getByName('watchtower.api.blocks');
+
+        if ($route === null) {
+            $this->line('Watchtower\'s routes aren\'t registered — <info>WATCHTOWER_ROUTES_ENABLED=false</info>, or a stale');
+            $this->line('route cache (<info>php artisan route:clear</info>). There is no management page or API until they are.');
+
+            return;
+        }
+
+        // The route keeps the prefix as configured; only its URI is trimmed.
+        $prefix = trim((string) $route->getPrefix(), '/');
+
+        if (in_array(Authorize::class, $route->middleware(), true)) {
             $this->line("Standalone mode — Watchtower routes mounted at <info>/{$prefix}</info>");
             $this->line('<comment>⚠️  Outside the local environment, the management routes refuse everyone until you</comment>');
             $this->line('<comment>   define the viewWatchtower Gate</comment>, e.g. in <info>AppServiceProvider::boot()</info>:');
             $this->line('   <info>Gate::define(\'viewWatchtower\', fn ($user) => $user->isAdmin());</info>');
             $this->line('   Set <info>WATCHTOWER_ROUTES_ENABLED=false</info> if you don\'t need the API.');
+
+            return;
         }
 
-        $this->reportScopes();
-
-        return self::SUCCESS;
+        $this->line("LogScope detected — Watchtower routes mounted under <info>/{$prefix}</info>");
+        if ($this->logScopeEmbedsBlockButton()) {
+            $this->line('Block-IP button has been added to your LogScope log detail panel.');
+        } else {
+            $this->line("LogScope 2.2+ has no Block-IP button — block from <info>/{$prefix}</info> instead.");
+        }
+        $this->line('LogScope\'s own authorization guards those routes; Watchtower\'s <comment>routes.middleware</comment>');
+        $this->line('and <comment>viewWatchtower</comment> Gate apply to standalone installs only and are inert here.');
     }
 
     /**
