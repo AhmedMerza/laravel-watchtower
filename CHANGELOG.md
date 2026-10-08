@@ -4,6 +4,10 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-10-08
+
+No migrations, no config changes. Two changes are visible from outside: if you filter logs on `shared address blocked in scope instead of app-wide`, filter on `downgraded_to_scope` instead; and a blocked client that sends `Accept: application/json` now gets a JSON body, not plain text.
+
 ### Added
 
 - **A real auto-block now writes a log line.** Each block in block mode logs `Watchtower: auto-blocked` to `log_channel`, with `auto_blocked: true`, the detector or rule that fired, `user_ids` for a detector, `target`, `scope`, `duration_minutes` and `expires_at`. Before this, only a near miss was logged, and a short block left no trace once `watchtower:cleanup` deleted its row unless alerts or the webhook were on ([#150](https://github.com/AhmedMerza/laravel-watchtower/issues/150)).
@@ -373,7 +377,8 @@ No migrations and nothing breaking: a `composer update` is enough.
 
 - **There is no transitional `ahmedmerza/logscope-guard` package.** It has been removed from Packagist. To upgrade, `composer remove ahmedmerza/logscope-guard`, `composer require ahmedmerza/watchtower`, then work through the BREAKING entries under Changed.
 
-[Unreleased]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.15.0...HEAD
+[Unreleased]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.16.0...HEAD
+[0.16.0]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.13.1...v0.14.0
 [0.13.1]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.13.0...v0.13.1
