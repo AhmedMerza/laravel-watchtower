@@ -4,6 +4,14 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **A real auto-block now writes a log line.** Each block in block mode logs `Watchtower: auto-blocked` to `log_channel`, with `auto_blocked: true`, the detector or rule that fired, `user_ids` for a detector, `target`, `scope`, `duration_minutes` and `expires_at`. Before this, only a near miss was logged, and a short block left no trace once `watchtower:cleanup` deleted its row unless alerts or the webhook were on ([#150](https://github.com/AhmedMerza/laravel-watchtower/issues/150)).
+
+### Changed
+
+- **A shared address blocked in its scope now logs `Watchtower: auto-blocked` with `downgraded_to_scope` set,** instead of `Watchtower: shared address blocked in scope instead of app-wide`. If you filter logs on the old message, filter on `downgraded_to_scope` instead ([#150](https://github.com/AhmedMerza/laravel-watchtower/issues/150)).
+
 ## [0.15.0] - 2026-10-07
 
 **Upgrading:**

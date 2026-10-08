@@ -81,7 +81,8 @@ it('logs a scoped downgrade as a real block, not a would-have-blocked', function
         // `would_have_blocked` stays the canonical filter for things that did
         // NOT happen. This one did, so an operator filtering on it must not
         // find a real block hiding among the near misses.
-        ->withArgs(fn (string $message, array $context): bool => $context['downgraded_to_scope'] === 'auth'
+        ->withArgs(fn (string $message, array $context): bool => $message === AutoBlockService::AUTO_BLOCKED_MESSAGE
+            && $context['downgraded_to_scope'] === 'auth'
             && ! array_key_exists('would_have_blocked', $context));
     $logChannel->shouldReceive('debug')->zeroOrMoreTimes();
     Log::shouldReceive('channel')->andReturn($logChannel);

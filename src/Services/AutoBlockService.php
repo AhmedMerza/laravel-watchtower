@@ -55,6 +55,9 @@ class AutoBlockService
      */
     public const WOULD_HAVE_BLOCKED_MESSAGE = 'Watchtower: would-have-blocked (auto-block did not block)';
 
+    /** The line a real auto-block writes, so it outlives its row (#150). */
+    public const AUTO_BLOCKED_MESSAGE = 'Watchtower: auto-blocked';
+
     /**
      * Detectors that never see a signed-in user (DetectAuthFailures), so
      * their would-have-blocked lines carry no user ids and `watchtower:simulate`
@@ -626,12 +629,11 @@ class AutoBlockService
         // moving either up the ladder would lengthen a future block on the
         // strength of ones that never happened. The shared-IP downgrade
         // converted above is a real block, so it counts like any other.
-        $expiresAt = now()->addMinutes(
-            $this->escalatedMinutes($ip, $scope, $durationMinutes),
-        );
+        $blockMinutes = $this->escalatedMinutes($ip, $scope, $durationMinutes);
+        $expiresAt = now()->addMinutes($blockMinutes);
 
         try {
-            $this->blacklist->block($ip, [
+            $record = $this->blacklist->block($ip, [
                 'reason'     => $reason,
                 'source'     => BlockSource::Auto,
                 'expires_at' => $expiresAt,
@@ -651,20 +653,26 @@ class AutoBlockService
             return 'never_block';
         }
 
-        if ($downgraded) {
-            // Deliberately NOT a would-have-blocked line. `would_have_blocked`
-            // stays the canonical filter for things that did not happen, and
-            // this one did — an operator filtering on it must not find a real
-            // block hiding among the near misses.
-            Log::channel(config('watchtower.log_channel', 'stack'))
-                ->warning('Watchtower: shared address blocked in scope instead of app-wide', [
-                    'ip'                  => $ip,
-                    ...$context,
-                    'reason'              => $reason,
-                    'downgraded_to_scope' => $scope,
-                    'distinct_users'      => $distinctUsers,
-                ]);
-        }
+        // A block's row is deleted by watchtower:cleanup the night after it
+        // expires, and IpBlocked reaches no one unless alerts or a webhook
+        // are on — so without this line a short block is untraceable by the
+        // next morning (#150). Deliberately NOT a would-have-blocked line:
+        // that stays the canonical filter for things that did not happen,
+        // and an operator filtering on it must not find a real block hiding
+        // among the near misses. The shared-IP downgrade is one of these,
+        // flagged by `downgraded_to_scope`, not a second line for one block.
+        Log::channel(config('watchtower.log_channel', 'stack'))->warning(self::AUTO_BLOCKED_MESSAGE, [
+            'auto_blocked'     => true,
+            'ip'               => $ip,
+            ...$context,
+            'reason'           => $reason,
+            'target'           => $record->ip,
+            'scope'            => $scope,
+            'distinct_users'   => $distinctUsers,
+            'duration_minutes' => $blockMinutes,
+            'expires_at'       => $expiresAt->toIso8601String(),
+            ...($downgraded ? ['downgraded_to_scope' => $scope] : []),
+        ]);
 
         // Nothing held it back — including the downgraded case, which is a
         // real block narrowed to a scope rather than a near miss.

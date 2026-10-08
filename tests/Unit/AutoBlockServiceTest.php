@@ -94,6 +94,16 @@ it('blocks an IP that exceeds the rule threshold', function () {
         ]);
     }
 
+    // The row goes at cleanup; the line is what's left of it (#150).
+    $logChannel = Mockery::mock();
+    $logChannel->shouldReceive('warning')->once()->withArgs(
+        fn (string $message, array $context): bool => $message === AutoBlockService::AUTO_BLOCKED_MESSAGE
+            && $context['ip'] === '5.5.5.5'
+            && $context['rule_index'] === 0
+            && $context['duration_minutes'] === 60,
+    );
+    Log::shouldReceive('channel')->andReturn($logChannel);
+
     $this->service->run();
 
     $this->assertDatabaseHas('blacklisted_ips', [
@@ -480,7 +490,10 @@ function expectWarning(string $notBlockedBecause): void
     $logChannel = Mockery::mock();
     $logChannel->shouldReceive('warning')
         ->once()
-        ->withArgs(fn (string $message, array $context): bool => $context['not_blocked_because'] === $notBlockedBecause);
+        ->withArgs(fn (string $message, array $context): bool => $message === AutoBlockService::WOULD_HAVE_BLOCKED_MESSAGE
+            && $context['not_blocked_because'] === $notBlockedBecause);
+    // A case that also blocks something else logs that block (#150).
+    $logChannel->shouldReceive('warning')->with(AutoBlockService::AUTO_BLOCKED_MESSAGE, Mockery::any())->zeroOrMoreTimes();
     $logChannel->shouldReceive('debug')->zeroOrMoreTimes();
     Log::shouldReceive('channel')->andReturn($logChannel);
 }
@@ -933,6 +946,7 @@ it('holds a never_block refusal in block mode, until the address leaves the list
     $logChannel->shouldReceive('debug')->andReturnUsing(function () use (&$debug): void {
         $debug++;
     });
+    $logChannel->shouldReceive('warning')->with(AutoBlockService::AUTO_BLOCKED_MESSAGE, Mockery::any())->once();
     Log::shouldReceive('channel')->andReturn($logChannel);
 
     $this->service->run();
