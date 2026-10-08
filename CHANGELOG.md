@@ -10,6 +10,7 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 ### Changed
 
+- **A blocked request that expects JSON now gets a JSON body,** `{"message": "Access denied."}` with the configured status, instead of the plain-text body or the redirect. `message` is the key Laravel's own JSON errors use, so API and mobile clients show their normal error instead of raw text. Browsers are unchanged ([#152](https://github.com/AhmedMerza/laravel-watchtower/issues/152)).
 - **A shared address blocked in its scope now logs `Watchtower: auto-blocked` with `downgraded_to_scope` set,** instead of `Watchtower: shared address blocked in scope instead of app-wide`. If you filter logs on the old message, filter on `downgraded_to_scope` instead ([#150](https://github.com/AhmedMerza/laravel-watchtower/issues/150)).
 
 ## [0.15.0] - 2026-10-07
