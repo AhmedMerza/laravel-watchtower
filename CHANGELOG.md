@@ -8,6 +8,10 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 - **`watchtower:simulate` lists each detector's real auto-blocks next to its near misses.** It reads the `Watchtower: auto-blocked` lines added in v0.16.0 over `--days`, grouped by address: how many blocks, when, total minutes, scope and when the latest one expires. `--json` has them under each detector's `blocks`. One command now shows what block mode did, not only what it held back ([#154](https://github.com/AhmedMerza/laravel-watchtower/issues/154)).
 
+### Changed
+
+- **`watchtower:simulate` replays rules in batches of 200 addresses per query, not one query per address.** A rule's first pass keeps every address with enough matching rows anywhere in the period, and on busy traffic most of those can never trip the rule's window. Each one used to cost its own query. The report itself is unchanged ([#77](https://github.com/AhmedMerza/laravel-watchtower/issues/77)).
+
 ## [0.16.0] - 2026-10-08
 
 No migrations, no config changes. Two changes are visible from outside: if you filter logs on `shared address blocked in scope instead of app-wide`, filter on `downgraded_to_scope` instead; and a blocked client that sends `Accept: application/json` now gets a JSON body, not plain text.

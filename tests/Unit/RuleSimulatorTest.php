@@ -367,6 +367,62 @@ it('streams an address whose history spans many keyset pages', function () {
         ->and($pages)->toBe(3);
 });
 
+it('streams candidates in batches rather than one query per address (#77)', function () {
+    // 250 candidates — two rows each, a day apart — pass the period-wide
+    // narrowing pass for a 2-row rule and can never trip its 5-minute window.
+    // That weak filter is the busy-traffic shape: one stream per candidate
+    // paid 250 queries here to report nothing.
+    $rows = [];
+
+    for ($i = 0; $i < 250; $i++) {
+        foreach ([60, 60 * 25] as $minutesAgo) {
+            $rows[] = [
+                'id'          => (string) Str::ulid(),
+                'level'       => 'error',
+                'message'     => 'Boom',
+                'ip_address'  => '10.0.'.intdiv($i, 256).'.'.($i % 256),
+                'user_id'     => null,
+                'occurred_at' => now()->copy()->subMinutes($minutesAgo),
+                'created_at'  => now(),
+                'updated_at'  => now(),
+            ];
+        }
+    }
+
+    foreach (array_chunk($rows, 100) as $chunk) {
+        DB::table('log_entries')->insert($chunk);
+    }
+
+    $streams = 0;
+
+    DB::listen(function ($query) use (&$streams): void {
+        if (str_contains($query->sql, 'order by') && str_contains($query->sql, 'limit')) {
+            $streams++;
+        }
+    });
+
+    $result = ($this->run)(['count' => 2, 'window_minutes' => 5]);
+
+    // 250 candidates at 200 per batch: two streams, each one short page.
+    expect($result['offenders'])->toBe([])
+        ->and($streams)->toBe(2);
+});
+
+it('keeps each address in a batch on its own window, however their rows interleave (#77)', function () {
+    // Each address has 3 rows in the same minute and 3 more a day earlier:
+    // 6 in the period, so both are candidates for a 6-row rule, but neither
+    // has 6 inside one window. Together, interleaved in the one stream, the
+    // minute holds 6 — a replay that shared state across addresses fires.
+    foreach (['10.0.0.1', '10.0.0.2'] as $ip) {
+        burst($ip, 3, 60 * 24);
+        burst($ip, 3, 30);
+    }
+
+    $result = ($this->run)(['count' => 6, 'window_minutes' => 5]);
+
+    expect($result['offenders'])->toBe([]);
+});
+
 /*
 |--------------------------------------------------------------------------
 | Engine parity — the cases where the simulation used to disagree with the
