@@ -24,6 +24,10 @@ use Watchtower\Support\KeysetStream;
  * says so — observed, not replayed — instead of approximating a replay from
  * the few requests that happened to log something.
  *
+ * Since #150 a real auto-block writes its own line too, so block mode's
+ * blocks are read back beside its hold-backs (#154): one report then says
+ * what was blocked, for how long, and what was held back.
+ *
  * Read-only, like RuleSimulator, and for the same reason.
  */
 class DetectorHistory
@@ -32,16 +36,19 @@ class DetectorHistory
     public const NOT_RECORDED = 'not recorded';
 
     /**
-     * Offenders per detector, busiest first, plus how many matching rows
-     * couldn't be used — a context LogScope cut short, or one no detector
-     * wrote — since a report that silently dropped them would undercount.
+     * Offenders and real blocks per detector, busiest first, plus how many
+     * matching rows couldn't be used — a context LogScope cut short, or one
+     * no detector wrote — since a report that silently dropped them would
+     * undercount.
      *
-     * @return array{detectors: array<string, list<array<string, mixed>>>, unreadable: int}
+     * @return array{detectors: array<string, list<array<string, mixed>>>, blocks: array<string, list<array<string, mixed>>>, unreadable: int}
      */
     public function observed(string $table, CarbonInterface $from, CarbonInterface $to): array
     {
         /** @var array<string, array<string, array{ip: string, reports: int, first_at: string, last_at: string, user_ids: array<string, true>, outcomes: array<string, int>}>> $byDetector */
         $byDetector = [];
+        /** @var array<string, array<string, array{ip: string, blocks: int, first_at: string, last_at: string, minutes: int, expires_at: ?string, scopes: array<string, true>, user_ids: array<string, true>}>> $blocksByDetector */
+        $blocksByDetector = [];
         $unreadable = 0;
 
         // Only names the engine could have run: the log table is shared, and
@@ -52,9 +59,9 @@ class DetectorHistory
         // then only runs over the warnings inside it.
         $query = DB::table($table)
             ->where('level', 'warning')
-            ->where('message', AutoBlockService::WOULD_HAVE_BLOCKED_MESSAGE);
+            ->whereIn('message', [AutoBlockService::WOULD_HAVE_BLOCKED_MESSAGE, AutoBlockService::AUTO_BLOCKED_MESSAGE]);
 
-        foreach (KeysetStream::rows($query, $from, $to, ['context']) as $row) {
+        foreach (KeysetStream::rows($query, $from, $to, ['context', 'message']) as $row) {
             $context = is_string($row->context) ? json_decode($row->context, true) : null;
 
             // The log rules write the same line keyed by 'rule'; those are
@@ -76,6 +83,36 @@ class DetectorHistory
             $ip = $context['ip'];
             // Parsed once per address below rather than once per row.
             $at = (string) $row->occurred_at;
+
+            if ($row->message === AutoBlockService::AUTO_BLOCKED_MESSAGE) {
+                $block = $blocksByDetector[$detector][$ip] ?? [
+                    'ip'         => $ip,
+                    'blocks'     => 0,
+                    'first_at'   => $at,
+                    'last_at'    => $at,
+                    'minutes'    => 0,
+                    'expires_at' => null,
+                    'scopes'     => [],
+                    'user_ids'   => [],
+                ];
+
+                $block['blocks']++;
+                $block['last_at'] = $at;
+                $block['minutes'] += is_int($context['duration_minutes'] ?? null) ? $context['duration_minutes'] : 0;
+                // The latest block's expiry: it is the one that could still be on.
+                $block['expires_at'] = self::isoOrNull($context['expires_at'] ?? null) ?? $block['expires_at'];
+                $block['scopes'][is_string($context['scope'] ?? null) ? $context['scope'] : ''] = true;
+
+                foreach ((array) ($context['user_ids'] ?? []) as $id) {
+                    if (is_int($id) || is_string($id)) {
+                        $block['user_ids'][(string) $id] = true;
+                    }
+                }
+
+                $blocksByDetector[$detector][$ip] = $block;
+
+                continue;
+            }
 
             $offender = $byDetector[$detector][$ip] ?? [
                 'ip'       => $ip,
@@ -139,7 +176,26 @@ class DetectorHistory
 
         ksort($result);
 
-        return ['detectors' => $result, 'unreadable' => $unreadable];
+        $blocks = [];
+
+        foreach ($blocksByDetector as $detector => $blocked) {
+            $list = array_map(static function (array $b): array {
+                $b['user_ids'] = array_map('strval', array_keys($b['user_ids']));
+                $b['scopes'] = array_map('strval', array_keys($b['scopes']));
+                $b['first_at'] = Carbon::parse($b['first_at'])->toIso8601String();
+                $b['last_at'] = Carbon::parse($b['last_at'])->toIso8601String();
+
+                return $b;
+            }, array_values($blocked));
+
+            usort($list, static fn (array $a, array $b): int => $b['blocks'] <=> $a['blocks'] ?: strcmp($a['ip'], $b['ip']));
+
+            $blocks[$detector] = $list;
+        }
+
+        ksort($blocks);
+
+        return ['detectors' => $result, 'blocks' => $blocks, 'unreadable' => $unreadable];
     }
 
     /**
@@ -171,6 +227,23 @@ class DetectorHistory
         }
 
         return $counts;
+    }
+
+    /**
+     * A timestamp read out of the shared log table, normalised, or null when
+     * it isn't one — the report prints it, so it must not be arbitrary text.
+     */
+    private static function isoOrNull(mixed $value): ?string
+    {
+        if (! is_string($value)) {
+            return null;
+        }
+
+        try {
+            return Carbon::parse($value)->toIso8601String();
+        } catch (\Throwable) {
+            return null;
+        }
     }
 
     /**
