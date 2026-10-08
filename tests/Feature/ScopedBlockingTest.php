@@ -194,3 +194,44 @@ it('lets an address through a multi-scope route when it is blocked in neither', 
         ->get('/panel')
         ->assertOk();
 });
+
+it('answers a JSON client with a JSON body on a scoped route', function () {
+    blockScoped('203.0.113.9', 'auth');
+
+    $this->withServerVariables(['REMOTE_ADDR' => '203.0.113.9'])
+        ->getJson('/login')
+        ->assertForbidden()
+        ->assertExactJson(['message' => 'Access denied.']);
+});
+
+it('answers a JSON client with a JSON body on the global middleware', function () {
+    blockScoped('203.0.113.9', BlockScope::GLOBAL);
+
+    $this->withServerVariables(['REMOTE_ADDR' => '203.0.113.9'])
+        ->getJson('/open')
+        ->assertForbidden()
+        ->assertExactJson(['message' => 'Access denied.']);
+});
+
+it('answers a JSON client with the configured status and message, not the redirect', function () {
+    config()->set('watchtower.block_response', [
+        'status'   => 429,
+        'message'  => 'Slow down.',
+        'redirect' => 'https://example.com/blocked',
+    ]);
+    blockScoped('203.0.113.9', 'auth');
+
+    $this->withServerVariables(['REMOTE_ADDR' => '203.0.113.9'])
+        ->getJson('/login')
+        ->assertStatus(429)
+        ->assertExactJson(['message' => 'Slow down.']);
+});
+
+it('still answers a browser with the plain-text body', function () {
+    blockScoped('203.0.113.9', BlockScope::GLOBAL);
+
+    $response = $this->withServerVariables(['REMOTE_ADDR' => '203.0.113.9'])->get('/open');
+
+    $response->assertForbidden();
+    expect($response->getContent())->toBe('Access denied.');
+});

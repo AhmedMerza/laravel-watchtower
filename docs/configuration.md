@@ -68,7 +68,7 @@ WATCHTOWER_FEED_FIREHOL_LEVEL1=false
 
 ## Block Response
 
-By default, blocked IPs receive a plain-text `403 Access denied.` response. It's returned directly, so the app's exception handler never sees it: no custom `errors/403` page, and no JSON body for API clients. To redirect instead:
+By default, blocked IPs receive a plain-text `403 Access denied.` response. A request that expects JSON (`Accept: application/json`, or an XHR) gets `{"message": "Access denied."}` with the same status instead, the shape Laravel's own JSON errors use, and never the redirect. The response is returned directly, so the app's exception handler never sees it: no custom `errors/403` page. To redirect browsers instead:
 
 ```php
 // config/watchtower.php

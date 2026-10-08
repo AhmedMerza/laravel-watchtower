@@ -40,15 +40,21 @@ class BlockResponse
         $request?->attributes->set(self::ANSWERED, true);
 
         $config = (array) config('watchtower.block_response', []);
+        $message = $config['message'] ?? 'Access denied.';
+        $status = (int) ($config['status'] ?? 403);
+
+        // Ahead of the redirect: an API client can't follow one to a page,
+        // and a plain-text body lands in its UI raw. `message` is the key
+        // Laravel's own JSON errors use, so client error handling reads it.
+        if ($request?->expectsJson()) {
+            return response()->json(['message' => $message], $status);
+        }
 
         if (! empty($config['redirect'])) {
             return redirect($config['redirect']);
         }
 
-        return response(
-            $config['message'] ?? 'Access denied.',
-            (int) ($config['status'] ?? 403),
-        );
+        return response($message, $status);
     }
 
     /**

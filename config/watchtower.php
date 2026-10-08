@@ -140,7 +140,9 @@ return [
     |--------------------------------------------------------------------------
     |
     | What to return when a blocked IP hits your app. Set 'redirect' to a URL
-    | to redirect instead of returning a plain response.
+    | to redirect instead of returning a plain response. A request that
+    | expects JSON always gets {"message": ...} with 'status', never the
+    | redirect.
     |
     */
 
