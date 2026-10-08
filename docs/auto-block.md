@@ -322,8 +322,9 @@ mobile carrier, and a block there hits all of them; put it in
 `never_auto_block` before arming the detector.
 
 **Real blocks are listed too.** Since v0.16.0 every real auto-block writes a
-`Watchtower: auto-blocked` line, and for a detector in `block` mode `simulate`
-lists those above the near misses, grouped by address:
+`Watchtower: auto-blocked` line, and `simulate` lists a detector's above its
+near misses, grouped by address — whatever its mode is now, so blocks written
+before you switched it to warn still show:
 
 ```
 Detector failed_logins [block]

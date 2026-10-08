@@ -610,6 +610,11 @@ class SimulateCommand extends Command
      * second would claim a precision this backtest doesn't have. `--json`
      * keeps the full ISO string for anything actually parsing it.
      */
+    private static function minutePrecision(string $iso): string
+    {
+        return str_replace('T', ' ', substr($iso, 0, 16));
+    }
+
     /**
      * Text read out of a shared log table, printed as text: no control or
      * bidi characters for the terminal, no tags for Console.
@@ -617,11 +622,6 @@ class SimulateCommand extends Command
     private static function plain(string $text): string
     {
         return OutputFormatter::escape((string) preg_replace('/[\p{Cc}\p{Cf}]/u', '', $text));
-    }
-
-    private static function minutePrecision(string $iso): string
-    {
-        return str_replace('T', ' ', substr($iso, 0, 16));
     }
 
     /** @param  array<string, mixed>  $result */

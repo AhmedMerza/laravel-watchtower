@@ -47,7 +47,7 @@ class DetectorHistory
     {
         /** @var array<string, array<string, array{ip: string, reports: int, first_at: string, last_at: string, user_ids: array<string, true>, outcomes: array<string, int>}>> $byDetector */
         $byDetector = [];
-        /** @var array<string, array<string, array{ip: string, blocks: int, first_at: string, last_at: string, minutes: int, expires_at: ?string, scopes: array<string, true>, user_ids: array<string, true>}>> $blocksByDetector */
+        /** @var array<string, array<string, array{ip: string, blocks: int, first_at: string, last_at: string, minutes: int, expires_at: mixed, scopes: array<string, true>, user_ids: array<string, true>}>> $blocksByDetector */
         $blocksByDetector = [];
         $unreadable = 0;
 
@@ -98,9 +98,13 @@ class DetectorHistory
 
                 $block['blocks']++;
                 $block['last_at'] = $at;
-                $block['minutes'] += is_int($context['duration_minutes'] ?? null) ? $context['duration_minutes'] : 0;
-                // The latest block's expiry: it is the one that could still be on.
-                $block['expires_at'] = self::isoOrNull($context['expires_at'] ?? null) ?? $block['expires_at'];
+                // A negative length is forged, and would cancel real minutes.
+                $duration = $context['duration_minutes'] ?? null;
+                $block['minutes'] += is_int($duration) && $duration >= 0 ? $duration : 0;
+                // The latest block's expiry, unusable or not: it is the one
+                // that could still be on, and an older one in its place would
+                // be a confident wrong answer. Parsed once per address below.
+                $block['expires_at'] = $context['expires_at'] ?? null;
                 $block['scopes'][is_string($context['scope'] ?? null) ? $context['scope'] : ''] = true;
 
                 foreach ((array) ($context['user_ids'] ?? []) as $id) {
@@ -182,6 +186,7 @@ class DetectorHistory
             $list = array_map(static function (array $b): array {
                 $b['user_ids'] = array_map('strval', array_keys($b['user_ids']));
                 $b['scopes'] = array_map('strval', array_keys($b['scopes']));
+                $b['expires_at'] = self::isoOrNull($b['expires_at']);
                 $b['first_at'] = Carbon::parse($b['first_at'])->toIso8601String();
                 $b['last_at'] = Carbon::parse($b['last_at'])->toIso8601String();
 
