@@ -39,12 +39,10 @@ use Watchtower\Support\NeverBlockList;
  *
  * ## Why two passes
  *
- * The issue this was built for assumed an `(ip_address, occurred_at)` index.
- * LogScope doesn't have one — `ip_address` and `occurred_at` are indexed
- * separately, and the composites are all `(something, occurred_at)`. So the
- * shape that would have been natural (walk the period one window at a time,
- * carrying per-address state) would hold state for every address seen in the
- * period, which on a busy week is the thing the memory criterion rules out.
+ * The shape that would have been natural — walk the period one window at a
+ * time, carrying per-address state — holds state for every address seen in
+ * the period, which on a busy week is the thing the memory criterion rules
+ * out.
  *
  * Instead:
  *
@@ -55,19 +53,23 @@ use Watchtower\Support\NeverBlockList;
  *    rides `(level, occurred_at)`; one that doesn't rides `occurred_at`.
  *    Either way the counting happens in the database and no rows reach PHP.
  *
- * 2. REPLAY. Surviving addresses in batches of BATCH: one time-ordered stream
- *    of the batch's rows, each row handed to its own address's replay, which
- *    slides the window over it. Peak memory is one ring buffer per address in
- *    the batch rather than the table.
+ * 2. REPLAY. Surviving addresses in batches: one time-ordered stream of the
+ *    batch's rows, each row handed to its own address's replay, which slides
+ *    the window over it. Peak memory is one ring buffer per address in the
+ *    batch rather than the table.
  *
  * The narrowing pass is a weak filter — 10 rows spread over a week survive a
  * 10-in-5-minutes rule they can never trip — so on busy traffic candidates
- * far outnumber offenders. Streaming per address paid at least one query for
- * each of them (#77); batching pays one per BATCH.
+ * far outnumber offenders, and one stream per address paid a query for each
+ * of them (#77). A batch is packed by the row counts the narrowing pass
+ * already has, up to one keyset page: an `in (...)` list sorted by time can't
+ * ride LogScope's `(ip_address, occurred_at)` index, so every page sorts the
+ * whole batch, and a batch that fits one page sorts once. An address busier
+ * than a page goes alone, which is a single-value `in` and rides the index.
  */
 final class RuleSimulator
 {
-    /** Candidate addresses replayed off one stream. */
+    /** Most candidate addresses replayed off one stream, whatever their rows. */
     private const BATCH = 200;
 
     /** The engine's scheduler tick: how soon a held-back address is looked at again. */
@@ -167,8 +169,9 @@ final class RuleSimulator
         $offenders = [];
         $neverBlocked = [];
 
-        foreach (array_chunk($this->candidates($table, $level, $messageContains, $readFrom, $to, $threshold), self::BATCH) as $batch) {
+        foreach ($this->batches($this->candidates($table, $level, $messageContains, $readFrom, $to, $threshold)) as $batch) {
             $replays = [];
+            $folded = [];
 
             foreach ($batch as $ip) {
                 $replays[$ip] = $this->replay(
@@ -176,13 +179,19 @@ final class RuleSimulator
                     $windowMinutes, $threshold, $durationMinutes, $from,
                     $scope === null ? $sharedIpThreshold : 0,
                 );
-                $replays[$ip]->current();
+                $folded[strtolower(rtrim($ip))] ??= $replays[$ip];
             }
 
             $rows = $this->matching($table, $level, $messageContains)->whereIn('ip_address', $batch);
 
             foreach (KeysetStream::rows($rows, $readFrom, $to, ['ip_address']) as $row) {
-                $replays[(string) $row->ip_address]->send(Carbon::parse($row->occurred_at));
+                // `in` matches under the column's collation, so on MySQL's
+                // case-insensitive default a row can come back spelled
+                // differently from the address the grouped pass returned for
+                // it. The old per-address `where` counted those rows for that
+                // address; dropping them would under-report.
+                $ip = (string) $row->ip_address;
+                ($replays[$ip] ?? $folded[strtolower(rtrim($ip))])->send(Carbon::parse($row->occurred_at));
             }
 
             foreach ($replays as $ip => $replay) {
@@ -271,7 +280,7 @@ final class RuleSimulator
      * aggregate is what stops this from touching the table again per address
      * it was never going to report.
      *
-     * @return list<string>
+     * @return array<string, int> matching rows per address, read from `$from`
      */
     private function candidates(
         string $table,
@@ -281,17 +290,53 @@ final class RuleSimulator
         CarbonInterface $to,
         int $threshold,
     ): array {
-        /** @var list<string> */
-        return $this->matching($table, $level, $messageContains)
+        $counts = [];
+
+        $this->matching($table, $level, $messageContains)
             ->select('ip_address')
+            ->selectRaw('count(*) as matched')
             ->whereNotNull('ip_address')
             ->where('occurred_at', '>=', $from)
             ->where('occurred_at', '<=', $to)
             ->groupBy('ip_address')
             ->havingRaw('count(*) >= ?', [$threshold])
-            ->pluck('ip_address')
-            ->map(static fn ($ip): string => (string) $ip)
-            ->all();
+            ->get()
+            ->each(function (\stdClass $row) use (&$counts): void {
+                $counts[(string) $row->ip_address] = (int) $row->matched;
+            });
+
+        return $counts;
+    }
+
+    /**
+     * Candidates grouped so each batch's rows fit one keyset page, at most
+     * BATCH addresses apiece.
+     *
+     * @param  array<string, int>  $candidates  matching rows per address
+     * @return list<non-empty-list<string>>
+     */
+    private function batches(array $candidates): array
+    {
+        $batches = [];
+        $batch = [];
+        $rows = 0;
+
+        foreach ($candidates as $ip => $count) {
+            if ($batch !== [] && ($rows + $count > KeysetStream::CHUNK || count($batch) === self::BATCH)) {
+                $batches[] = $batch;
+                $batch = [];
+                $rows = 0;
+            }
+
+            $batch[] = (string) $ip;
+            $rows += $count;
+        }
+
+        if ($batch !== []) {
+            $batches[] = $batch;
+        }
+
+        return $batches;
     }
 
     /**

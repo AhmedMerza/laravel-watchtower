@@ -10,7 +10,7 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 ### Changed
 
-- **`watchtower:simulate` replays rules in batches of 200 addresses per query, not one query per address.** A rule's first pass keeps every address with enough matching rows anywhere in the period, and on busy traffic most of those can never trip the rule's window. Each one used to cost its own query. The report itself is unchanged ([#77](https://github.com/AhmedMerza/laravel-watchtower/issues/77)).
+- **`watchtower:simulate` replays many addresses per query, not one query per address.** A rule's first pass keeps every address with enough matching rows anywhere in the period, and on busy traffic most of those can never trip the rule's window. Each one used to cost its own query. Now addresses share a query up to 1000 rows or 200 addresses, and an address busier than that still gets its own. The report itself is unchanged ([#77](https://github.com/AhmedMerza/laravel-watchtower/issues/77)).
 
 ## [0.16.0] - 2026-10-08
 
