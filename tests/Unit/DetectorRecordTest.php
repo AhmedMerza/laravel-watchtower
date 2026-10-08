@@ -659,9 +659,13 @@ it('treats a null threshold of its own as unset, without a warning', function ()
     config()->set('watchtower.auto_block.shared_ip_user_threshold', 0);
     config()->set('watchtower.auto_block.detectors.failed_logins.shared_ip_user_threshold', null);
 
-    // The block's own line (#150) is the only warning.
+    // Collected rather than matched: on an ignore-missing mock, a warning
+    // matching no expectation is swallowed, not failed.
+    $warnings = [];
     $logChannel = Mockery::mock()->shouldIgnoreMissing();
-    $logChannel->shouldReceive('warning')->with(AutoBlockService::AUTO_BLOCKED_MESSAGE, Mockery::any())->once();
+    $logChannel->shouldReceive('warning')->andReturnUsing(function (string $message) use (&$warnings) {
+        $warnings[] = $message;
+    });
     Log::shouldReceive('channel')->andReturn($logChannel);
 
     foreach ([7, 8, 9] as $userId) {
@@ -670,6 +674,9 @@ it('treats a null threshold of its own as unset, without a warning', function ()
 
     // The global 0 applies: the guard is off, so three users still block.
     $this->assertDatabaseHas('blacklisted_ips', ['ip' => '198.51.100.47']);
+
+    // The block's own line (#150) is the only warning.
+    expect($warnings)->toBe([AutoBlockService::AUTO_BLOCKED_MESSAGE]);
 });
 
 it('does not re-parse a bad threshold on every request to a held address', function () {

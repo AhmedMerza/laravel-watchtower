@@ -485,15 +485,22 @@ it('invalid global mode value falls back to warn', function () {
  * bad actor must not take the whole gateway down with it.
  */
 
-function expectWarning(string $notBlockedBecause): void
+function expectWarning(string $notBlockedBecause, bool $alsoBlocksAnother = false): void
 {
     $logChannel = Mockery::mock();
     $logChannel->shouldReceive('warning')
         ->once()
         ->withArgs(fn (string $message, array $context): bool => $message === AutoBlockService::WOULD_HAVE_BLOCKED_MESSAGE
             && $context['not_blocked_because'] === $notBlockedBecause);
-    // A case that also blocks something else logs that block (#150).
-    $logChannel->shouldReceive('warning')->with(AutoBlockService::AUTO_BLOCKED_MESSAGE, Mockery::any())->zeroOrMoreTimes();
+
+    // Only a case that really blocks a second address may log a block
+    // (#150). Anywhere else the line would claim a block that never
+    // happened, and the mock fails it as an unexpected warning.
+    if ($alsoBlocksAnother) {
+        $logChannel->shouldReceive('warning')->once()->withArgs(
+            fn (string $message, array $context): bool => $message === AutoBlockService::AUTO_BLOCKED_MESSAGE,
+        );
+    }
     $logChannel->shouldReceive('debug')->zeroOrMoreTimes();
     Log::shouldReceive('channel')->andReturn($logChannel);
 }
@@ -972,7 +979,7 @@ it('lets a rule set its own user threshold, leaving the other rules on the globa
         logEntry('30.30.30.2', ['message' => 'strict', 'user_id' => 7]);
     }
 
-    expectWarning('shared IP');
+    expectWarning('shared IP', alsoBlocksAnother: true);
 
     $this->service->run();
 

@@ -131,6 +131,17 @@ it("blocks in the rule's own scope when the address is not shared", function () 
         logEntry('20.20.20.25', ['user_id' => 7]);
     }
 
+    $logChannel = Mockery::mock();
+    $logChannel->shouldReceive('warning')
+        ->once()
+        // A block in the scope it asked for is not a downgrade (#150).
+        ->withArgs(fn (string $message, array $context): bool => $message === AutoBlockService::AUTO_BLOCKED_MESSAGE
+            && $context['scope'] === 'auth'
+            && $context['target'] === '20.20.20.25'
+            && ! array_key_exists('downgraded_to_scope', $context));
+    $logChannel->shouldReceive('debug')->zeroOrMoreTimes();
+    Log::shouldReceive('channel')->andReturn($logChannel);
+
     $this->service->run();
 
     $this->assertDatabaseHas('blacklisted_ips', ['ip' => '20.20.20.25', 'scope' => 'auth']);

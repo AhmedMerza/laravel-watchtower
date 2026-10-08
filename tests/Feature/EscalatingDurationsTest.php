@@ -5,6 +5,7 @@ declare(strict_types=1);
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Queue;
 use Watchtower\Models\BlacklistedIp;
 use Watchtower\Models\IpOffence;
@@ -70,6 +71,28 @@ function tripRule(string $ip, string $scope = '', array $attributes = []): ?int
 
     return blockMinutes($ip, $scope);
 }
+
+it('logs the escalated duration, not the base one', function () {
+    expect(tripRule('1.2.3.9'))->toBe(60);
+    $this->blacklist->unblock('1.2.3.9');
+
+    $this->travelTo(now()->startOfMinute());
+    $lines = [];
+    $logChannel = Mockery::mock()->shouldIgnoreMissing();
+    $logChannel->shouldReceive('warning')->andReturnUsing(function (string $message, array $context) use (&$lines) {
+        $lines[] = [$message, $context];
+    });
+    Log::shouldReceive('channel')->andReturn($logChannel);
+
+    expect(tripRule('1.2.3.9'))->toBe(360);
+
+    // The line is what's left once cleanup deletes the row (#150), so it
+    // has to say how long the block really ran.
+    expect($lines)->toHaveCount(1)
+        ->and($lines[0][0])->toBe(AutoBlockService::AUTO_BLOCKED_MESSAGE)
+        ->and($lines[0][1]['duration_minutes'])->toBe(360)
+        ->and($lines[0][1]['expires_at'])->toBe(now()->addMinutes(360)->toIso8601String());
+});
 
 it('lengthens the block each time the same address comes back', function () {
     expect(tripRule('1.2.3.4'))->toBe(60);
