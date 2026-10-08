@@ -1,6 +1,8 @@
 <?php
 
+use Illuminate\Foundation\Auth\User;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use Watchtower\Support\SyncSignature;
@@ -139,4 +141,18 @@ function captureWouldHaveBlocked(): ArrayObject
     Log::shouldReceive('channel')->andReturn($logChannel);
 
     return $seen;
+}
+
+/**
+ * A signed-in user for the Gate-guarded management API and UI. Shared:
+ * defined in one test file, the others fail when run alone or in --parallel.
+ */
+function eloquentUser(string $email): User
+{
+    return (new User)->forceFill(['id' => 1, 'email' => $email]);
+}
+
+function allowAdminOnly(): void
+{
+    Gate::define('viewWatchtower', fn ($user) => $user->email === 'admin@example.com');
 }

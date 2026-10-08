@@ -3,7 +3,6 @@
 declare(strict_types=1);
 
 use Illuminate\Auth\GenericUser;
-use Illuminate\Foundation\Auth\User;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Facades\Queue;
@@ -31,16 +30,6 @@ dataset('management endpoints', [
     'block'   => ['POST', '/watchtower/api/block'],
     'unblock' => ['DELETE', '/watchtower/api/block/10.0.0.1'],
 ]);
-
-function eloquentUser(string $email): User
-{
-    return (new User)->forceFill(['id' => 1, 'email' => $email]);
-}
-
-function allowAdminOnly(): void
-{
-    Gate::define('viewWatchtower', fn ($user) => $user->email === 'admin@example.com');
-}
 
 it('mounts the API at its own prefix behind the Gate check', function () {
     $route = Route::getRoutes()->getByName('watchtower.api.blocks');
