@@ -620,6 +620,21 @@ it('says a scoped block would have left signed-in users the rest of the app', fu
         ->doesntExpectOutputToContain('locked those people out');
 });
 
+it('says a scoped detector would have blocked signed-in users on its routes, not app-wide (#151)', function () {
+    config()->set('watchtower.scopes', ['auth']);
+    onlyDetector('failed_logins', ['scope' => 'auth']);
+    wouldHaveBlocked('10.0.0.9', 'failed_logins', 30);
+    wouldHaveBlocked('10.0.0.8', 'failed_logins', 30, ['in_block_mode' => 'blocked_in_scope']);
+    logEntry('10.0.0.9', ['user_id' => 7, 'occurred_at' => now()->subHour()]);
+    logEntry('10.0.0.8', ['user_id' => 8, 'occurred_at' => now()->subHour()]);
+
+    $this->artisan('watchtower:simulate')
+        ->assertSuccessful()
+        ->expectsOutputToContain("2 of these had signed-in users and block mode would have blocked them on 'auth' routes only")
+        ->doesntExpectOutputToContain('app-wide')
+        ->doesntExpectOutputToContain('1 more had signed-in users');
+});
+
 it('explains an empty history in block mode and in disabled mode', function () {
     onlyDetector('failed_logins', ['mode' => 'block']);
 

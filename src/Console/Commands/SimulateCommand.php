@@ -11,6 +11,7 @@ use Symfony\Component\Console\Formatter\OutputFormatter;
 use Watchtower\Services\AutoBlockService;
 use Watchtower\Services\DetectorHistory;
 use Watchtower\Services\RuleSimulator;
+use Watchtower\Support\BlockScope;
 
 /**
  * Answers "what would this rule have blocked last week" without waiting a
@@ -200,6 +201,9 @@ class SimulateCommand extends Command
                 'enabled'          => (bool) ($settings['enabled'] ?? false),
                 'mode'             => $switched ? 'warn' : $mode,
                 'switched_to_warn' => $switched,
+                // Raw, not BlockScope::normalize(): a report must not throw
+                // over a scope typo the engine already refuses loudly.
+                'scope'            => is_scalar($settings['scope'] ?? null) ? trim((string) $settings['scope']) : BlockScope::GLOBAL,
                 'offenders'        => $observed['detectors'][$name] ?? [],
             ];
         }
@@ -298,12 +302,30 @@ class SimulateCommand extends Command
                 $this->line('  Put shared addresses (an office, a mobile carrier) in never_auto_block before arming it.');
             }
 
+            // A scoped detector's block only ever covers its scope, whether
+            // the shared-IP guard narrowed it or not, so both outcomes leave
+            // signed-in people the rest of the app (#151).
+            if ($detector['scope'] !== BlockScope::GLOBAL) {
+                $inScope = count(array_filter(
+                    $offenders,
+                    static fn (array $o): bool => $users($o) > 0 && (isset($o['outcomes']['blocked']) || isset($o['outcomes']['blocked_in_scope'])),
+                ));
+
+                if ($inScope > 0) {
+                    $this->warn(sprintf(
+                        "  %d of these had signed-in users and block mode would have blocked them on '%s' routes only — those people would have lost those routes and kept the rest of the app.",
+                        $inScope,
+                        $detector['scope'],
+                    ));
+                }
+            }
+
             // The number that decides whether a detector is safe to arm:
             // people who were signed in, behind an address block mode would
             // have blocked app-wide.
             $customers = count(array_filter(
                 $offenders,
-                static fn (array $o): bool => $users($o) > 0 && isset($o['outcomes']['blocked']),
+                static fn (array $o): bool => $detector['scope'] === BlockScope::GLOBAL && $users($o) > 0 && isset($o['outcomes']['blocked']),
             ));
 
             if ($customers > 0) {
@@ -315,7 +337,7 @@ class SimulateCommand extends Command
 
             $scoped = count(array_filter(
                 $offenders,
-                static fn (array $o): bool => $users($o) > 0 && ! isset($o['outcomes']['blocked']) && isset($o['outcomes']['blocked_in_scope']),
+                static fn (array $o): bool => $detector['scope'] === BlockScope::GLOBAL && $users($o) > 0 && ! isset($o['outcomes']['blocked']) && isset($o['outcomes']['blocked_in_scope']),
             ));
 
             if ($scoped > 0) {
