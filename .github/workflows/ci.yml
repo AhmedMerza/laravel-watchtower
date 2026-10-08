@@ -132,6 +132,10 @@ jobs:
           ci=.github/workflows/ci.yml
 
           constraints=$(jq -r '.require | to_entries[] | select(.key | startswith("illuminate/")) | .value' composer.json | sort -u)
+          if [ -z "$constraints" ]; then
+            echo "::error file=composer.json::No illuminate/* package in composer.json's require, so there is no Laravel range to check. Update this check in $ci."
+            exit 1
+          fi
           if [ "$(wc -l <<<"$constraints")" -ne 1 ]; then
             echo "::error file=composer.json::The illuminate/* constraints in composer.json disagree: $(paste -sd ' ' <<<"$constraints"). Give every illuminate/* package the same range."
             exit 1
