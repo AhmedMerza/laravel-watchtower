@@ -81,7 +81,8 @@ it('logs a scoped downgrade as a real block, not a would-have-blocked', function
         // `would_have_blocked` stays the canonical filter for things that did
         // NOT happen. This one did, so an operator filtering on it must not
         // find a real block hiding among the near misses.
-        ->withArgs(fn (string $message, array $context): bool => $context['downgraded_to_scope'] === 'auth'
+        ->withArgs(fn (string $message, array $context): bool => $message === AutoBlockService::AUTO_BLOCKED_MESSAGE
+            && $context['downgraded_to_scope'] === 'auth'
             && ! array_key_exists('would_have_blocked', $context));
     $logChannel->shouldReceive('debug')->zeroOrMoreTimes();
     Log::shouldReceive('channel')->andReturn($logChannel);
@@ -129,6 +130,17 @@ it("blocks in the rule's own scope when the address is not shared", function () 
     foreach (range(1, 3) as $i) {
         logEntry('20.20.20.25', ['user_id' => 7]);
     }
+
+    $logChannel = Mockery::mock();
+    $logChannel->shouldReceive('warning')
+        ->once()
+        // A block in the scope it asked for is not a downgrade (#150).
+        ->withArgs(fn (string $message, array $context): bool => $message === AutoBlockService::AUTO_BLOCKED_MESSAGE
+            && $context['scope'] === 'auth'
+            && $context['target'] === '20.20.20.25'
+            && ! array_key_exists('downgraded_to_scope', $context));
+    $logChannel->shouldReceive('debug')->zeroOrMoreTimes();
+    Log::shouldReceive('channel')->andReturn($logChannel);
 
     $this->service->run();
 

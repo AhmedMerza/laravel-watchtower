@@ -35,7 +35,7 @@ WATCHTOWER_DETECT_BAD_USER_AGENT=false
 | Mode | Behaviour |
 |------|-----------|
 | `warn` | **The default.** Match the rule and emit a structured `would_have_blocked: true` log entry on the configured log channel — but **do not** block. Tail your logs for that key to see what the rule would catch, then set `WATCHTOWER_AUTO_BLOCK_MODE=block` to arm it. Each entry's `in_block_mode` says what block mode would have done with it: `blocked`, `blocked_in_scope`, or the hold-back that would have stopped it, spelled as block mode's `not_blocked_because` spells it (`shared IP`, `never_block`, `never_auto_block`). |
-| `block` | Actually block matching IPs. |
+| `block` | Actually block matching IPs. Each block also writes a `Watchtower: auto-blocked` entry carrying `auto_blocked: true`, with the same fields as a near miss plus `target` (what was written, the `/64` for IPv6), `scope`, `duration_minutes` and `expires_at`. A shared address blocked in its scope rather than app-wide carries `downgraded_to_scope`. The row is deleted by `watchtower:cleanup` after it expires, so this entry is the lasting record of the block. |
 | `disabled` | Skip the rule entirely. A per-rule kill switch without deleting the definition. |
 
 ## Detectors

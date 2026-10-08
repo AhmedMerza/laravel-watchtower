@@ -94,6 +94,16 @@ it('blocks an IP that exceeds the rule threshold', function () {
         ]);
     }
 
+    // The row goes at cleanup; the line is what's left of it (#150).
+    $logChannel = Mockery::mock();
+    $logChannel->shouldReceive('warning')->once()->withArgs(
+        fn (string $message, array $context): bool => $message === AutoBlockService::AUTO_BLOCKED_MESSAGE
+            && $context['ip'] === '5.5.5.5'
+            && $context['rule_index'] === 0
+            && $context['duration_minutes'] === 60,
+    );
+    Log::shouldReceive('channel')->andReturn($logChannel);
+
     $this->service->run();
 
     $this->assertDatabaseHas('blacklisted_ips', [
@@ -475,12 +485,22 @@ it('invalid global mode value falls back to warn', function () {
  * bad actor must not take the whole gateway down with it.
  */
 
-function expectWarning(string $notBlockedBecause): void
+function expectWarning(string $notBlockedBecause, bool $alsoBlocksAnother = false): void
 {
     $logChannel = Mockery::mock();
     $logChannel->shouldReceive('warning')
         ->once()
-        ->withArgs(fn (string $message, array $context): bool => $context['not_blocked_because'] === $notBlockedBecause);
+        ->withArgs(fn (string $message, array $context): bool => $message === AutoBlockService::WOULD_HAVE_BLOCKED_MESSAGE
+            && $context['not_blocked_because'] === $notBlockedBecause);
+
+    // Only a case that really blocks a second address may log a block
+    // (#150). Anywhere else the line would claim a block that never
+    // happened, and the mock fails it as an unexpected warning.
+    if ($alsoBlocksAnother) {
+        $logChannel->shouldReceive('warning')->once()->withArgs(
+            fn (string $message, array $context): bool => $message === AutoBlockService::AUTO_BLOCKED_MESSAGE,
+        );
+    }
     $logChannel->shouldReceive('debug')->zeroOrMoreTimes();
     Log::shouldReceive('channel')->andReturn($logChannel);
 }
@@ -933,6 +953,7 @@ it('holds a never_block refusal in block mode, until the address leaves the list
     $logChannel->shouldReceive('debug')->andReturnUsing(function () use (&$debug): void {
         $debug++;
     });
+    $logChannel->shouldReceive('warning')->with(AutoBlockService::AUTO_BLOCKED_MESSAGE, Mockery::any())->once();
     Log::shouldReceive('channel')->andReturn($logChannel);
 
     $this->service->run();
@@ -958,7 +979,7 @@ it('lets a rule set its own user threshold, leaving the other rules on the globa
         logEntry('30.30.30.2', ['message' => 'strict', 'user_id' => 7]);
     }
 
-    expectWarning('shared IP');
+    expectWarning('shared IP', alsoBlocksAnother: true);
 
     $this->service->run();
 

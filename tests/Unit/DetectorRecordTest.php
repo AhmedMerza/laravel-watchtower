@@ -186,6 +186,45 @@ it('still blocks when the same volume comes from one signed-in user', function (
     $this->assertDatabaseHas('blacklisted_ips', ['ip' => '198.51.100.8']);
 });
 
+it('logs a real block, so it is traceable after cleanup deletes its row', function () {
+    $this->travelTo(now()->startOfMinute());
+    $lines = [];
+    $logChannel = Mockery::mock();
+    $logChannel->shouldReceive('warning')->andReturnUsing(function (string $message, array $context) use (&$lines) {
+        $lines[] = [$message, $context];
+    });
+    $logChannel->shouldReceive('debug')->zeroOrMoreTimes();
+    Log::shouldReceive('channel')->andReturn($logChannel);
+
+    foreach (range(1, 3) as $i) {
+        $this->service->record('failed_logins', '2001:db8:5::7', 42);
+    }
+
+    // One line, and not a would-have-blocked one: that filter is for things
+    // that did not happen (#150).
+    expect($lines)->toHaveCount(1);
+    [$message, $context] = $lines[0];
+
+    expect($message)->toBe(AutoBlockService::AUTO_BLOCKED_MESSAGE)
+        ->and($context)->not->toHaveKey('would_have_blocked')
+        ->and($context)->not->toHaveKey('downgraded_to_scope')
+        ->and($context)->toMatchArray([
+            'auto_blocked'     => true,
+            'ip'               => '2001:db8:5::7',
+            // What was actually written, which for IPv6 is the /64.
+            'target'           => '2001:db8:5::/64',
+            'detector'         => 'failed_logins',
+            'threshold'        => 3,
+            'window_minutes'   => 5,
+            'hits'             => 3,
+            'user_ids'         => [42],
+            'scope'            => BlockScope::GLOBAL,
+            'distinct_users'   => 1,
+            'duration_minutes' => 60,
+            'expires_at'       => now()->addMinutes(60)->toIso8601String(),
+        ]);
+});
+
 it('reports an address that is already blocked without counting it again', function () {
     BlacklistedIp::create([
         'ip'         => '198.51.100.9',
@@ -620,8 +659,13 @@ it('treats a null threshold of its own as unset, without a warning', function ()
     config()->set('watchtower.auto_block.shared_ip_user_threshold', 0);
     config()->set('watchtower.auto_block.detectors.failed_logins.shared_ip_user_threshold', null);
 
+    // Collected rather than matched: on an ignore-missing mock, a warning
+    // matching no expectation is swallowed, not failed.
+    $warnings = [];
     $logChannel = Mockery::mock()->shouldIgnoreMissing();
-    $logChannel->shouldNotReceive('warning');
+    $logChannel->shouldReceive('warning')->andReturnUsing(function (string $message) use (&$warnings) {
+        $warnings[] = $message;
+    });
     Log::shouldReceive('channel')->andReturn($logChannel);
 
     foreach ([7, 8, 9] as $userId) {
@@ -630,6 +674,9 @@ it('treats a null threshold of its own as unset, without a warning', function ()
 
     // The global 0 applies: the guard is off, so three users still block.
     $this->assertDatabaseHas('blacklisted_ips', ['ip' => '198.51.100.47']);
+
+    // The block's own line (#150) is the only warning.
+    expect($warnings)->toBe([AutoBlockService::AUTO_BLOCKED_MESSAGE]);
 });
 
 it('does not re-parse a bad threshold on every request to a held address', function () {
