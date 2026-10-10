@@ -4,6 +4,10 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- **The block list's `state` filter is a `BlockState` enum.** Its values (`active`, `expired`, `all`) used to live in three places kept in step by hand: `BlockFilters::STATES`, the `match` in `BlacklistedIp::scopeFilter()`, and the management page's `<select>`. All three now read `Watchtower\Enums\BlockState`. `scopeFilter()`'s `match` has no default arm, so a new state with no meaning fails static analysis instead of silently listing active blocks. `BlockFilters::STATES` is removed; use `BlockState::cases()`. The query string, the API and `scopeFilter()`'s string argument are unchanged. ([#81](https://github.com/AhmedMerza/laravel-watchtower/issues/81))
+
 ## [0.17.0] - 2026-10-08
 
 No migrations, no config changes.
