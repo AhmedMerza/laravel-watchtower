@@ -12,6 +12,7 @@ use Illuminate\Support\Facades\Route;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Validation\Rule;
 use Watchtower\Enums\BlockSource;
+use Watchtower\Enums\BlockState;
 use Watchtower\Exceptions\NeverBlockException;
 use Watchtower\Models\BlacklistedIp;
 use Watchtower\Rules\BlockRules;
@@ -84,6 +85,7 @@ class ManagementController extends Controller
             'source'      => $source,
             'state'       => $state,
             'sources'     => BlockSource::cases(),
+            'states'      => BlockState::cases(),
             'scopes'      => BlockScope::declared(),
             'durations'   => array_keys(self::DURATIONS),
             // Only when LogScope is actually mounted. `log_entry_id` is a

@@ -6,6 +6,7 @@ namespace Watchtower\Support;
 
 use Illuminate\Http\Request;
 use Watchtower\Enums\BlockSource;
+use Watchtower\Enums\BlockState;
 
 /**
  * The list filters, normalised, for both lists that offer them.
@@ -23,9 +24,6 @@ use Watchtower\Enums\BlockSource;
  */
 final class BlockFilters
 {
-    /** @var list<string> */
-    public const STATES = ['active', 'expired', 'all'];
-
     /**
      * The filters a request is asking for, whether it carried them in the
      * query string (either list) or as hidden fields (a form posting back).
@@ -38,8 +36,8 @@ final class BlockFilters
         $source = is_string($source) && BlockSource::tryFrom($source) !== null ? $source : null;
 
         $state = $request->input('state');
-        $state = is_string($state) && in_array($state, self::STATES, true) ? $state : 'active';
+        $state = (is_string($state) ? BlockState::tryFrom($state) : null) ?? BlockState::Active;
 
-        return [$source, $state];
+        return [$source, $state->value];
     }
 }
