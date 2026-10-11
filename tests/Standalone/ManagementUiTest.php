@@ -8,6 +8,7 @@ use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\Route;
 use Watchtower\Enums\BlockSource;
+use Watchtower\Enums\BlockState;
 use Watchtower\Http\Middleware\Authorize;
 use Watchtower\Models\BlacklistedIp;
 use Watchtower\Services\AutoBlockService;
@@ -324,6 +325,18 @@ it('hides expired blocks until asked for them', function () {
         ->assertOk()
         ->assertSee('10.0.0.1')
         ->assertSee('10.0.0.2');
+});
+
+// The options come from BlockState, so a new case reaches the page without a
+// template edit — and the one the list is showing stays selected (#81).
+it('offers every state in the Showing select, with the current one selected', function () {
+    $html = signedInAdmin($this)->get('/watchtower?state=expired')->assertOk()->getContent();
+
+    foreach (BlockState::cases() as $case) {
+        $selected = $case === BlockState::Expired ? 'selected' : '';
+
+        expect($html)->toMatch('#<option value="'.$case->value.'"\s*'.$selected.'>'.$case->label().'</option>#');
+    }
 });
 
 it('ignores a filter the query string made up', function () {

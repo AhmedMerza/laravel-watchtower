@@ -9,6 +9,7 @@ use Illuminate\Database\Eloquent\Concerns\HasUlids;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Carbon;
 use Watchtower\Enums\BlockSource;
+use Watchtower\Enums\BlockState;
 
 /**
  * @property string $id
@@ -107,7 +108,7 @@ class BlacklistedIp extends Model
      * something is wrong.
      *
      * @param  string|null  $source  a BlockSource value, or null for every source
-     * @param  string  $state  'active', 'expired' or 'all'
+     * @param  string  $state  a BlockState value
      */
     public function scopeFilter(Builder $query, ?string $source = null, string $state = 'active'): Builder
     {
@@ -115,10 +116,10 @@ class BlacklistedIp extends Model
             $query->where('source', $source);
         }
 
-        return match ($state) {
-            'expired' => $this->scopeExpired($query),
-            'all'     => $query,
-            default   => $this->scopeActive($query),
+        return match (BlockState::tryFrom($state) ?? BlockState::Active) {
+            BlockState::Active  => $this->scopeActive($query),
+            BlockState::Expired => $this->scopeExpired($query),
+            BlockState::All     => $query,
         };
     }
 }

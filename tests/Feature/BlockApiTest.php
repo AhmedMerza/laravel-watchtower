@@ -7,10 +7,10 @@ use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Queue;
 use LogScope\Http\Middleware\Authorize;
 use Watchtower\Enums\BlockSource;
+use Watchtower\Enums\BlockState;
 use Watchtower\Events\IpBlocked;
 use Watchtower\Models\BlacklistedIp;
 use Watchtower\Services\BlacklistCache;
-use Watchtower\Support\BlockFilters;
 
 beforeEach(function () {
     // Use the array cache store — real cache, no Redis-facade mocking.
@@ -298,10 +298,6 @@ describe('the block list', function () {
             ->and(array_unique($seen))->toHaveCount(12);
     });
 
-    // Guards the drift between the vocabulary BlockFilters accepts and the
-    // arms scopeFilter actually implements: a state added to STATES with no
-    // matching arm falls through to `active`, and would otherwise look like a
-    // working filter that silently ignores what it was asked for.
     // MySQL and Postgres give no order at all among rows tied on the sort
     // column, so a page boundary landing inside a tied group can repeat a row
     // or skip one. SQLite can't demonstrate that — it orders ties by rowid —
@@ -313,7 +309,11 @@ describe('the block list', function () {
         ]);
     });
 
-    it('gives every state in BlockFilters::STATES its own meaning', function () use ($make) {
+    // scopeFilter's match has no default arm, so a BlockState case with no arm
+    // fails PHPStan (and throws). What that can't catch is an arm that does
+    // the wrong thing — a new case mapped to active() would look like a
+    // working filter that silently ignores what it was asked for.
+    it('gives every BlockState its own meaning', function () use ($make) {
         // Three distinct totals. Equal ones would let a state that silently
         // fell through to `active` match the count it was supposed to differ
         // from, and the fixture rather than the assertion would be deciding.
@@ -323,13 +323,13 @@ describe('the block list', function () {
 
         $totals = [];
 
-        foreach (BlockFilters::STATES as $state) {
-            $totals[$state] = $this->getJson('/logscope/watchtower/api/blocks?state='.$state)
+        foreach (BlockState::cases() as $state) {
+            $totals[$state->value] = $this->getJson('/logscope/watchtower/api/blocks?state='.$state->value)
                 ->assertOk()->json('total');
         }
 
         expect($totals)->toBe(['active' => 1, 'expired' => 2, 'all' => 3])
-            ->and(BlockFilters::STATES)->toHaveCount(3);
+            ->and(BlockState::cases())->toHaveCount(3);
     });
 
     it('keeps the filters on the pagination links', function () use ($make) {

@@ -112,9 +112,9 @@
                 <div class="narrow">
                     <label for="filter-state">Showing</label>
                     <select id="filter-state" name="state">
-                        <option value="active" @selected($state === 'active')>Active</option>
-                        <option value="expired" @selected($state === 'expired')>Expired</option>
-                        <option value="all" @selected($state === 'all')>All</option>
+                        @foreach ($states as $case)
+                            <option value="{{ $case->value }}" @selected($state === $case->value)>{{ $case->label() }}</option>
+                        @endforeach
                     </select>
                 </div>
                 <div class="narrow">
