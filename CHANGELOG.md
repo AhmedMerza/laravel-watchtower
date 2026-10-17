@@ -4,6 +4,10 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-10-17
+
+The first stable release. From here the package follows semantic versioning: a breaking change to config, routes, the API, events or public classes waits for 2.0. No migrations, no config changes. One public constant is removed, see below.
+
 ### Changed
 
 - **The block list's `state` filter is a `BlockState` enum.** Its values (`active`, `expired`, `all`) used to live in three places kept in step by hand: `BlockFilters::STATES`, the `match` in `BlacklistedIp::scopeFilter()`, and the management page's `<select>`. All three now read `Watchtower\Enums\BlockState`. `scopeFilter()`'s `match` has no default arm, so a new state with no meaning fails static analysis instead of silently listing active blocks. `BlockFilters::STATES` is removed; use `BlockState::cases()`. The query string, the API and `scopeFilter()`'s string argument are unchanged. ([#81](https://github.com/AhmedMerza/laravel-watchtower/issues/81))
@@ -394,7 +398,8 @@ No migrations and nothing breaking: a `composer update` is enough.
 
 - **There is no transitional `ahmedmerza/logscope-guard` package.** It has been removed from Packagist. To upgrade, `composer remove ahmedmerza/logscope-guard`, `composer require ahmedmerza/watchtower`, then work through the BREAKING entries under Changed.
 
-[Unreleased]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.17.0...HEAD
+[Unreleased]: https://github.com/AhmedMerza/laravel-watchtower/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.17.0...v1.0.0
 [0.17.0]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.14.0...v0.15.0
