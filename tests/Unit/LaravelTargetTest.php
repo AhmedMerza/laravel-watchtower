@@ -137,6 +137,20 @@ it('re-pushes a block master holds with an earlier expiry than ours', function (
     'both permanent'                 => [null, null, false],
 ]);
 
+it('counts only the pushes of the latest reconcile', function () {
+    Queue::fake();
+    fakeMaster([['ip' => '1.2.3.4', 'expires_at' => null]]);
+
+    $held = BlacklistedIp::create(['ip' => '1.2.3.4', 'source' => BlockSource::Manual]);
+    $missing = BlacklistedIp::create(['ip' => '5.6.7.8', 'source' => BlockSource::Manual]);
+
+    $this->target->reconcile([$held, $missing]);
+    expect($this->target->pushed())->toBe(1);
+
+    $this->target->reconcile([$held]);
+    expect($this->target->pushed())->toBe(0);
+});
+
 it('reads every page of master\'s list before deciding what to push', function () {
     Queue::fake();
     config()->set('watchtower.sync.master_url', 'https://master.example.com');
