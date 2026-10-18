@@ -15,7 +15,7 @@ class ReconcileCommand extends Command
 {
     protected $signature = 'watchtower:reconcile';
 
-    protected $description = 'Push the full active blocklist to every enabled block target, to repair drift';
+    protected $description = 'Repair drift between the active blocklist and every enabled block target';
 
     public function __construct(private readonly BlockTargetRegistry $registry)
     {
