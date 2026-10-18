@@ -35,12 +35,36 @@ final class WorkerSkeleton
         // published files in the old copy, and they must not leak forward.
         if (self::$path === null) {
             $path = sys_get_temp_dir().'/watchtower-testbench-'.$token;
-            $files = new Filesystem;
-            $files->deleteDirectory($path);
-            $files->copyDirectory(default_skeleton_path(), $path);
+            self::copy(default_skeleton_path(), $path);
             self::$path = $path;
         }
 
         return self::$path;
+    }
+
+    /**
+     * Testbench links the skeleton's vendor/ to the project's, and
+     * copyDirectory() follows links: it would copy all of vendor/ and recurse
+     * through the link inside it. Links are recreated as links instead.
+     */
+    private static function copy(string $from, string $to): void
+    {
+        $files = new Filesystem;
+        $files->deleteDirectory($to);
+        $files->ensureDirectoryExists($to);
+
+        foreach (new \FilesystemIterator($from) as $item) {
+            $target = $to.'/'.$item->getFilename();
+
+            $copied = match (true) {
+                $item->isLink() => symlink($item->getRealPath(), $target),
+                $item->isDir() => $files->copyDirectory($item->getPathname(), $target),
+                default => $files->copy($item->getPathname(), $target),
+            };
+
+            if (! $copied) {
+                throw new \RuntimeException("Could not copy {$item->getPathname()} to {$target}");
+            }
+        }
     }
 }
