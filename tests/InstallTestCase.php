@@ -7,6 +7,7 @@ namespace Watchtower\Tests;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\ServiceProvider;
 use Orchestra\Testbench\TestCase as Orchestra;
+use Watchtower\Tests\Support\WorkerSkeleton;
 use Watchtower\WatchtowerServiceProvider;
 
 /**
@@ -19,6 +20,14 @@ use Watchtower\WatchtowerServiceProvider;
  */
 class InstallTestCase extends Orchestra
 {
+    /**
+     * Each --parallel worker boots its own skeleton copy (#160).
+     */
+    public static function applicationBasePath()
+    {
+        return WorkerSkeleton::path() ?? parent::applicationBasePath();
+    }
+
     protected function getPackageProviders($app): array
     {
         return [WatchtowerServiceProvider::class];
