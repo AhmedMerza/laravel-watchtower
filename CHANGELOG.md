@@ -4,7 +4,9 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 ## [Unreleased]
 
-One new migration, `update_blacklisted_ips_table_with_list_indexes`. Publish and run it: `php artisan vendor:publish --tag=watchtower-migrations` then `php artisan migrate`.
+## [1.1.0] - 2026-10-18
+
+One new migration, `update_blacklisted_ips_table_with_list_indexes`. Publish and run it: `php artisan vendor:publish --tag=watchtower-migrations` then `php artisan migrate`. No config changes. One visible difference on a satellite: with `WATCHTOWER_MASTER_URL` set but no `WATCHTOWER_SYNC_SECRET`, `watchtower:reconcile` now fails the laravel target instead of queueing pushes that send nothing — set the secret, as `watchtower:sync` already requires.
 
 ### Changed
 
@@ -405,7 +407,8 @@ No migrations and nothing breaking: a `composer update` is enough.
 
 - **There is no transitional `ahmedmerza/logscope-guard` package.** It has been removed from Packagist. To upgrade, `composer remove ahmedmerza/logscope-guard`, `composer require ahmedmerza/watchtower`, then work through the BREAKING entries under Changed.
 
-[Unreleased]: https://github.com/AhmedMerza/laravel-watchtower/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/AhmedMerza/laravel-watchtower/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/AhmedMerza/laravel-watchtower/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.17.0...v1.0.0
 [0.17.0]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.15.0...v0.16.0
