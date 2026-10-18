@@ -40,10 +40,13 @@ class ReconcileCommand extends Command
         // Feed rows are left out too, as the live path leaves them out by
         // never announcing them (#21): thousands of ranges, re-imported
         // daily, are not something to mirror into Cloudflare's rule list.
+        //
+        // Lazy, so a long-lived blocklist is read in chunks rather than held
+        // whole (#108). Each target walks it once, re-running the query.
         $activeBlocks = BlacklistedIp::active()
             ->where('scope', BlockScope::GLOBAL)
             ->where('source', '!=', BlockSource::Feed)
-            ->get();
+            ->lazyById();
 
         $failed = 0;
 

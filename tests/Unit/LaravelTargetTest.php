@@ -2,8 +2,10 @@
 
 declare(strict_types=1);
 
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Queue;
 use Watchtower\Enums\BlockSource;
+use Watchtower\Exceptions\MasterPullException;
 use Watchtower\Jobs\PushBlockToMaster;
 use Watchtower\Models\BlacklistedIp;
 use Watchtower\Targets\LaravelTarget;
@@ -89,23 +91,51 @@ it('does nothing on remove — no push-based unblock exists today', function () 
     Queue::assertNothingPushed();
 });
 
-it('reconciles by re-pushing every given record', function () {
-    Queue::fake();
+function fakeMaster(array $blocks): void
+{
     config()->set('watchtower.sync.master_url', 'https://master.example.com');
+    config()->set('watchtower.sync.secret', 'test-secret');
 
-    $a = BlacklistedIp::create(['ip' => '1.2.3.4', 'source' => BlockSource::Manual]);
-    $b = BlacklistedIp::create(['ip' => '5.6.7.8', 'source' => BlockSource::Auto]);
+    Http::fake(['master.example.com/watchtower/sync/blocks*' => Http::response(['data' => $blocks, 'next_cursor' => null])]);
+}
 
-    $this->target->reconcile([$a, $b]);
+it('reconciles by pushing only the records master does not hold', function () {
+    Queue::fake();
+    fakeMaster([['ip' => '1.2.3.4', 'expires_at' => null]]);
 
-    Queue::assertPushed(PushBlockToMaster::class, 2);
-    Queue::assertPushed(PushBlockToMaster::class, fn ($job) => $job->record->is($a));
-    Queue::assertPushed(PushBlockToMaster::class, fn ($job) => $job->record->is($b));
+    $held = BlacklistedIp::create(['ip' => '1.2.3.4', 'source' => BlockSource::Manual]);
+    $missing = BlacklistedIp::create(['ip' => '5.6.7.8', 'source' => BlockSource::Auto]);
+
+    $this->target->reconcile([$held, $missing]);
+
+    Queue::assertPushed(PushBlockToMaster::class, 1);
+    Queue::assertPushed(PushBlockToMaster::class, fn ($job) => $job->record->is($missing));
 });
+
+it('re-pushes a block master holds with an earlier expiry than ours', function (?string $ours, ?string $theirs, bool $pushed) {
+    Queue::fake();
+    fakeMaster([['ip' => '1.2.3.4', 'expires_at' => $theirs === null ? null : now()->modify($theirs)->toJSON()]]);
+
+    $record = BlacklistedIp::create([
+        'ip'         => '1.2.3.4',
+        'source'     => BlockSource::Auto,
+        'expires_at' => $ours === null ? null : now()->modify($ours),
+    ]);
+
+    $this->target->reconcile([$record]);
+
+    $pushed ? Queue::assertPushed(PushBlockToMaster::class, 1) : Queue::assertNotPushed(PushBlockToMaster::class);
+})->with([
+    'master lapses sooner'           => ['+2 hours', '+1 hour', true],
+    'ours is permanent, master not'  => [null, '+1 hour', true],
+    'same expiry'                    => ['+1 hour', '+1 hour', false],
+    'master holds it longer'         => ['+1 hour', '+2 hours', false],
+    'master holds it permanently'    => ['+1 hour', null, false],
+]);
 
 it('skips Sync-sourced records during reconcile', function () {
     Queue::fake();
-    config()->set('watchtower.sync.master_url', 'https://master.example.com');
+    fakeMaster([]);
 
     $synced = BlacklistedIp::create(['ip' => '1.2.3.4', 'source' => BlockSource::Sync]);
     $manual = BlacklistedIp::create(['ip' => '5.6.7.8', 'source' => BlockSource::Manual]);
@@ -114,4 +144,52 @@ it('skips Sync-sourced records during reconcile', function () {
 
     Queue::assertPushed(PushBlockToMaster::class, 1);
     Queue::assertPushed(PushBlockToMaster::class, fn ($job) => $job->record->is($manual));
+});
+
+it('does not ask master anything when there is nothing of ours to repair', function () {
+    Queue::fake();
+    fakeMaster([]);
+
+    $this->target->reconcile([BlacklistedIp::create(['ip' => '1.2.3.4', 'source' => BlockSource::Sync])]);
+    $this->target->reconcile([]);
+
+    Http::assertNothingSent();
+});
+
+it('does not reconcile on the master, or without a master URL', function (?string $url, ?string $role) {
+    Queue::fake();
+    fakeMaster([]);
+    config()->set('watchtower.sync.master_url', $url);
+    config()->set('watchtower.sync.role', $role);
+
+    $this->target->reconcile([BlacklistedIp::create(['ip' => '1.2.3.4', 'source' => BlockSource::Manual])]);
+
+    Http::assertNothingSent();
+    Queue::assertNothingPushed();
+})->with([
+    'the master'     => ['https://master.example.com', 'master'],
+    'no master URL'  => [null, null],
+]);
+
+it('fails reconcile, pushing nothing, when master\'s list cannot be read', function () {
+    Queue::fake();
+    config()->set('watchtower.sync.master_url', 'https://master.example.com');
+    config()->set('watchtower.sync.secret', 'test-secret');
+    Http::fake(['master.example.com/*' => Http::response([], 500)]);
+
+    $record = BlacklistedIp::create(['ip' => '1.2.3.4', 'source' => BlockSource::Manual]);
+
+    expect(fn () => $this->target->reconcile([$record]))->toThrow(MasterPullException::class, 'HTTP 500');
+    Queue::assertNothingPushed();
+});
+
+it('fails reconcile when there is no sync secret to read master\'s list with', function () {
+    Queue::fake();
+    fakeMaster([]);
+    config()->set('watchtower.sync.secret', '');
+
+    $record = BlacklistedIp::create(['ip' => '1.2.3.4', 'source' => BlockSource::Manual]);
+
+    expect(fn () => $this->target->reconcile([$record]))->toThrow(RuntimeException::class, 'WATCHTOWER_SYNC_SECRET');
+    Http::assertNothingSent();
 });

@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Queue;
 use Watchtower\Enums\BlockSource;
 use Watchtower\Jobs\PushBlockToMaster;
@@ -20,6 +21,8 @@ it('reports no block targets enabled on a vanilla install', function () {
 it('re-pushes every active global block to the laravel target', function () {
     Queue::fake();
     config()->set('watchtower.sync.master_url', 'https://master.example.com');
+    config()->set('watchtower.sync.secret', 'test-secret');
+    Http::fake(['master.example.com/*' => Http::response(['data' => []])]);
 
     $global = BlacklistedIp::create(['ip' => '1.2.3.4', 'scope' => BlockScope::GLOBAL, 'source' => BlockSource::Manual]);
     BlacklistedIp::create(['ip' => '5.6.7.8', 'scope' => 'auth', 'source' => BlockSource::Manual]);
@@ -37,6 +40,8 @@ it('re-pushes every active global block to the laravel target', function () {
 it('does not reconcile an expired block', function () {
     Queue::fake();
     config()->set('watchtower.sync.master_url', 'https://master.example.com');
+    config()->set('watchtower.sync.secret', 'test-secret');
+    Http::fake(['master.example.com/*' => Http::response(['data' => []])]);
 
     BlacklistedIp::create([
         'ip'         => '1.2.3.4',
