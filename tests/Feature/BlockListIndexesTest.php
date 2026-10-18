@@ -11,9 +11,12 @@ use Watchtower\Models\BlacklistedIp;
  * list paid on every page load. Asserting on the plan, not the index's
  * existence, also catches latestFirst() drifting away from the index.
  *
- * This guards the sort only. (source, created_at) and expires_at pay off when
- * a filter matches few rows of a large table, which an empty SQLite table
- * can't show — the planner walks (created_at, id) for every case here.
+ * This guards the sort only, and only for the views no other index competes
+ * for. The expired view and the source filter have their own index —
+ * expires_at, (source, created_at) — and seeking it then sorting the few
+ * matches is the right plan when matches are rare. On an empty table, with
+ * no statistics, which one SQLite picks depends on its version (it differed
+ * between local and CI), so their plans are not asserted here.
  */
 function planFor($query): string
 {
@@ -28,8 +31,6 @@ it('pages the block list off an index instead of sorting the table', function (?
     expect($plan)->not->toContain('TEMP B-TREE FOR ORDER BY')
         ->and($plan)->toContain('USING INDEX');
 })->with([
-    'active'          => [null, 'active'],
-    'expired'         => [null, 'expired'],
-    'all'             => [null, 'all'],
-    'filtered active' => ['manual', 'active'],
+    'active' => [null, 'active'],
+    'all'    => [null, 'all'],
 ]);
