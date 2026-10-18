@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Str;
 use Watchtower\Enums\BlockSource;
@@ -10,6 +11,7 @@ use Watchtower\Jobs\PushBlockToMaster;
 use Watchtower\Models\BlacklistedIp;
 use Watchtower\Support\BlockScope;
 use Watchtower\Targets\LaravelTarget;
+use Watchtower\Targets\NginxFileTarget;
 
 it('reports no block targets enabled on a vanilla install', function () {
     config()->set('watchtower.sync.master_url', null);
@@ -30,7 +32,7 @@ it('re-pushes every active global block to the laravel target', function () {
 
     $this->artisan('watchtower:reconcile')
         ->assertSuccessful()
-        ->expectsOutputToContain('Reconciled laravel.');
+        ->expectsOutputToContain('Reconciled laravel: 1 pushed to master.');
 
     // The scoped row must not reach a target that has no notion of scope —
     // same guard as the live path's, just exercised from the full-set side.
@@ -105,4 +107,64 @@ it('reconciles a blocklist longer than one lazy chunk', function () {
     Queue::assertPushed(PushBlockToMaster::class, 1000);
     Queue::assertNotPushed(PushBlockToMaster::class, fn ($job) => $job->record->ip === '10.0.0.1');
     Queue::assertPushed(PushBlockToMaster::class, fn ($job) => $job->record->ip === '10.0.3.233');
+});
+
+it('reports the same push count on every run while master refuses a block', function () {
+    // Master never stores what its never_block refuses, so the block reads
+    // as missing — and is pushed again — on every run (#172).
+    Queue::fake();
+    config()->set('watchtower.sync.master_url', 'https://master.example.com');
+    config()->set('watchtower.sync.secret', 'test-secret');
+    Http::fake(['master.example.com/*' => Http::response(['data' => [['ip' => '1.2.3.4', 'expires_at' => null]]])]);
+
+    BlacklistedIp::create(['ip' => '1.2.3.4', 'scope' => BlockScope::GLOBAL, 'source' => BlockSource::Manual]);
+    BlacklistedIp::create(['ip' => '5.6.7.8', 'scope' => BlockScope::GLOBAL, 'source' => BlockSource::Auto]);
+
+    Log::shouldReceive('channel')->andReturnSelf();
+    Log::shouldReceive('warning')->twice()
+        ->with('Watchtower: reconcile pushed blocks master was missing', ['target' => 'laravel', 'pushed' => 1]);
+
+    foreach ([1, 2] as $_) {
+        $this->artisan('watchtower:reconcile')
+            ->assertSuccessful()
+            ->expectsOutputToContain('Reconciled laravel: 1 pushed to master.');
+    }
+
+    Queue::assertPushed(PushBlockToMaster::class, 2);
+    Queue::assertNotPushed(PushBlockToMaster::class, fn ($job) => $job->record->ip !== '5.6.7.8');
+});
+
+it('logs nothing when master already holds every block', function () {
+    Queue::fake();
+    config()->set('watchtower.sync.master_url', 'https://master.example.com');
+    config()->set('watchtower.sync.secret', 'test-secret');
+    Http::fake(['master.example.com/*' => Http::response(['data' => [['ip' => '1.2.3.4', 'expires_at' => null]]])]);
+
+    BlacklistedIp::create(['ip' => '1.2.3.4', 'scope' => BlockScope::GLOBAL, 'source' => BlockSource::Manual]);
+
+    Log::shouldReceive('channel')->andReturnSelf();
+    Log::shouldReceive('warning')->never();
+
+    $this->artisan('watchtower:reconcile')
+        ->assertSuccessful()
+        ->expectsOutputToContain('Reconciled laravel: 0 pushed to master.');
+
+    Queue::assertNothingPushed();
+});
+
+it('reports other targets without a push count', function () {
+    // Only the laravel target counts pushes; asking any other for one
+    // would throw and fail its reconcile on every run.
+    config()->set('watchtower.sync.master_url', null);
+    config()->set('watchtower.block_targets.nginx_file.enabled', true);
+    config()->set('watchtower.block_targets.nginx_file.path', '/tmp/watchtower-deny.conf');
+
+    $mock = Mockery::mock(NginxFileTarget::class);
+    $mock->shouldReceive('reconcile')->once();
+    $this->app->instance(NginxFileTarget::class, $mock);
+
+    $this->artisan('watchtower:reconcile')
+        ->assertSuccessful()
+        ->expectsOutputToContain('Reconciled nginx_file.')
+        ->doesntExpectOutputToContain('pushed to master');
 });

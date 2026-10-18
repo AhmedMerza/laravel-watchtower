@@ -17,8 +17,9 @@ php artisan watchtower:sync
 # Permanent blocks (no expiry) are never touched
 php artisan watchtower:cleanup
 
-# Push the full active (global) blocklist to every enabled block target —
-# on a satellite that includes the master, if WATCHTOWER_MASTER_URL is set.
+# Bring every enabled block target in line with the active (global) blocklist —
+# on a satellite that includes the master, if WATCHTOWER_MASTER_URL is set:
+# it pushes only what the master is missing and prints how many it pushed.
 # The master never pushes to itself (WATCHTOWER_SYNC_ROLE=master).
 # Repairs drift a live push missed; not scheduled by default.
 php artisan watchtower:reconcile
