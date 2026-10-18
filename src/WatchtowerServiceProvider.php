@@ -70,6 +70,7 @@ class WatchtowerServiceProvider extends PackageServiceProvider
             ->hasMigration('update_blacklisted_ips_table_add_hits')
             ->hasMigration('update_blacklisted_ips_table_add_scope')
             ->hasMigration('update_blacklisted_ips_table_source_feed')
+            ->hasMigration('update_blacklisted_ips_table_with_list_indexes')
             ->hasViews()
             ->hasCommands([InstallCommand::class, SyncCommand::class, CleanupCommand::class, SimulateCommand::class, ReconcileCommand::class, ImportFeedsCommand::class, ImportFirewallCommand::class, AlertDigestCommand::class]);
     }

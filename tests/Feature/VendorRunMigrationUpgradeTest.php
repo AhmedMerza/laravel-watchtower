@@ -42,6 +42,7 @@ beforeEach(function () {
     foreach ([
         'create_blacklisted_ips_table', 'create_ip_offences_table', 'update_blacklisted_ips_table_add_hits',
         'update_blacklisted_ips_table_add_scope', 'update_blacklisted_ips_table_source_feed',
+        'update_blacklisted_ips_table_with_list_indexes',
     ] as $i => $name) {
         File::copy(__DIR__."/../../database/migrations/{$name}.php", sprintf('%s/2026_10_05_00000%d_%s.php', $this->published, $i, $name));
     }

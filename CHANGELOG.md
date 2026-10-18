@@ -4,6 +4,12 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 ## [Unreleased]
 
+One new migration, `update_blacklisted_ips_table_with_list_indexes`. Publish and run it: `php artisan vendor:publish --tag=watchtower-migrations` then `php artisan migrate`.
+
+### Changed
+
+- **The block list pages off an index.** The management page and `GET /blocks` sorted the whole `blacklisted_ips` table on every page load, and feed import puts tens of thousands of rows in it. The new migration adds `(created_at, id)` for the sort, plus `(source, created_at)` and `expires_at` for the source filter and the expired view, where matches are rare and a walk of the sort index alone was slower than no index. Measured on 50k rows on SQLite, MySQL 8 and Postgres 16: a page went from 15–96 ms to under 1 ms, and writes cost nothing measurable. The `scope` filter used by reconcile and the sync pull stays unindexed on purpose: nearly every row is global, so an index on it selects almost everything ([#65](https://github.com/AhmedMerza/laravel-watchtower/issues/65), [#108](https://github.com/AhmedMerza/laravel-watchtower/issues/108)).
+
 ## [1.0.0] - 2026-10-17
 
 The first stable release. From here the package follows semantic versioning: a breaking change to config, routes, the API, events or public classes waits for 2.0. No migrations, no config changes. One public constant is removed, see below.
