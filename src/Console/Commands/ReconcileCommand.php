@@ -42,7 +42,8 @@ class ReconcileCommand extends Command
         // daily, are not something to mirror into Cloudflare's rule list.
         //
         // Lazy, so a long-lived blocklist is read in chunks rather than held
-        // whole (#108). Each target walks it once, re-running the query.
+        // whole (#108). Every walk re-runs the query, so a target may walk it
+        // more than once.
         $activeBlocks = BlacklistedIp::active()
             ->where('scope', BlockScope::GLOBAL)
             ->where('source', '!=', BlockSource::Feed)

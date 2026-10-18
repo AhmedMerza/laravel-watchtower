@@ -4,12 +4,12 @@ declare(strict_types=1);
 
 namespace Watchtower\Targets;
 
-use Illuminate\Support\Carbon;
 use Watchtower\Contracts\BlockTarget;
 use Watchtower\Enums\BlockSource;
 use Watchtower\Enums\SyncRole;
 use Watchtower\Jobs\PushBlockToMaster;
 use Watchtower\Models\BlacklistedIp;
+use Watchtower\Support\IpRange;
 use Watchtower\Support\MasterBlocks;
 use Watchtower\Support\SyncSignature;
 
@@ -62,6 +62,9 @@ class LaravelTarget implements BlockTarget
      * hold, or holds with an earlier expiry than ours (a lost escalation).
      * Master holding it longer, or forever, has nothing to repair.
      *
+     * Walks $activeBlocks twice, so it must be re-iterable — ReconcileCommand
+     * passes a LazyCollection, which re-runs its query.
+     *
      * @param  iterable<BlacklistedIp>  $activeBlocks
      */
     public function reconcile(iterable $activeBlocks): void
@@ -72,16 +75,20 @@ class LaravelTarget implements BlockTarget
             return;
         }
 
-        $ours = [];
+        // Nothing of ours to repair, so no reason to ask master anything.
+        // Only a peek: the records are walked again below rather than held,
+        // since ReconcileCommand streams them (#108).
+        $hasOurs = false;
 
         foreach ($activeBlocks as $record) {
             if ($record->source !== BlockSource::Sync) {
-                $ours[] = $record;
+                $hasOurs = true;
+
+                break;
             }
         }
 
-        // Nothing of ours to repair, so no reason to ask master anything.
-        if ($ours === []) {
+        if (! $hasOurs) {
             return;
         }
 
@@ -98,18 +105,37 @@ class LaravelTarget implements BlockTarget
 
         foreach (MasterBlocks::pages((string) $masterUrl, $secret) as $blocks) {
             foreach ($blocks as $block) {
-                $onMaster[$block['ip']] = isset($block['expires_at']) ? Carbon::parse($block['expires_at'])->getTimestamp() : null;
+                // One malformed row must not stop every other repair. A row
+                // with no usable ip can't match anything, so it's skipped;
+                // an expiry that doesn't parse counts as already lapsed, so
+                // ours gets pushed rather than trusted to a row we can't read.
+                if (! is_array($block) || ! is_string($block['ip'] ?? null)) {
+                    continue;
+                }
+
+                $expires = $block['expires_at'] ?? null;
+                $onMaster[$block['ip']] = $expires === null ? null : (is_string($expires) ? (int) strtotime($expires) : 0);
             }
         }
 
-        foreach ($ours as $record) {
-            if (! array_key_exists($record->ip, $onMaster)) {
+        foreach ($activeBlocks as $record) {
+            if ($record->source === BlockSource::Sync) {
+                continue;
+            }
+
+            // Master keys a bare IPv6 address by the prefix block() widens it
+            // to (applySync normalises every push), so an explicit /128 or a
+            // pre-prefix row stored bare here would never match and be pushed
+            // every run.
+            $key = IpRange::blockTarget($record->ip) ?? $record->ip;
+
+            if (! array_key_exists($key, $onMaster)) {
                 $this->apply($record);
 
                 continue;
             }
 
-            $theirs = $onMaster[$record->ip];
+            $theirs = $onMaster[$key];
 
             if ($theirs !== null && ($record->expires_at === null || $record->expires_at->getTimestamp() > $theirs)) {
                 $this->apply($record);

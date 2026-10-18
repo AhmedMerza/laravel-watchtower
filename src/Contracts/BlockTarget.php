@@ -32,7 +32,11 @@ interface BlockTarget
     /**
      * Repair drift: make this target's state match $activeBlocks exactly,
      * independent of whatever apply()/remove() calls this node has made (or
-     * failed to make) since the target was last in sync.
+     * failed to make) since the target was last in sync. A target may skip
+     * an entry it can see is already applied, as LaravelTarget does.
+     *
+     * $activeBlocks may be walked more than once; ReconcileCommand passes a
+     * LazyCollection, which re-runs its query on each walk.
      *
      * @param  iterable<BlacklistedIp>  $activeBlocks
      */

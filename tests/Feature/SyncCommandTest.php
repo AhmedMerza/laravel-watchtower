@@ -7,6 +7,7 @@ use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use Watchtower\Enums\BlockSource;
 use Watchtower\Events\IpBlocked;
@@ -45,9 +46,35 @@ it('fails gracefully when master returns an error', function () {
         'master.example.com/watchtower/sync/blocks*' => Http::response([], 500),
     ]);
 
+    Log::shouldReceive('channel')->andReturnSelf();
+    Log::shouldReceive('error')->once()->with('Watchtower: sync failed', ['status' => 500]);
+
     $this->artisan('watchtower:sync')
         ->assertFailed()
-        ->expectsOutputToContain('HTTP 500');
+        ->expectsOutputToContain('Sync failed — master returned HTTP 500.');
+});
+
+it('logs no HTTP failure for a bad cursor, which has no status', function () {
+    Http::fake([
+        'master.example.com/watchtower/sync/blocks*' => Http::response(['data' => [], 'next_cursor' => 'not-a-ulid']),
+    ]);
+
+    Log::shouldReceive('channel')->andReturnSelf();
+    Log::shouldReceive('error')->never();
+
+    $this->artisan('watchtower:sync')
+        ->assertFailed()
+        ->expectsOutputToContain('Sync failed — master returned an invalid next_cursor after 0.');
+});
+
+it('fails on a data field that is not a list', function () {
+    Http::fake([
+        'master.example.com/watchtower/sync/blocks*' => Http::response(['data' => 'nope']),
+    ]);
+
+    $this->artisan('watchtower:sync')
+        ->assertFailed()
+        ->expectsOutputToContain('data field that is not a list');
 });
 
 it('says the master is not serving the routes when it answers 404', function () {

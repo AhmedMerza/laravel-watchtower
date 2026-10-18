@@ -113,6 +113,8 @@ it('reconciles by pushing only the records master does not hold', function () {
 });
 
 it('re-pushes a block master holds with an earlier expiry than ours', function (?string $ours, ?string $theirs, bool $pushed) {
+    // Both expiries derive from now() and compare by the second.
+    $this->freezeTime();
     Queue::fake();
     fakeMaster([['ip' => '1.2.3.4', 'expires_at' => $theirs === null ? null : now()->modify($theirs)->toJSON()]]);
 
@@ -131,7 +133,59 @@ it('re-pushes a block master holds with an earlier expiry than ours', function (
     'same expiry'                    => ['+1 hour', '+1 hour', false],
     'master holds it longer'         => ['+1 hour', '+2 hours', false],
     'master holds it permanently'    => ['+1 hour', null, false],
+    'both permanent'                 => [null, null, false],
 ]);
+
+it('reads every page of master\'s list before deciding what to push', function () {
+    Queue::fake();
+    config()->set('watchtower.sync.master_url', 'https://master.example.com');
+    config()->set('watchtower.sync.secret', 'test-secret');
+    Http::fake(['master.example.com/watchtower/sync/blocks*' => Http::sequence()
+        ->push(['data' => [['ip' => '1.1.1.1', 'expires_at' => null]], 'next_cursor' => '01J00000000000000000000001'])
+        ->push(['data' => [['ip' => '2.2.2.2', 'expires_at' => null]], 'next_cursor' => null]),
+    ]);
+
+    $records = collect(['1.1.1.1', '2.2.2.2', '3.3.3.3'])
+        ->map(fn ($ip) => BlacklistedIp::create(['ip' => $ip, 'source' => BlockSource::Manual]));
+
+    $this->target->reconcile($records);
+
+    Queue::assertPushed(PushBlockToMaster::class, 1);
+    Queue::assertPushed(PushBlockToMaster::class, fn ($job) => $job->record->ip === '3.3.3.3');
+    Http::assertSent(fn ($request) => $request['after'] === '01J00000000000000000000001');
+});
+
+it('matches a bare IPv6 row against the prefix master stores it under', function () {
+    // An explicit /128 is stored bare here; master widens every push to
+    // ipv6_block_prefix, so its list carries the /64.
+    Queue::fake();
+    fakeMaster([['ip' => '2001:db8::/64', 'expires_at' => null]]);
+
+    $this->target->reconcile([BlacklistedIp::create(['ip' => '2001:db8::1', 'source' => BlockSource::Manual])]);
+
+    Queue::assertNothingPushed();
+});
+
+it('skips master rows it cannot read without abandoning the rest', function () {
+    Queue::fake();
+    fakeMaster([
+        ['expires_at' => null],
+        ['ip' => ['5.6.7.8']],
+        'not a row',
+        ['ip' => '1.2.3.4', 'expires_at' => 'not a date'],
+        ['ip' => '9.9.9.9', 'expires_at' => null],
+    ]);
+
+    $unreadable = BlacklistedIp::create(['ip' => '1.2.3.4', 'source' => BlockSource::Manual, 'expires_at' => now()->addHour()]);
+    $missing = BlacklistedIp::create(['ip' => '5.6.7.8', 'source' => BlockSource::Manual]);
+    $held = BlacklistedIp::create(['ip' => '9.9.9.9', 'source' => BlockSource::Manual]);
+
+    $this->target->reconcile([$unreadable, $missing, $held]);
+
+    // An expiry master sent but we can't parse counts as lapsed: push ours.
+    Queue::assertPushed(PushBlockToMaster::class, 2);
+    Queue::assertNotPushed(PushBlockToMaster::class, fn ($job) => $job->record->is($held));
+});
 
 it('skips Sync-sourced records during reconcile', function () {
     Queue::fake();

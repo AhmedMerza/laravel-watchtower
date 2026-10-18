@@ -17,7 +17,9 @@ use Watchtower\Exceptions\MasterPullException;
 final class MasterBlocks
 {
     /**
-     * @return \Generator<int, list<array<string, mixed>>>
+     * Rows are as master sent them — untrusted, so callers check their shape.
+     *
+     * @return \Generator<int, array<mixed>>
      *
      * @throws MasterPullException
      */
@@ -52,7 +54,13 @@ final class MasterBlocks
                 throw new MasterPullException("master returned an invalid next_cursor after {$cursor}.");
             }
 
-            yield $response->json('data', []);
+            $data = $response->json('data', []);
+
+            if (! is_array($data)) {
+                throw new MasterPullException('master returned a data field that is not a list.');
+            }
+
+            yield $data;
 
             $cursor = $next;
         } while ($cursor !== null);
