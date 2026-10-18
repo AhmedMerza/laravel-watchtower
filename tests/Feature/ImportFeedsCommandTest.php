@@ -190,6 +190,8 @@ it('announces nothing and pushes nothing anywhere', function () {
 it('leaves feed blocks out of reconcile', function () {
     Queue::fake();
     config()->set('watchtower.sync.master_url', 'https://master.example.com');
+    config()->set('watchtower.sync.secret', 'test-secret');
+    $GLOBALS['feedResponses']['https://master.example.com/watchtower/sync/blocks?after=0'] = [['data' => []], 200];
 
     BlacklistedIp::create(['ip' => '1.2.3.4', 'source' => BlockSource::Manual]);
     BlacklistedIp::create(['ip' => '1.10.16.0/20', 'source' => BlockSource::Feed, 'blocked_by' => 'feed:drop']);

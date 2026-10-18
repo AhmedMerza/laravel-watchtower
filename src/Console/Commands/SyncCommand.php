@@ -5,14 +5,15 @@ declare(strict_types=1);
 namespace Watchtower\Console\Commands;
 
 use Illuminate\Console\Command;
-use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Watchtower\Enums\SyncRole;
+use Watchtower\Exceptions\MasterPullException;
 use Watchtower\Exceptions\NeverAutoBlockException;
 use Watchtower\Exceptions\NeverBlockException;
 use Watchtower\Models\BlacklistedIp;
 use Watchtower\Services\BlacklistCache;
 use Watchtower\Services\BlacklistService;
+use Watchtower\Support\MasterBlocks;
 use Watchtower\Support\SyncSignature;
 
 class SyncCommand extends Command
@@ -65,38 +66,7 @@ class SyncCommand extends Command
         $autoRefused = 0;
 
         try {
-            // Page until the master says there is no more (#37). A master
-            // older than paging ignores `after` and sends no next_cursor, so
-            // against one this is a single request for the whole list. The
-            // cursor is a ULID; '0' sorts before every one of them.
-            $cursor = '0';
-
-            do {
-                $response = Http::withHeaders(
-                    SyncSignature::headers('GET', SyncSignature::PULL_PATH, '', $secret)
-                    + ['Accept' => 'application/json']
-                )->get(rtrim((string) $masterUrl, '/').SyncSignature::PULL_PATH, ['after' => $cursor]);
-
-                if (! $response->successful()) {
-                    $this->error("Sync failed — master returned HTTP {$response->status()}.".SyncRole::hintFor($response->status()));
-                    Log::channel(config('watchtower.log_channel', 'stack'))->error('Watchtower: sync failed', ['status' => $response->status()]);
-
-                    return $this->abandon($written);
-                }
-
-                $blocks = $response->json('data', []);
-                $next = $response->json('next_cursor');
-
-                // A cursor that doesn't move forward would loop forever, and
-                // one that only grows longer could too, so it must also be a
-                // ULID — the shape the master's ids have. strcmp, not <=: PHP
-                // compares numeric-looking strings as numbers.
-                if ($next !== null && (! is_string($next) || ! preg_match('/^[0-9a-z]{26}$/i', $next) || strcmp($next, $cursor) <= 0)) {
-                    $this->error("Sync failed — master returned an invalid next_cursor after {$cursor}.");
-
-                    return $this->abandon($written);
-                }
-
+            foreach (MasterBlocks::pages((string) $masterUrl, $secret) as $blocks) {
                 foreach ($blocks as $block) {
                     try {
                         // The never-downgrade rule, never_block and the write all
@@ -147,9 +117,7 @@ class SyncCommand extends Command
 
                     $written[] = $result['record'];
                 }
-
-                $cursor = $next;
-            } while ($cursor !== null);
+            }
 
             $synced = count($written);
             $refused = $whitelisted === 0 ? '' : "; {$whitelisted} refused by never_block";
@@ -175,6 +143,14 @@ class SyncCommand extends Command
 
             return self::SUCCESS;
 
+        } catch (MasterPullException $e) {
+            $this->error('Sync failed — '.$e->getMessage());
+
+            if ($e->status !== null) {
+                Log::channel(config('watchtower.log_channel', 'stack'))->error('Watchtower: sync failed', ['status' => $e->status]);
+            }
+
+            return $this->abandon($written);
         } catch (\Throwable $e) {
             $this->error('Sync error: '.$e->getMessage());
             Log::channel(config('watchtower.log_channel', 'stack'))->error('Watchtower: sync exception', ['error' => $e->getMessage()]);

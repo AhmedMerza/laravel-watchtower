@@ -98,12 +98,17 @@ Both directions apply the same two rules, from one implementation:
 
 ## Repairing Drift
 
-`php artisan watchtower:reconcile` re-pushes every active global block to the
-master — the push-side complement to `watchtower:sync`'s pull. Nothing
-automatically retries a push whose queued job exhausted its 3 tries; this is
-how you catch those up without waiting for the next time each address is
-blocked again. Not scheduled by default — add it to the satellite's schedule
-on whatever cadence suits you. See [Artisan Commands](commands.md).
+`php artisan watchtower:reconcile` re-pushes the satellite's own active global
+blocks that the master is missing — the push-side complement to
+`watchtower:sync`'s pull. Nothing automatically retries a push whose queued
+job exhausted its 3 tries; this is how you catch those up without waiting for
+the next time each address is blocked again. It reads the master's list first
+(the same signed request `watchtower:sync` makes, so it needs
+`WATCHTOWER_SYNC_SECRET`) and queues a push only for a block the master doesn't
+hold, or holds with an earlier expiry. A run with nothing out of sync queues
+nothing, so a frequent schedule costs one read of the master's list. Not
+scheduled by default — add it to the satellite's schedule on whatever cadence
+suits you. See [Artisan Commands](commands.md).
 
 The same command repairs every other enabled [block target](block-targets.md)
 the same way — a satellite running the Cloudflare or nginx_file target in

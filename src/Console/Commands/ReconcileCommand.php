@@ -15,7 +15,7 @@ class ReconcileCommand extends Command
 {
     protected $signature = 'watchtower:reconcile';
 
-    protected $description = 'Push the full active blocklist to every enabled block target, to repair drift';
+    protected $description = 'Repair drift between the active blocklist and every enabled block target';
 
     public function __construct(private readonly BlockTargetRegistry $registry)
     {
@@ -40,10 +40,14 @@ class ReconcileCommand extends Command
         // Feed rows are left out too, as the live path leaves them out by
         // never announcing them (#21): thousands of ranges, re-imported
         // daily, are not something to mirror into Cloudflare's rule list.
+        //
+        // Lazy, so a long-lived blocklist is read in chunks rather than held
+        // whole (#108). Every walk re-runs the query, so a target may walk it
+        // more than once.
         $activeBlocks = BlacklistedIp::active()
             ->where('scope', BlockScope::GLOBAL)
             ->where('source', '!=', BlockSource::Feed)
-            ->get();
+            ->lazyById();
 
         $failed = 0;
 
