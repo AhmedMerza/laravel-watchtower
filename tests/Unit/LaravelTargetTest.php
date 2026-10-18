@@ -155,16 +155,29 @@ it('reads every page of master\'s list before deciding what to push', function (
     Http::assertSent(fn ($request) => $request['after'] === '01J00000000000000000000001');
 });
 
-it('matches a bare IPv6 row against the prefix master stores it under', function () {
+it('matches a bare IPv6 row against the prefix master stores it under', function (int $prefix, array $master, bool $pushed) {
     // An explicit /128 is stored bare here; master widens every push to
-    // ipv6_block_prefix, so its list carries the /64.
+    // ipv6_block_prefix, so its list carries that prefix, not the address.
+    $this->freezeTime();
     Queue::fake();
-    fakeMaster([['ip' => '2001:db8::/64', 'expires_at' => null]]);
+    config()->set('watchtower.ipv6_block_prefix', $prefix);
+    if (is_string($master['expires_at'])) {
+        $master['expires_at'] = now()->modify($master['expires_at'])->toJSON();
+    }
+    fakeMaster([$master]);
 
-    $this->target->reconcile([BlacklistedIp::create(['ip' => '2001:db8::1', 'source' => BlockSource::Manual])]);
+    $this->target->reconcile([BlacklistedIp::create([
+        'ip' => '2001:db8::1', 'source' => BlockSource::Manual, 'expires_at' => now()->addHours(2),
+    ])]);
 
-    Queue::assertNothingPushed();
-});
+    $pushed ? Queue::assertPushed(PushBlockToMaster::class, 1) : Queue::assertNothingPushed();
+})->with([
+    'held under /64'              => [64, ['ip' => '2001:db8::/64', 'expires_at' => null], false],
+    'held under /48'              => [48, ['ip' => '2001:db8::/48', 'expires_at' => null], false],
+    'held bare at /128'           => [128, ['ip' => '2001:db8::1', 'expires_at' => null], false],
+    'master lacks the prefix'     => [64, ['ip' => '2001:db8:1::/64', 'expires_at' => null], true],
+    'held, but lapses sooner'     => [64, ['ip' => '2001:db8::/64', 'expires_at' => '+1 hour'], true],
+]);
 
 it('skips master rows it cannot read without abandoning the rest', function () {
     Queue::fake();
@@ -174,16 +187,19 @@ it('skips master rows it cannot read without abandoning the rest', function () {
         'not a row',
         ['ip' => '1.2.3.4', 'expires_at' => 'not a date'],
         ['ip' => '9.9.9.9', 'expires_at' => null],
+        ['ip' => '7.7.7.7', 'expires_at' => 1893456000],
     ]);
 
     $unreadable = BlacklistedIp::create(['ip' => '1.2.3.4', 'source' => BlockSource::Manual, 'expires_at' => now()->addHour()]);
     $missing = BlacklistedIp::create(['ip' => '5.6.7.8', 'source' => BlockSource::Manual]);
     $held = BlacklistedIp::create(['ip' => '9.9.9.9', 'source' => BlockSource::Manual]);
+    $numeric = BlacklistedIp::create(['ip' => '7.7.7.7', 'source' => BlockSource::Manual, 'expires_at' => now()->addHour()]);
 
-    $this->target->reconcile([$unreadable, $missing, $held]);
+    $this->target->reconcile([$unreadable, $missing, $held, $numeric]);
 
-    // An expiry master sent but we can't parse counts as lapsed: push ours.
-    Queue::assertPushed(PushBlockToMaster::class, 2);
+    // An expiry master sent but we can't parse — a bad string or not a
+    // string at all — counts as lapsed: push ours.
+    Queue::assertPushed(PushBlockToMaster::class, 3);
     Queue::assertNotPushed(PushBlockToMaster::class, fn ($job) => $job->record->is($held));
 });
 
