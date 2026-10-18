@@ -11,6 +11,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\File;
 use Orchestra\Testbench\TestCase as Orchestra;
 use Watchtower\Support\FailureWindow;
+use Watchtower\Tests\Support\WorkerSkeleton;
 use Watchtower\WatchtowerServiceProvider;
 
 class TestCase extends Orchestra
@@ -23,6 +24,14 @@ class TestCase extends Orchestra
      * @var (Closure(Application): void)|null
      */
     public static ?Closure $beforeBoot = null;
+
+    /**
+     * Each --parallel worker boots its own skeleton copy (#160).
+     */
+    public static function applicationBasePath()
+    {
+        return WorkerSkeleton::path() ?? parent::applicationBasePath();
+    }
 
     protected function setUp(): void
     {
