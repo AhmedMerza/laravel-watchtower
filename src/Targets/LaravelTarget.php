@@ -21,6 +21,9 @@ use Watchtower\Support\SyncSignature;
  */
 class LaravelTarget implements BlockTarget
 {
+    /** How many pushes the last reconcile() queued. */
+    private int $pushed = 0;
+
     public function apply(BlacklistedIp $record): void
     {
         // PushBlockToMaster::handle() already refuses a Sync record, a
@@ -69,6 +72,8 @@ class LaravelTarget implements BlockTarget
      */
     public function reconcile(iterable $activeBlocks): void
     {
+        $this->pushed = 0;
+
         $masterUrl = config('watchtower.sync.master_url');
 
         if (! $masterUrl || SyncRole::current() === SyncRole::Master) {
@@ -131,6 +136,7 @@ class LaravelTarget implements BlockTarget
 
             if (! array_key_exists($key, $onMaster)) {
                 $this->apply($record);
+                $this->pushed++;
 
                 continue;
             }
@@ -139,7 +145,19 @@ class LaravelTarget implements BlockTarget
 
             if ($theirs !== null && ($record->expires_at === null || $record->expires_at->getTimestamp() > $theirs)) {
                 $this->apply($record);
+                $this->pushed++;
             }
         }
+    }
+
+    /**
+     * How many pushes the last reconcile() queued (#172). The same non-zero
+     * count run after run means master keeps refusing those blocks (its
+     * never_block / never_auto_block) or holds its own with an earlier
+     * expiry — a set that never converges, invisible otherwise.
+     */
+    public function pushed(): int
+    {
+        return $this->pushed;
     }
 }

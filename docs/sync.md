@@ -106,7 +106,12 @@ the next time each address is blocked again. It reads the master's list first
 (the same signed request `watchtower:sync` makes, so it needs
 `WATCHTOWER_SYNC_SECRET`) and queues a push only for a block the master doesn't
 hold, or holds with an earlier expiry. A run with nothing out of sync queues
-nothing, so a frequent schedule costs one read of the master's list. Not
+nothing, so a frequent schedule costs one read of the master's list. Each run
+prints how many it pushed (`Reconciled laravel: 3 pushed to master.`) and logs
+a warning when that's not zero. If the same count comes back on every run, the
+master is refusing those blocks (its `never_block`, or `never_auto_block` for
+an auto block) or holds its own block for the address with an earlier expiry,
+and pushing again won't fix it. Not
 scheduled by default — add it to the satellite's schedule on whatever cadence
 suits you. See [Artisan Commands](commands.md).
 

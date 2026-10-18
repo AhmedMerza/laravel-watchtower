@@ -4,6 +4,10 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **`watchtower:reconcile` says how many blocks it pushed to the master.** It used to print `Reconciled laravel.` whether it queued no pushes or 400. It now prints `Reconciled laravel: 3 pushed to master.` and logs a warning (`Watchtower: reconcile pushed blocks master was missing`) when the count isn't zero. Some blocks never converge: the master refuses them (`never_block`, or `never_auto_block` for an auto block), or holds its own block for the address with an earlier expiry. Those are pushed again on every run, and the same count showing up run after run is how you spot them ([#172](https://github.com/AhmedMerza/laravel-watchtower/issues/172)).
+
 ## [1.1.0] - 2026-10-18
 
 One new migration, `update_blacklisted_ips_table_with_list_indexes`. Publish and run it: `php artisan vendor:publish --tag=watchtower-migrations` then `php artisan migrate`. No config changes. One visible difference on a satellite: with `WATCHTOWER_MASTER_URL` set but no `WATCHTOWER_SYNC_SECRET`, `watchtower:reconcile` now fails the laravel target instead of queueing pushes that send nothing — set the secret, as `watchtower:sync` already requires.

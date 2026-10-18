@@ -10,6 +10,7 @@ use Watchtower\Enums\BlockSource;
 use Watchtower\Models\BlacklistedIp;
 use Watchtower\Support\BlockScope;
 use Watchtower\Support\BlockTargetRegistry;
+use Watchtower\Targets\LaravelTarget;
 
 class ReconcileCommand extends Command
 {
@@ -54,7 +55,24 @@ class ReconcileCommand extends Command
         foreach ($targets as $name => $target) {
             try {
                 $target->reconcile($activeBlocks);
-                $this->info("Reconciled {$name}.");
+
+                if (! $target instanceof LaravelTarget) {
+                    $this->info("Reconciled {$name}.");
+
+                    continue;
+                }
+
+                // Logged as well as printed: cron output is rarely read, and
+                // the same count every run is the signal (#172).
+                $pushed = $target->pushed();
+                $this->info("Reconciled {$name}: {$pushed} pushed to master.");
+
+                if ($pushed > 0) {
+                    Log::channel(config('watchtower.log_channel', 'stack'))->warning(
+                        'Watchtower: reconcile pushed blocks master was missing',
+                        ['target' => $name, 'pushed' => $pushed]
+                    );
+                }
             } catch (\Throwable $e) {
                 $failed++;
                 $this->error("Failed to reconcile {$name}: {$e->getMessage()}");
