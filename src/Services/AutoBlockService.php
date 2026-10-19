@@ -47,7 +47,7 @@ class AutoBlockService
      * measurement rather than a standing setting, so the two that treat it
      * specially have to agree on which one it is.
      */
-    private const HELD_BY_SHARED_IP = 'shared IP';
+    public const HELD_BY_SHARED_IP = 'shared IP';
 
     /**
      * The near-miss log line. Public because `watchtower:simulate` reads it
@@ -515,7 +515,7 @@ class AutoBlockService
     {
         $hold = $this->hits->notionalHold($holder, $counted);
 
-        return $hold !== null && $hold['mode'] === $mode && $this->holdStillSpeaksFor($hold['reason'], $ip);
+        return $hold !== null && $hold['mode'] === $mode && self::holdStillSpeaksFor($hold['reason'], $ip);
     }
 
     /**
@@ -561,7 +561,7 @@ class AutoBlockService
      */
     private function holdDecision(string $holder, string $counted, string $mode, ?string $heldBy, int $durationMinutes): void
     {
-        if ($heldBy !== null && $heldBy !== self::HELD_BY_SHARED_IP) {
+        if (self::opensHold($heldBy)) {
             $this->hits->openNotionalBlock($holder, $counted, $mode, $heldBy, max(1, $durationMinutes) * 60);
         }
     }
@@ -631,11 +631,7 @@ class AutoBlockService
             // vouch for a scanner arriving behind them, and one listed address
             // would silence its /64. Returned only for holdDecision(); the
             // line above still says 'warn mode'.
-            $predicted = $context['in_block_mode'] ?? null;
-
-            return in_array($predicted, [self::HELD_BY_SHARED_IP, 'never_block', 'never_auto_block'], true)
-                ? $predicted
-                : $notBlockedBecause;
+            return self::heldAs($notBlockedBecause, $context['in_block_mode'] ?? null);
         }
 
         // Only past every hold-back, and never before: a warn-mode dry run
@@ -804,6 +800,28 @@ class AutoBlockService
     }
 
     /**
+     * What a reported decision is held as: the hold-back block mode would
+     * have given it when that is the shared-IP guard or a never_* list, so
+     * a dry run is held on block mode's terms — see blockOrReport() — else
+     * the hold-back that actually stopped it.
+     *
+     * Public, with opensHold() and holdStillSpeaksFor(), so SignalReplay
+     * holds a replayed decision with these rather than a copy (#177).
+     */
+    public static function heldAs(string $notBlockedBecause, ?string $inBlockMode): string
+    {
+        return in_array($inBlockMode, [self::HELD_BY_SHARED_IP, 'never_block', 'never_auto_block'], true)
+            ? $inBlockMode
+            : $notBlockedBecause;
+    }
+
+    /** Whether a decision held as $heldBy opens a hold. See holdDecision(). */
+    public static function opensHold(?string $heldBy): bool
+    {
+        return $heldBy !== null && $heldBy !== self::HELD_BY_SHARED_IP;
+    }
+
+    /**
      * Whether a hold opened on this prefix still answers for the address now
      * asking.
      *
@@ -823,7 +841,7 @@ class AutoBlockService
      * round trip. That is also what makes taking an address off the list
      * take effect on its next signal rather than when the hold lapses.
      */
-    private function holdStillSpeaksFor(string $reason, string $ip): bool
+    public static function holdStillSpeaksFor(string $reason, string $ip): bool
     {
         if ($reason !== 'never_auto_block' && $reason !== 'never_block') {
             return true;

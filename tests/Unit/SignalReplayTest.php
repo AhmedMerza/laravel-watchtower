@@ -101,6 +101,12 @@ it('counts nothing from an address block mode has taken out of play', function (
     expect(crossings($offenders))->toBe(['10.0.0.1' => 1])
         ->and($offenders[0]['outcomes'])->toBe(['blocked' => 1]);
 
+    // Hits 4-6 weren't counted, not merely held: one more past a 1-minute
+    // block starts a new count instead of crossing.
+    signal('10.0.0.1', 600 - 80 / 60);
+
+    expect(crossings(($this->replay)(['mode' => 'block', 'duration' => 1])))->toBe(['10.0.0.1' => 1]);
+
     // Once the block lapses the address starts from nothing.
     foreach (range(0, 2) as $i) {
         signal('10.0.0.1', 530 - $i * 0.1);
@@ -169,4 +175,62 @@ it('replays only the detector it is asked about, inside the period', function ()
     }
 
     expect(($this->replay)())->toBe([]);
+});
+
+it('re-measures a shared address in warn mode too, as the engine holds a dry run on block mode\'s terms', function () {
+    foreach (range(0, 5) as $i) {
+        signal('10.0.0.1', 600 - $i * 0.1, (string) ($i % 2));
+    }
+
+    expect(($this->replay)()[0]['outcomes'])->toBe(['shared IP' => 2]);
+});
+
+it('takes a scoped block out of play like an app-wide one', function () {
+    foreach (range(0, 4) as $i) {
+        signal('10.0.0.1', 600 - $i * 0.1, (string) ($i % 2));
+    }
+
+    // Past the 1-minute block: had the 4th and 5th hits been counted, as a
+    // hold counts them, this would be the 3rd and cross.
+    signal('10.0.0.1', 600 - 80 / 60, '0');
+
+    // Shared, but on a scoped detector the guard narrows the block rather
+    // than holding it back — and a scoped block counts nothing after it.
+    expect(($this->replay)(['mode' => 'block', 'scope' => 'auth', 'duration' => 1])[0]['outcomes'])->toBe(['blocked_in_scope' => 1]);
+});
+
+it('holds a never_block refusal for the block duration, then decides again', function () {
+    config()->set('watchtower.never_block', ['10.0.0.5']);
+
+    foreach (range(0, 5) as $i) {
+        signal('10.0.0.5', 600 - $i * 0.1);
+    }
+
+    expect(($this->replay)(['mode' => 'block'])[0]['outcomes'])->toBe(['never_block' => 1]);
+
+    foreach (range(0, 2) as $i) {
+        signal('10.0.0.5', 530 - $i * 0.1);
+    }
+
+    expect(($this->replay)(['mode' => 'block'])[0]['outcomes'])->toBe(['never_block' => 2]);
+});
+
+it('keeps a blocked address out of play across a sweep of state', function () {
+    foreach (range(0, 2) as $i) {
+        signal('10.0.0.1', 600 - $i * 0.1);
+    }
+
+    // More live addresses than the first sweep threshold, inside the block.
+    DB::table(SignalLog::TABLE)->insert(array_map(static fn (int $i): array => [
+        'detector'    => 'response_bursts',
+        'ip'          => '10.1.'.intdiv($i, 250).'.'.($i % 250),
+        'user_id'     => null,
+        'occurred_at' => now()->subMinutes(595),
+    ], range(0, 1099)));
+
+    foreach (range(0, 2) as $i) {
+        signal('10.0.0.1', 590 - $i * 0.1);
+    }
+
+    expect(crossings(($this->replay)(['mode' => 'block'])))->toBe(['10.0.0.1' => 1]);
 });

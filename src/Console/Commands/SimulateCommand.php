@@ -8,6 +8,7 @@ use Carbon\CarbonInterface;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Schema;
 use Symfony\Component\Console\Formatter\OutputFormatter;
+use Watchtower\Exceptions\UnknownScopeException;
 use Watchtower\Services\AutoBlockService;
 use Watchtower\Services\DetectorHistory;
 use Watchtower\Services\RuleSimulator;
@@ -196,6 +197,8 @@ class SimulateCommand extends Command
                 'days'                     => $days,
                 'table'                    => $logScope ? $table : null,
                 'detector_source'          => $whyNotReplayed === null ? 'signal_log' : 'logscope',
+                'signal_log_oldest'        => $whyNotReplayed === null ? $this->replay->oldest()?->toIso8601String() : null,
+                'rules_skipped'            => $skippedRules,
                 'block_duration_minutes'   => $duration,
                 'shared_ip_user_threshold' => $sharedIpThreshold,
                 'rules'                    => $results,
@@ -298,6 +301,20 @@ class SimulateCommand extends Command
                 'overridden'               => $overrides !== [],
             ];
 
+            // What detect() returns on before it counts anything: replaying
+            // these would report decisions the engine never makes.
+            $notReplayed = match (true) {
+                $mode === 'disabled' => 'its mode is `disabled`, so the engine counts nothing for it',
+                ! self::declared($settings['scope'] ?? null) => 'its scope isn\'t declared in watchtower.scopes, so the engine skips it',
+                default => null,
+            };
+
+            if ($notReplayed !== null) {
+                $detectors[$name] = [...$detectors[$name], ...$judgedBy, 'offenders' => [], 'not_replayed' => $notReplayed];
+
+                continue;
+            }
+
             $offenders = $this->replay->replay(
                 $name,
                 $judgedBy['threshold'],
@@ -322,6 +339,18 @@ class SimulateCommand extends Command
         }
 
         return ['detectors' => $detectors, 'unreadable' => $observed['unreadable']];
+    }
+
+    /** Whether the engine would accept this scope, as resolveScope() asks. */
+    private static function declared(mixed $scope): bool
+    {
+        try {
+            BlockScope::normalize($scope);
+
+            return true;
+        } catch (UnknownScopeException) {
+            return false;
+        }
     }
 
     /**
@@ -467,7 +496,7 @@ class SimulateCommand extends Command
             }
 
             if ($offenders === [] && $replayed) {
-                $this->line('  No crossings.');
+                $this->line(isset($detector['not_replayed']) ? "  Not replayed: {$detector['not_replayed']}." : '  No crossings.');
 
                 continue;
             }

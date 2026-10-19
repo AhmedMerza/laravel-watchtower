@@ -9,7 +9,6 @@ use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Watchtower\Support\IpRange;
 use Watchtower\Support\KeysetStream;
-use Watchtower\Support\NeverBlockList;
 use Watchtower\Support\SignalLog;
 
 /**
@@ -24,8 +23,9 @@ use Watchtower\Support\SignalLog;
  *   set from its first signed-in hit (HitWindow::recordUser());
  * - the counter restarts at every decided crossing (HitWindow::close());
  * - a decision reported rather than enforced is held for the block duration,
- *   during which the address keeps counting but isn't decided again — except
- *   the shared-IP guard, which the engine re-measures every time;
+ *   on block mode's terms (AutoBlockService::heldAs()), during which the
+ *   address keeps counting but isn't decided again — except the shared-IP
+ *   guard, which the engine re-measures every time;
  * - a block takes the address out of play: the engine counts nothing from a
  *   blocked address, so neither does this.
  *
@@ -36,8 +36,13 @@ use Watchtower\Support\SignalLog;
  */
 final class SignalReplay
 {
-    /** Rows between sweeps of address state that can no longer matter. */
-    private const SWEEP_EVERY = 1000;
+    /**
+     * Addresses held before the first sweep of state that can no longer
+     * matter. Each sweep sets the next at twice what survived, so a flood of
+     * live addresses costs amortised constant time per row, not a sweep of
+     * all of them every so many rows.
+     */
+    private const SWEEP_AT = 1000;
 
     /**
      * Each crossing, grouped by the address that made it — the same shape
@@ -64,7 +69,7 @@ final class SignalReplay
         /** @var array<string, array{ends: int, hits: int, users_end: int, users: array<string, true>, out: int, hold: int, reason: string}> $state */
         $state = [];
         $offenders = [];
-        $rows = 0;
+        $sweepAt = self::SWEEP_AT;
 
         $query = DB::table(SignalLog::TABLE)->where('detector', $detector);
 
@@ -73,8 +78,9 @@ final class SignalReplay
             $ip = (string) $row->ip;
             $counted = IpRange::blockTarget($ip) ?? $ip;
 
-            if (++$rows % self::SWEEP_EVERY === 0) {
+            if (count($state) >= $sweepAt) {
                 $state = array_filter($state, static fn (array $s): bool => max($s['ends'], $s['users_end'], $s['out'], $s['hold']) > $at);
+                $sweepAt = max(self::SWEEP_AT, 2 * count($state));
             }
 
             $s = $state[$counted] ?? ['ends' => 0, 'hits' => 0, 'users_end' => 0, 'users' => [], 'out' => 0, 'hold' => 0, 'reason' => ''];
@@ -99,8 +105,7 @@ final class SignalReplay
                 $s['users'][(string) $row->user_id] = true;
             }
 
-            $held = $at < $s['hold']
-                && ($s['reason'] === 'warn mode' || NeverBlockList::refusesAutoBlock($ip));
+            $held = $at < $s['hold'] && AutoBlockService::holdStillSpeaksFor($s['reason'], $ip);
 
             if ($s['hits'] >= $threshold && ! $held) {
                 $users = $at < $s['users_end'] ? array_keys($s['users']) : [];
@@ -110,12 +115,12 @@ final class SignalReplay
 
                 $verdict = AutoBlockService::inBlockMode($ip, $scope, count($users), $sharedIpThreshold);
 
-                if ($mode === 'warn') {
-                    [$s['hold'], $s['reason']] = [$at + $duration, 'warn mode'];
-                } elseif ($verdict === 'blocked' || $verdict === 'blocked_in_scope') {
+                $heldBy = $mode === 'warn' ? AutoBlockService::heldAs('warn mode', $verdict) : $verdict;
+
+                if ($mode !== 'warn' && ($verdict === 'blocked' || $verdict === 'blocked_in_scope')) {
                     $s['out'] = $at + $duration;
-                } elseif ($verdict === 'never_block' || $verdict === 'never_auto_block') {
-                    [$s['hold'], $s['reason']] = [$at + $duration, $verdict];
+                } elseif (AutoBlockService::opensHold($heldBy)) {
+                    [$s['hold'], $s['reason']] = [$at + $duration, $heldBy];
                 }
 
                 $o = $offenders[$ip] ?? ['ip' => $ip, 'reports' => 0, 'first_at' => $at, 'last_at' => $at, 'user_ids' => [], 'outcomes' => []];
