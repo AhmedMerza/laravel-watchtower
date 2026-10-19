@@ -31,16 +31,32 @@ class DetectAuthFailures
 
     public function handleFailed(Failed $event): void
     {
+        $this->record('failed_logins', request(), $this->target($event));
+    }
+
+    /**
+     * The account the attempt was aimed at, for the signal log only, in its
+     * own columns — never record()'s user id, for the reason given there.
+     *
+     * Empty while the log is off: it is off by default, and this runs at
+     * whatever pace an attacker sets, so nothing is hashed for a log that
+     * isn't kept.
+     *
+     * @return array{target_hash?: ?string, target_user_id?: int|string|null, guard?: ?string}
+     */
+    private function target(Failed $event): array
+    {
+        if (! config('watchtower.auto_block.signal_log.enabled', false)) {
+            return [];
+        }
+
         $targetUserId = $event->user?->getAuthIdentifier();
 
-        // The account the attempt was aimed at goes to the signal log only,
-        // in its own columns — never to record()'s user id, for the reason
-        // below.
-        $this->record('failed_logins', request(), [
+        return [
             'target_hash'    => SignalLog::targetHash($event->credentials),
             'target_user_id' => is_int($targetUserId) || is_string($targetUserId) ? $targetUserId : null,
             'guard'          => $event->guard,
-        ]);
+        ];
     }
 
     public function handleLockout(Lockout $event): void
@@ -65,8 +81,7 @@ class DetectAuthFailures
      * address whose traffic is all anonymous it is blind — the same gap the
      * log-based guard documents — and never_auto_block is the answer for a
      * known office or carrier range.
-     */
-    /**
+     *
      * @param  array{target_hash?: ?string, target_user_id?: int|string|null, guard?: ?string}  $signal
      */
     private function record(string $detector, ?Request $request, array $signal = []): void
