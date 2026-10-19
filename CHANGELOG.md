@@ -4,6 +4,8 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-10-19
+
 One new migration, `create_watchtower_signals_table`; it's only needed if you turn the signal log on. Publish and run it: `php artisan vendor:publish --tag=watchtower-migrations` then `php artisan migrate`. One new config block, `auto_block.signal_log`. If you've published the config, copy the block in by hand.
 
 ### Added
@@ -417,7 +419,8 @@ No migrations and nothing breaking: a `composer update` is enough.
 
 - **There is no transitional `ahmedmerza/logscope-guard` package.** It has been removed from Packagist. To upgrade, `composer remove ahmedmerza/logscope-guard`, `composer require ahmedmerza/watchtower`, then work through the BREAKING entries under Changed.
 
-[Unreleased]: https://github.com/AhmedMerza/laravel-watchtower/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/AhmedMerza/laravel-watchtower/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/AhmedMerza/laravel-watchtower/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/AhmedMerza/laravel-watchtower/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.17.0...v1.0.0
 [0.17.0]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.16.0...v0.17.0
