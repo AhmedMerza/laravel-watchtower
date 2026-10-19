@@ -14,6 +14,7 @@ use Watchtower\Services\BlacklistCache;
 use Watchtower\Services\BlacklistService;
 use Watchtower\Services\OffenceLedger;
 use Watchtower\Support\HitWindow;
+use Watchtower\Support\SignalLog;
 
 beforeEach(function () {
     config()->set('cache.default', 'array');
@@ -40,7 +41,7 @@ beforeEach(function () {
 
     $this->cache = new BlacklistCache;
     $this->blacklist = new BlacklistService($this->cache);
-    $this->service = new AutoBlockService($this->blacklist, new HitWindow, new OffenceLedger);
+    $this->service = new AutoBlockService($this->blacklist, new HitWindow, new OffenceLedger, app(SignalLog::class));
 });
 
 /**

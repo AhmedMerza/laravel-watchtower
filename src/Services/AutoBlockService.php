@@ -17,6 +17,7 @@ use Watchtower\Support\BlockScope;
 use Watchtower\Support\FailureWindow;
 use Watchtower\Support\HitWindow;
 use Watchtower\Support\NeverBlockList;
+use Watchtower\Support\SignalLog;
 
 class AutoBlockService
 {
@@ -69,6 +70,7 @@ class AutoBlockService
         private readonly BlacklistService $blacklist,
         private readonly HitWindow $hits,
         private readonly OffenceLedger $offences,
+        private readonly SignalLog $signals,
     ) {}
 
     /**
@@ -87,6 +89,9 @@ class AutoBlockService
      * decides whether this is a signal at all, and only then does an
      * address get a counter.
      *
+     * $signal is what the signal log keeps beside the address and user —
+     * see SignalLog. The decision never reads it.
+     *
      * @param  int|string|null  $userId  the signed-in user this signal came
      *                                   from, when there is one, so the
      *                                   shared-IP guard can tell a carrier
@@ -99,6 +104,7 @@ class AutoBlockService
      *                              it saves repeating two cache reads on a
      *                              path an attacker sets the pace of. Null
      *                              means look it up.
+     * @param  array{path?: ?string, status?: ?int, target_hash?: ?string, target_user_id?: int|string|null, guard?: ?string}  $signal
      * @return bool whether the address is blocked APP-WIDE now — the
      *              scanner-path detector answers the request itself when it
      *              is. A detector with a scope never returns true, because
@@ -106,7 +112,7 @@ class AutoBlockService
      *              block must only be enforced by the route middleware
      *              carrying its scope.
      */
-    public function record(string $detector, string $ip, int|string|null $userId = null, ?bool $blocked = null): bool
+    public function record(string $detector, string $ip, int|string|null $userId = null, ?bool $blocked = null, array $signal = []): bool
     {
         // Fail open, the way BlockedIpMiddleware does. This runs inside the
         // request — in middleware, and in an event listener inside the auth
@@ -115,7 +121,7 @@ class AutoBlockService
         // best-effort layer on top of the app; it is never worth the app
         // itself. Losing a few counts during an outage is the right trade.
         try {
-            return $this->detect($detector, $ip, $userId, $blocked);
+            return $this->detect($detector, $ip, $userId, $blocked, $signal);
         } catch (\Throwable $e) {
             $this->reportDetectorFailure($e);
 
@@ -260,8 +266,10 @@ class AutoBlockService
     /**
      * Count one signal and decide. See record(), which is this behind a
      * fail-open guard.
+     *
+     * @param  array{path?: ?string, status?: ?int, target_hash?: ?string, target_user_id?: int|string|null, guard?: ?string}  $signal
      */
-    private function detect(string $detector, string $ip, int|string|null $userId, ?bool $blocked = null): bool
+    private function detect(string $detector, string $ip, int|string|null $userId, ?bool $blocked = null, array $signal = []): bool
     {
         if (! config('watchtower.auto_block.enabled', false)) {
             return false;
@@ -326,6 +334,12 @@ class AutoBlockService
         if ($userId !== null) {
             $this->hits->recordUser($detector, $counted, $userId, $windowSeconds);
         }
+
+        // Logged here, after the count, so the log holds exactly what was
+        // counted: nothing a disabled detector or an already-blocked address
+        // sent, and every signal that fell short. Only buffered — see
+        // SignalLog.
+        $this->signals->push($detector, $ip, $userId, $signal);
 
         if ($hits < $threshold) {
             return false;

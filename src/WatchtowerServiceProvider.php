@@ -48,6 +48,7 @@ use Watchtower\Services\OffenceLedger;
 use Watchtower\Services\UserAgentFilter;
 use Watchtower\Support\FailureWindow;
 use Watchtower\Support\HitWindow;
+use Watchtower\Support\SignalLog;
 use Watchtower\Support\SyncSignature;
 
 class WatchtowerServiceProvider extends PackageServiceProvider
@@ -67,6 +68,7 @@ class WatchtowerServiceProvider extends PackageServiceProvider
             ->hasMigration('create_blacklisted_ips_table')
             ->hasMigration('create_ip_offences_table')
             ->hasMigration('create_watchtower_alert_digest_table')
+            ->hasMigration('create_watchtower_signals_table')
             ->hasMigration('update_blacklisted_ips_table_add_hits')
             ->hasMigration('update_blacklisted_ips_table_add_scope')
             ->hasMigration('update_blacklisted_ips_table_source_feed')
@@ -82,6 +84,10 @@ class WatchtowerServiceProvider extends PackageServiceProvider
         $this->app->singleton(AutoBlockService::class);
         $this->app->singleton(HitWindow::class);
         $this->app->singleton(OffenceLedger::class);
+        // Singleton so the request's rows are still there when terminating()
+        // flushes them; flush() empties it, so nothing carries over to the
+        // next request on a long-lived worker.
+        $this->app->singleton(SignalLog::class);
         // Singleton so the deny/allow patterns compile once per worker
         // rather than once per request.
         $this->app->singleton(UserAgentFilter::class);
@@ -112,6 +118,13 @@ class WatchtowerServiceProvider extends PackageServiceProvider
         Event::listen(IpUnblocked::class, DispatchUnblockToTargets::class);
 
         $this->registerDetectorListeners();
+
+        // After the response is sent, so the signal log never holds up a
+        // request. Costs nothing when no detector counted anything.
+        // Type-hinted rather than resolved off $this->app: terminate() calls
+        // this through the app that handled the request, which under Octane
+        // is a per-request sandbox, not the app the provider booted with.
+        $this->app->terminating(fn (SignalLog $log) => $log->flush());
 
         if (config('watchtower.auto_block.enabled', false)) {
             Schedule::call(fn () => $this->app->make(AutoBlockService::class)->run())

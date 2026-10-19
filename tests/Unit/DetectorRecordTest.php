@@ -14,6 +14,7 @@ use Watchtower\Services\BlacklistService;
 use Watchtower\Services\OffenceLedger;
 use Watchtower\Support\BlockScope;
 use Watchtower\Support\HitWindow;
+use Watchtower\Support\SignalLog;
 
 beforeEach(function () {
     config()->set('cache.default', 'array');
@@ -39,6 +40,7 @@ beforeEach(function () {
         new BlacklistService(new BlacklistCache),
         $this->hits,
         new OffenceLedger,
+        app(SignalLog::class),
     );
 });
 
