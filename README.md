@@ -17,7 +17,7 @@
 
 - **Fast where it matters.** Every request is checked against your cache before sessions, auth or routing run. The database is never queried per request.
 - **One block, every environment.** Production, staging and the rest share one blocklist over signed requests.
-- **Automatic blocking that starts as a dry run.** Detectors and log rules report what they *would* block until you arm them, and `watchtower:simulate` backtests a rule against your log history first.
+- **Automatic blocking that starts as a dry run.** Detectors and log rules report what they *would* block until you arm them, and `watchtower:simulate` backtests a rule against your log history, or a detector against its signal log, first.
 - **Careful with real people.** It won't auto-block an address that many signed-in users share, and you can block an address from your login routes only instead of the whole app.
 - **Nothing to build or host.** A management page with no JavaScript and a JSON API. [LogScope](https://github.com/AhmedMerza/laravel-logscope) is optional: with it, log-based rules and `watchtower:simulate` can read your log history.
 
@@ -84,7 +84,7 @@ A global middleware checks each request against the cache right after `TrustProx
 | **Cross-environment sync** | A master/satellite setup that shares blocks between environments | [Sync](docs/sync.md) |
 | **Attack-tool filter** | Rejects sqlmap, Nikto, WPScan, masscan and zgrab. On by default | [User-Agents](docs/user-agents.md) |
 | **Auto-block** | Real-time detectors (failed logins, lockouts, scanner paths, 404 bursts) and rules over your logs | [Auto-Block](docs/auto-block.md) |
-| **Backtesting** | `watchtower:simulate` replays a rule over past logs before you arm it | [Backtesting](docs/auto-block.md#backtesting-a-rule-before-you-arm-it) |
+| **Backtesting** | `watchtower:simulate` replays a rule over past logs, or a detector over its signal log, before you arm it | [Backtesting](docs/auto-block.md#backtesting-a-rule-before-you-arm-it) |
 | **Shared-IP guard** | Holds back an auto-block on an address several signed-in users share | [Shared IPs](docs/auto-block.md#shared-ips) |
 | **Escalating durations** | Longer blocks for addresses that come back | [Escalation](docs/auto-block.md#escalating-durations) |
 | **Public blocklists** | Imports Spamhaus DROP or FireHOL level1 daily. Off by default, and never imports private ranges | [Feeds](docs/feeds.md) |

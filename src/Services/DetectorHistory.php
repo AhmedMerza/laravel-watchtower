@@ -215,7 +215,7 @@ class DetectorHistory
      * @param  list<string>  $ips
      * @return array<string, int>
      */
-    private static function usersAt(string $table, array $ips, CarbonInterface $from, CarbonInterface $to): array
+    public static function usersAt(string $table, array $ips, CarbonInterface $from, CarbonInterface $to): array
     {
         $counts = [];
 

@@ -36,8 +36,12 @@ final class KeysetStream
         $lastId = null;
 
         while (true) {
+            // From the keyset position once there is one, not from $from:
+            // the OR below is an exact filter but not an index bound on every
+            // engine, and a page that seeks from $from walks every row the
+            // pages before it already read.
             $page = (clone $query)
-                ->where('occurred_at', '>=', $from)
+                ->where('occurred_at', '>=', $lastAt ?? $from)
                 ->where('occurred_at', '<=', $to)
                 ->orderBy('occurred_at')
                 ->orderBy('id')

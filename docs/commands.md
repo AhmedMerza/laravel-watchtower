@@ -42,10 +42,12 @@ php artisan watchtower:import-firewall --commit
 php artisan watchtower:import-firewall --undo --commit   # remove what an import added
 
 # Backtest the auto-block rules against the log history you already have,
-# and report what the detectors saw in warn mode.
+# and replay the detectors from the signal log (or, with it off, report
+# what they saw in warn mode).
 # Read-only — it writes nothing, whatever mode the rules are in.
 php artisan watchtower:simulate --days=7
 php artisan watchtower:simulate --rule=0 --json
+php artisan watchtower:simulate --detector=response_bursts --count=20 --window=1
 ```
 
 To turn on a feed, see [Public Blocklist Feeds](feeds.md).

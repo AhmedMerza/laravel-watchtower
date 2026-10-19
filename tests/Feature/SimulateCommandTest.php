@@ -14,6 +14,7 @@ use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 use Watchtower\Listeners\DetectAuthFailures;
 use Watchtower\Services\AutoBlockService;
+use Watchtower\Support\SignalLog;
 
 beforeEach(function () {
     Carbon::setTestNow('2026-09-21 12:00:00');
@@ -895,3 +896,342 @@ it('says a detector switched to warn from the management page is warning, not bl
         ->doesntExpectOutputToContain('In block mode its real blocks')
         ->assertSuccessful();
 });
+
+/** One counted signal in the signal log, $minutesAgo ago. */
+function loggedSignal(string $ip, float $minutesAgo, ?string $userId = null, string $detector = 'response_bursts'): void
+{
+    DB::table(SignalLog::TABLE)->insert([
+        'detector'    => $detector,
+        'ip'          => $ip,
+        'user_id'     => $userId,
+        'occurred_at' => now()->subSeconds((int) round($minutesAgo * 60)),
+    ]);
+}
+
+it('replays a detector from the signal log, at its own settings or at overrides (#177)', function () {
+    config()->set('watchtower.auto_block.signal_log.enabled', true);
+    onlyDetector('response_bursts', ['count' => 3, 'window_minutes' => 5]);
+
+    foreach ([30, 29.9, 29.8] as $m) {
+        loggedSignal('10.0.0.9', $m);
+    }
+
+    $this->artisan('watchtower:simulate')
+        ->assertSuccessful()
+        ->expectsOutputToContain('replayed from the signal log')
+        ->expectsOutputToContain('Detector response_bursts [warn] — 3 in 5 min, shared IP 3')
+        ->expectsTable(
+            ['IP', 'Crossings', 'First', 'Last', 'Signed-in users', 'In block mode'],
+            [['10.0.0.9', 1, '2026-09-21 11:30', '2026-09-21 11:30', 0, 'blocked']],
+        )
+        ->doesntExpectOutputToContain('observed, not simulated');
+
+    $this->artisan('watchtower:simulate --detector=response_bursts --count=4 --shared-ip-users=0')
+        ->assertSuccessful()
+        ->expectsOutputToContain('Detector response_bursts [warn] — 4 in 5 min, shared IP off (overridden)')
+        ->expectsOutputToContain('No crossings.');
+});
+
+it('reproduces the lines the live engine wrote when replayed at the same settings (#177)', function () {
+    // The check #175 asks of the log: drive the real engine in warn mode,
+    // keep its would-have-blocked lines the way LogScope does, then compare
+    // what simulate observes with what it replays from the signal log.
+    config()->set('watchtower.auto_block.signal_log.enabled', true);
+    config()->set('watchtower.auto_block.block_duration_minutes', 10);
+    onlyDetector('response_bursts', ['count' => 3, 'window_minutes' => 15, 'shared_ip_user_threshold' => 2]);
+
+    Event::listen(MessageLogged::class, function (MessageLogged $log): void {
+        if ($log->message === AutoBlockService::WOULD_HAVE_BLOCKED_MESSAGE) {
+            logEntry($log->context['ip'], [
+                'level'   => $log->level,
+                'message' => $log->message,
+                'context' => json_encode($log->context),
+            ]);
+        }
+    });
+
+    $engine = app(AutoBlockService::class);
+    $start = now()->copy()->subHours(3);
+    $at = function (int $seconds, string $ip, ?int $user = null) use ($engine, $start): void {
+        Carbon::setTestNow($start->copy()->addSeconds($seconds));
+        $engine->record('response_bursts', $ip, $user);
+    };
+
+    // A crossing, then a full count held back, then the first hit past the
+    // 10-minute hold crosses again: that window, opened at 30s, has 4.
+    foreach ([0, 10, 20, 30, 40, 50, 630, 640] as $s) {
+        $at($s, '10.0.0.1');
+    }
+
+    // A crossing, then one hit past the hold: the counter restarted at the
+    // crossing, so it stands at 1 rather than crossing again.
+    foreach ([0, 10, 20, 630] as $s) {
+        $at($s, '10.0.0.2');
+    }
+
+    // Three addresses in one /64 share a counter.
+    foreach (['2001:db8::1', '2001:db8::2', '2001:db8::3'] as $i => $ip) {
+        $at(1200 + $i, $ip);
+    }
+
+    // Two signed-in users, twice: block mode's guard would have held both
+    // back, and re-measures rather than holds, so warn mode does too. Last,
+    // because HitWindow dates its user set by the wall clock.
+    foreach ([5, 6, 5, 6, 5, 6] as $i => $user) {
+        $at(1800 + $i, '10.0.0.3', $user);
+    }
+
+    app(SignalLog::class)->flush();
+    Carbon::setTestNow('2026-09-21 12:00:00');
+
+    $offenders = function (): array {
+        expect(Artisan::call('watchtower:simulate', ['--json' => true]))->toBe(0);
+        $json = json_decode(Artisan::output(), true, flags: JSON_THROW_ON_ERROR);
+
+        return array_map(static function (array $o): array {
+            sort($o['user_ids']);
+
+            return $o;
+        }, $json['detectors']['response_bursts']['offenders']);
+    };
+
+    $replayed = $offenders();
+    config()->set('watchtower.auto_block.signal_log.enabled', false);
+    $observed = $offenders();
+
+    expect($replayed)->toBe($observed)
+        ->and(array_column($replayed, 'reports', 'ip'))->toBe(['10.0.0.1' => 2, '10.0.0.3' => 2, '10.0.0.2' => 1, '2001:db8::3' => 1])
+        ->and(array_column($replayed, 'outcomes', 'ip')['10.0.0.3'])->toBe(['shared IP' => 2]);
+});
+
+it('says why it observed rather than replayed the detectors (#177)', function () {
+    onlyDetector('response_bursts');
+    wouldHaveBlocked('10.0.0.9', 'response_bursts', 30);
+
+    $this->artisan('watchtower:simulate')
+        ->assertSuccessful()
+        ->expectsOutputToContain('observed, not simulated')
+        ->expectsOutputToContain('the signal log is off');
+
+    config()->set('watchtower.auto_block.signal_log.enabled', true);
+
+    $this->artisan('watchtower:simulate')
+        ->assertSuccessful()
+        ->expectsOutputToContain('the signal log holds nothing from the period');
+});
+
+it('refuses overrides it cannot honour (#177)', function (string $args) {
+    config()->set('watchtower.auto_block.signal_log.enabled', true);
+    onlyDetector('response_bursts');
+    oneRule();
+    loggedSignal('10.0.0.9', 30);
+
+    $this->artisan("watchtower:simulate {$args}")->assertFailed();
+})->with([
+    'override without a detector' => '--count=3',
+    'count of zero'               => '--detector=response_bursts --count=0',
+    'window not a number'         => '--detector=response_bursts --window=five',
+    'negative user threshold'     => '--detector=response_bursts --shared-ip-users=-1',
+    'unknown detector'            => '--detector=nope',
+    'rule and detector'           => '--rule=0 --detector=response_bursts',
+]);
+
+it('refuses overrides when the signal log is off (#177)', function () {
+    onlyDetector('response_bursts');
+
+    $this->artisan('watchtower:simulate --detector=response_bursts --count=3')
+        ->assertFailed()
+        ->expectsOutputToContain('the signal log is off');
+});
+
+it('replays the detectors without LogScope, skipping the rules (#177)', function () {
+    config()->set('watchtower.auto_block.signal_log.enabled', true);
+    onlyDetector('response_bursts', ['count' => 1]);
+    oneRule();
+    loggedSignal('10.0.0.9', 30);
+    Schema::drop('log_entries');
+
+    $this->artisan('watchtower:simulate')
+        ->assertSuccessful()
+        ->expectsOutputToContain('Rules skipped')
+        ->expectsOutputToContain('replayed from the signal log')
+        ->expectsOutputToContain('LogScope isn\'t installed');
+
+    expect(Artisan::call('watchtower:simulate', ['--json' => true]))->toBe(0);
+    $json = json_decode(Artisan::output(), true, flags: JSON_THROW_ON_ERROR);
+
+    expect($json['detector_source'])->toBe('signal_log')
+        ->and($json['table'])->toBeNull()
+        ->and($json['rules'])->toBe([])
+        ->and($json['detectors']['response_bursts']['offenders'][0]['ip'])->toBe('10.0.0.9');
+});
+
+it('warns when the period reaches back past the oldest signal (#177)', function () {
+    config()->set('watchtower.auto_block.signal_log.enabled', true);
+    onlyDetector('response_bursts');
+    loggedSignal('10.0.0.9', 2 * 24 * 60);
+
+    $this->artisan('watchtower:simulate --days=7')
+        ->assertSuccessful()
+        ->expectsOutputToContain('The signal log only reaches back to 2026-09-19 12:00');
+
+    $this->artisan('watchtower:simulate --days=1')
+        ->assertSuccessful()
+        ->doesntExpectOutputToContain('only reaches back');
+});
+
+it('reproduces what the live engine did in block mode (#177)', function () {
+    // Block mode's lines are split: a real block is an auto-blocked line,
+    // a held-back one a would-have-blocked line naming its hold-back. The
+    // replay judges both as one crossing each, so compare per address.
+    config()->set('watchtower.auto_block.signal_log.enabled', true);
+    config()->set('watchtower.never_auto_block', ['10.0.0.4']);
+    onlyDetector('response_bursts', ['mode' => 'block', 'count' => 3, 'window_minutes' => 15, 'shared_ip_user_threshold' => 2]);
+
+    Event::listen(MessageLogged::class, function (MessageLogged $log): void {
+        if (in_array($log->message, [AutoBlockService::AUTO_BLOCKED_MESSAGE, AutoBlockService::WOULD_HAVE_BLOCKED_MESSAGE], true)) {
+            logEntry($log->context['ip'], [
+                'level'   => $log->level,
+                'message' => $log->message,
+                'context' => json_encode($log->context),
+            ]);
+        }
+    });
+
+    $engine = app(AutoBlockService::class);
+    $start = now()->copy()->subHours(3);
+    $at = function (int $seconds, string $ip, ?int $user = null) use ($engine, $start): void {
+        Carbon::setTestNow($start->copy()->addSeconds($seconds));
+        $engine->record('response_bursts', $ip, $user);
+    };
+
+    // Blocked at the 3rd hit; the engine counts nothing after that.
+    foreach ([0, 10, 20, 30, 40, 50] as $s) {
+        $at($s, '10.0.0.1');
+    }
+
+    // Refused by never_auto_block, then held: one decision, not two.
+    foreach ([0, 10, 20, 30, 40, 50] as $s) {
+        $at($s, '10.0.0.4');
+    }
+
+    foreach ([5, 6, 5, 6, 5, 6] as $i => $user) {
+        $at(1800 + $i, '10.0.0.3', $user);
+    }
+
+    app(SignalLog::class)->flush();
+    Carbon::setTestNow('2026-09-21 12:00:00');
+
+    $json = function (): array {
+        expect(Artisan::call('watchtower:simulate', ['--json' => true]))->toBe(0);
+
+        return json_decode(Artisan::output(), true, flags: JSON_THROW_ON_ERROR)['detectors']['response_bursts'];
+    };
+
+    $replayed = array_column($json()['offenders'], 'outcomes', 'ip');
+    config()->set('watchtower.auto_block.signal_log.enabled', false);
+    $observed = $json();
+
+    $live = array_column($observed['offenders'], 'outcomes', 'ip');
+    $live = array_map(static fn (array $o): array => array_combine(
+        array_map(static fn (string $k): string => str_replace('held: ', '', $k), array_keys($o)),
+        $o,
+    ), $live);
+
+    foreach ($observed['blocks'] as $block) {
+        $live[$block['ip']] = ['blocked' => $block['blocks']];
+    }
+
+    ksort($live);
+    ksort($replayed);
+
+    expect($replayed)->toBe($live)
+        ->and($replayed)->toBe([
+            '10.0.0.1' => ['blocked' => 1],
+            '10.0.0.3' => ['shared IP' => 2],
+            '10.0.0.4' => ['never_auto_block' => 1],
+        ]);
+});
+
+it('shows the users LogScope saw at an address for a replayed auth detector (#177)', function () {
+    config()->set('watchtower.auto_block.signal_log.enabled', true);
+    onlyDetector('failed_logins', ['count' => 2]);
+    loggedSignal('10.0.0.9', 30, null, 'failed_logins');
+    loggedSignal('10.0.0.9', 29.9, null, 'failed_logins');
+    logEntry('10.0.0.9', ['user_id' => '41', 'occurred_at' => now()->subHour()]);
+    logEntry('10.0.0.9', ['user_id' => '42', 'occurred_at' => now()->subHour()]);
+
+    $this->artisan('watchtower:simulate')
+        ->assertSuccessful()
+        ->expectsTable(
+            ['IP', 'Crossings', 'First', 'Last', 'Users seen at IP', 'In block mode'],
+            [['10.0.0.9', 1, '2026-09-21 11:30', '2026-09-21 11:30', 2, 'blocked']],
+        );
+
+    expect(Artisan::call('watchtower:simulate', ['--json' => true]))->toBe(0);
+
+    expect(json_decode(Artisan::output(), true)['detectors']['failed_logins']['offenders'][0]['logscope_users'])->toBe(2);
+});
+
+it('reports in --json what each detector was replayed at (#177)', function () {
+    config()->set('watchtower.auto_block.signal_log.enabled', true);
+    config()->set('watchtower.auto_block.shared_ip_user_threshold', 4);
+    onlyDetector('response_bursts', ['count' => 7, 'window_minutes' => 2, 'shared_ip_user_threshold' => 1]);
+    config()->set('watchtower.auto_block.detectors.scanner_paths', ['enabled' => true, 'mode' => 'warn']);
+    loggedSignal('10.0.0.9', 2 * 24 * 60);
+
+    $run = function (array $options): array {
+        expect(Artisan::call('watchtower:simulate', ['--json' => true, ...$options]))->toBe(0);
+
+        return json_decode(Artisan::output(), true, flags: JSON_THROW_ON_ERROR);
+    };
+
+    $json = $run([]);
+    $pick = static fn (array $d): array => array_intersect_key($d, array_flip(['threshold', 'window_minutes', 'shared_ip_user_threshold', 'overridden']));
+
+    expect($pick($json['detectors']['response_bursts']))->toBe(['threshold' => 7, 'window_minutes' => 2, 'shared_ip_user_threshold' => 1, 'overridden' => false])
+        // Unset keys fall back as the engine's do: count 1, 5 minutes, the global guard.
+        ->and($pick($json['detectors']['scanner_paths']))->toBe(['threshold' => 1, 'window_minutes' => 5, 'shared_ip_user_threshold' => 4, 'overridden' => false])
+        ->and($json['signal_log_oldest'])->toBe('2026-09-19T12:00:00+00:00')
+        ->and($json['rules_skipped'])->toBeFalse();
+
+    $json = $run(['--detector' => 'response_bursts', '--window' => '9']);
+
+    expect($pick($json['detectors']['response_bursts']))->toBe(['threshold' => 7, 'window_minutes' => 9, 'shared_ip_user_threshold' => 1, 'overridden' => true]);
+});
+
+it('says a replay cannot see past a real block (#177)', function () {
+    config()->set('watchtower.auto_block.signal_log.enabled', true);
+    onlyDetector('response_bursts', ['mode' => 'block', 'count' => 1]);
+    loggedSignal('10.0.0.9', 30);
+    autoBlocked('10.0.0.9', 'response_bursts', 30);
+
+    $this->artisan('watchtower:simulate')
+        ->assertSuccessful()
+        ->expectsOutputToContain('The log holds nothing from these addresses while they were blocked');
+});
+
+it('observes rather than replays when the signal log table is missing (#177)', function () {
+    config()->set('watchtower.auto_block.signal_log.enabled', true);
+    onlyDetector('response_bursts');
+    Schema::drop(SignalLog::TABLE);
+
+    $this->artisan('watchtower:simulate')
+        ->assertSuccessful()
+        ->expectsOutputToContain('observed, not simulated')
+        ->expectsOutputToContain('run the migrations');
+});
+
+it('does not replay a detector the engine would not run (#177)', function (array $settings, string $why) {
+    config()->set('watchtower.auto_block.signal_log.enabled', true);
+    onlyDetector('response_bursts', ['count' => 1, ...$settings]);
+    loggedSignal('10.0.0.9', 30);
+
+    $this->artisan('watchtower:simulate')
+        ->assertSuccessful()
+        ->expectsOutputToContain("Not replayed: {$why}")
+        ->doesntExpectOutputToContain('10.0.0.9');
+})->with([
+    'disabled'         => [['mode' => 'disabled'], 'its mode is `disabled`'],
+    'undeclared scope' => [['scope' => 'nope'], 'its scope isn\'t declared'],
+]);
