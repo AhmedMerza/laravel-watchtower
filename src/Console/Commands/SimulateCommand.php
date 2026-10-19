@@ -11,7 +11,9 @@ use Symfony\Component\Console\Formatter\OutputFormatter;
 use Watchtower\Services\AutoBlockService;
 use Watchtower\Services\DetectorHistory;
 use Watchtower\Services\RuleSimulator;
+use Watchtower\Services\SignalReplay;
 use Watchtower\Support\BlockScope;
+use Watchtower\Support\SignalLog;
 
 /**
  * Answers "what would this rule have blocked last week" without waiting a
@@ -23,13 +25,15 @@ use Watchtower\Support\BlockScope;
  * Laravel firewall package can do this, for the plain reason that none of
  * them has the data.
  *
- * The real-time detectors can't be replayed — they count signals LogScope
- * never stored — so for them this reports what they observed in warn mode
- * instead, and says so (#123). See DetectorHistory.
+ * The real-time detectors count signals LogScope never stored. With the
+ * signal log on they are replayed from it (#177), at their own settings or
+ * at --count/--window/--shared-ip-users; without it this reports what they
+ * observed in warn mode instead, and says so (#123). See SignalReplay and
+ * DetectorHistory.
  *
- * READ-ONLY, and structurally so — this talks to RuleSimulator and
- * DetectorHistory, which have no path to BlacklistService and issue nothing
- * but SELECTs. A backtest that
+ * READ-ONLY, and structurally so — this talks to RuleSimulator,
+ * SignalReplay and DetectorHistory, which have no path to BlacklistService
+ * and issue nothing but SELECTs. A backtest that
  * could block somebody would be a trap, since the reason to run it is that
  * you don't yet trust the rule.
  */
@@ -44,13 +48,18 @@ class SimulateCommand extends Command
     protected $signature = 'watchtower:simulate
                             {--days=7 : How far back to replay}
                             {--rule= : Replay only this rule index, and skip the detectors}
+                            {--detector= : Replay only this detector, and skip the rules}
+                            {--count= : With --detector: replay at this many signals instead of its own count}
+                            {--window= : With --detector: replay over this many minutes instead of its own window}
+                            {--shared-ip-users= : With --detector: replay at this shared-IP user threshold (0 = off)}
                             {--json : Emit machine-readable JSON instead of tables}';
 
-    protected $description = 'Backtest the auto-block rules, and report what the detectors saw, from LogScope history. Writes nothing.';
+    protected $description = 'Backtest the auto-block rules from LogScope history, and the detectors from the signal log. Writes nothing.';
 
     public function __construct(
         private readonly RuleSimulator $simulator,
         private readonly DetectorHistory $history,
+        private readonly SignalReplay $replay,
     ) {
         parent::__construct();
     }
@@ -65,12 +74,31 @@ class SimulateCommand extends Command
             return self::FAILURE;
         }
 
+        $overrides = $this->overrides();
+
+        if (is_string($overrides)) {
+            $this->error($overrides);
+
+            return self::FAILURE;
+        }
+
+        $to = now();
+        $from = $to->copy()->subDays($days);
         $table = $this->simulator->table();
+        $logScope = Schema::hasTable($table);
+        $whyNotReplayed = $this->whyNotReplayed($from, $to);
+
+        if ($overrides !== [] && $whyNotReplayed !== null) {
+            $this->error("--count, --window and --shared-ip-users replay the signal log, and {$whyNotReplayed}.");
+
+            return self::FAILURE;
+        }
 
         // Checked rather than left to blow up mid-report: the overwhelmingly
         // likely cause is that LogScope isn't installed, and a schema error
-        // from deep in a query builder doesn't say that.
-        if (! Schema::hasTable($table)) {
+        // from deep in a query builder doesn't say that. The signal log is
+        // history enough for the detectors on its own.
+        if (! $logScope && $whyNotReplayed !== null) {
             $this->error("The log table `{$table}` doesn't exist, so there is no history to replay.");
             $this->line('This command reads LogScope\'s log table. Install ahmedmerza/logscope, or point');
             $this->line('`logscope.table` at wherever your log entries actually live.');
@@ -88,8 +116,28 @@ class SimulateCommand extends Command
             return self::FAILURE;
         }
 
-        $to = now();
-        $from = $to->copy()->subDays($days);
+        $detector = $this->option('detector');
+        $detector = is_string($detector) && $detector !== '' ? $detector : null;
+
+        if ($detector !== null && ($this->option('rule') ?? '') !== '') {
+            $this->error('--rule and --detector each narrow the report to one thing; pick one.');
+
+            return self::FAILURE;
+        }
+
+        if ($detector !== null && ! is_array(config("watchtower.auto_block.detectors.{$detector}"))) {
+            $this->error('--detector must name a detector under auto_block.detectors.');
+
+            return self::FAILURE;
+        }
+
+        // --detector asks about one detector; the rules would be noise
+        // around it. Without LogScope there is nothing to replay them from.
+        $skippedRules = ! $logScope && $rules !== [] && $detector === null;
+
+        if ($detector !== null || ! $logScope) {
+            $rules = [];
+        }
         $duration = (int) config('watchtower.auto_block.block_duration_minutes', 60);
         $sharedIpThreshold = $this->sharedIpThreshold(
             config('watchtower.auto_block.shared_ip_user_threshold', AutoBlockService::DEFAULT_SHARED_IP_USER_THRESHOLD),
@@ -105,10 +153,10 @@ class SimulateCommand extends Command
 
         // --rule asks about one rule; the detectors would be noise around it.
         $detectors = $this->option('rule') === null || $this->option('rule') === ''
-            ? $this->detectors($table, $from, $to, $globalMode)
+            ? $this->detectors($logScope ? $table : null, $from, $to, $globalMode, $whyNotReplayed === null, $detector, $overrides, $duration, $sharedIpThreshold)
             : ['detectors' => [], 'unreadable' => 0];
 
-        if ($rules === [] && $detectors['detectors'] === []) {
+        if ($rules === [] && $detectors['detectors'] === [] && ! $skippedRules) {
             $this->warn('No auto-block rules or detectors are configured, so there is nothing to backtest.');
             $this->line('Rules live under `auto_block.rules` and detectors under `auto_block.detectors` in config/watchtower.php.');
 
@@ -146,7 +194,8 @@ class SimulateCommand extends Command
                 'from'                     => $from->toIso8601String(),
                 'to'                       => $to->toIso8601String(),
                 'days'                     => $days,
-                'table'                    => $table,
+                'table'                    => $logScope ? $table : null,
+                'detector_source'          => $whyNotReplayed === null ? 'signal_log' : 'logscope',
                 'block_duration_minutes'   => $duration,
                 'shared_ip_user_threshold' => $sharedIpThreshold,
                 'rules'                    => $results,
@@ -157,12 +206,16 @@ class SimulateCommand extends Command
             return self::SUCCESS;
         }
 
+        if ($skippedRules) {
+            $this->warn("Rules skipped: they replay LogScope's log table, and `{$table}` doesn't exist.");
+        }
+
         if ($results !== []) {
             $this->report($results, $from->toDateTimeString(), $to->toDateTimeString(), $days, $sharedIpThreshold);
         }
 
         if ($detectors['detectors'] !== []) {
-            $this->reportDetectors($detectors['detectors'], $detectors['unreadable'], $days, $results !== []);
+            $this->reportDetectors($detectors['detectors'], $detectors['unreadable'], $days, $results !== [] || $skippedRules, $whyNotReplayed, $from, $logScope);
         }
 
         return self::SUCCESS;
@@ -173,11 +226,27 @@ class SimulateCommand extends Command
      * window and has since been switched off — a report about last week
      * shouldn't hide what last week's config did.
      *
+     * Replayed from the signal log when $replay, else observed in LogScope.
+     * Real blocks come from LogScope either way, when it is there.
+     *
+     * @param  ?string  $table  LogScope's table, null when it doesn't exist
+     * @param  array{count?: int, window?: int, shared_ip_users?: int}  $overrides
      * @return array{detectors: array<string, array<string, mixed>>, unreadable: int}
      */
-    private function detectors(string $table, CarbonInterface $from, CarbonInterface $to, string $globalMode): array
-    {
-        $observed = $this->history->observed($table, $from, $to);
+    private function detectors(
+        ?string $table,
+        CarbonInterface $from,
+        CarbonInterface $to,
+        string $globalMode,
+        bool $replay,
+        ?string $only,
+        array $overrides,
+        int $duration,
+        int $globalSharedIpThreshold,
+    ): array {
+        $observed = $table === null
+            ? ['detectors' => [], 'blocks' => [], 'unreadable' => 0]
+            : $this->history->observed($table, $from, $to);
 
         /** @var array<string, mixed> $configured */
         $configured = (array) config('watchtower.auto_block.detectors', []);
@@ -189,6 +258,10 @@ class SimulateCommand extends Command
         $names = array_values(array_unique([...$names, ...array_keys($observed['detectors']), ...array_keys($observed['blocks'])]));
         sort($names);
 
+        if ($only !== null) {
+            $names = [$only];
+        }
+
         $detectors = [];
 
         foreach ($names as $name) {
@@ -196,20 +269,107 @@ class SimulateCommand extends Command
 
             $mode = $this->mode($settings['mode'] ?? null) ?? $globalMode;
             $switched = $mode === 'block' && $this->switchedToWarn($name);
+            $mode = $switched ? 'warn' : $mode;
+            // Raw, not BlockScope::normalize(): a report must not throw
+            // over a scope typo the engine already refuses loudly.
+            $scope = is_scalar($settings['scope'] ?? null) ? trim((string) $settings['scope']) : BlockScope::GLOBAL;
 
             $detectors[$name] = [
                 'enabled'          => (bool) ($settings['enabled'] ?? false),
-                'mode'             => $switched ? 'warn' : $mode,
+                'mode'             => $mode,
                 'switched_to_warn' => $switched,
-                // Raw, not BlockScope::normalize(): a report must not throw
-                // over a scope typo the engine already refuses loudly.
-                'scope'            => is_scalar($settings['scope'] ?? null) ? trim((string) $settings['scope']) : BlockScope::GLOBAL,
+                'scope'            => $scope,
                 'offenders'        => $observed['detectors'][$name] ?? [],
                 'blocks'           => $observed['blocks'][$name] ?? [],
             ];
+
+            if (! $replay) {
+                continue;
+            }
+
+            // The engine's own defaults and resolution order, so a replay
+            // with no overrides is judged by what the engine would judge by.
+            $judgedBy = [
+                'threshold'                => $overrides['count'] ?? max(1, (int) ($settings['count'] ?? 1)),
+                'window_minutes'           => $overrides['window'] ?? max(1, (int) ($settings['window_minutes'] ?? 5)),
+                'shared_ip_user_threshold' => $overrides['shared_ip_users'] ?? (isset($settings['shared_ip_user_threshold'])
+                    ? $this->sharedIpThreshold($settings['shared_ip_user_threshold'])
+                    : $globalSharedIpThreshold),
+                'overridden'               => $overrides !== [],
+            ];
+
+            $offenders = $this->replay->replay(
+                $name,
+                $judgedBy['threshold'],
+                $judgedBy['window_minutes'],
+                $judgedBy['shared_ip_user_threshold'],
+                $mode,
+                $scope,
+                $duration,
+                $from,
+                $to,
+            );
+
+            // As DetectorHistory does for observed lines (#141): an auth
+            // detector never sees a user, so who LogScope saw is the count.
+            if ($table !== null && in_array($name, AutoBlockService::USERLESS_DETECTORS, true)) {
+                $usersAt = DetectorHistory::usersAt($table, array_column($offenders, 'ip'), $from, $to);
+
+                $offenders = array_map(static fn (array $o): array => [...$o, 'logscope_users' => $usersAt[$o['ip']] ?? 0], $offenders);
+            }
+
+            $detectors[$name] = [...$detectors[$name], ...$judgedBy, 'offenders' => $offenders];
         }
 
         return ['detectors' => $detectors, 'unreadable' => $observed['unreadable']];
+    }
+
+    /**
+     * --count, --window and --shared-ip-users, or the error to print.
+     *
+     * @return array{count?: int, window?: int, shared_ip_users?: int}|string
+     */
+    private function overrides(): array|string
+    {
+        $overrides = [];
+
+        foreach (['count' => 1, 'window' => 1, 'shared-ip-users' => 0] as $option => $min) {
+            $value = $this->option($option);
+
+            if ($value === null || $value === '') {
+                continue;
+            }
+
+            if (! is_string($value) || ! ctype_digit($value) || (int) $value < $min) {
+                return $min === 0
+                    ? "--{$option} must be a whole number, 0 to switch the guard off."
+                    : "--{$option} must be a whole number of at least 1.";
+            }
+
+            $overrides[str_replace('-', '_', $option)] = (int) $value;
+        }
+
+        $detector = $this->option('detector');
+
+        if ($overrides !== [] && (! is_string($detector) || $detector === '')) {
+            return '--count, --window and --shared-ip-users replay one detector; name it with --detector.';
+        }
+
+        return $overrides;
+    }
+
+    /**
+     * Why the detectors can't be replayed from the signal log, or null when
+     * they can (#177).
+     */
+    private function whyNotReplayed(CarbonInterface $from, CarbonInterface $to): ?string
+    {
+        return match (true) {
+            ! config('watchtower.auto_block.signal_log.enabled', false) => 'the signal log is off (WATCHTOWER_SIGNAL_LOG)',
+            ! Schema::hasTable(SignalLog::TABLE) => 'the signal log table `'.SignalLog::TABLE.'` doesn\'t exist — run the migrations',
+            ! $this->replay->covers($from, $to) => 'the signal log holds nothing from the period',
+            default => null,
+        };
     }
 
     /**
@@ -229,17 +389,45 @@ class SimulateCommand extends Command
     /**
      * @param  array<string, array<string, mixed>>  $detectors
      */
-    private function reportDetectors(array $detectors, int $unreadable, int $days, bool $afterRules): void
-    {
+    private function reportDetectors(
+        array $detectors,
+        int $unreadable,
+        int $days,
+        bool $afterRules,
+        ?string $whyNotReplayed,
+        CarbonInterface $from,
+        bool $logScope,
+    ): void {
         if ($afterRules) {
             $this->newLine();
         }
 
-        $this->info(sprintf('Detectors over %d day(s) — observed, not simulated.', $days));
-        $this->line('They count failed logins, lockouts, response statuses, request paths and User-Agents,');
-        $this->line('none of which LogScope stores, so they can\'t be replayed. This is what they reported');
-        $this->line('live: one would-have-blocked line per block they were held back from, and since');
-        $this->line('v0.16.0 one auto-blocked line per real block.');
+        $replayed = $whyNotReplayed === null;
+
+        if ($replayed) {
+            $this->info(sprintf('Detectors over %d day(s) — replayed from the signal log.', $days));
+            $this->line('Each crossing is one decision the detector would have made: counted the way the');
+            $this->line('engine counts, held the way it holds. In block mode says what block mode would have');
+            $this->line('done with it. Each detector is replayed on its own, and escalation isn\'t modelled.');
+
+            $oldest = $this->replay->oldest();
+
+            if ($oldest !== null && $oldest->greaterThan($from)) {
+                $this->warn(sprintf(
+                    'The signal log only reaches back to %s (auto_block.signal_log.retention_days), so the replay starts there.',
+                    self::minutePrecision($oldest->toIso8601String()),
+                ));
+            }
+
+            if (! $logScope) {
+                $this->line('LogScope isn\'t installed, so real blocks and the users seen at an address aren\'t shown.');
+            }
+        } else {
+            $this->info(sprintf('Detectors over %d day(s) — observed, not simulated.', $days));
+            $this->line("They can't be replayed: {$whyNotReplayed}. This is what they reported live:");
+            $this->line('one would-have-blocked line per block they were held back from, and since v0.16.0');
+            $this->line('one auto-blocked line per real block. Switch the signal log on to replay them.');
+        }
 
         // Listed anyway, as the rules are replayed anyway: the report is how
         // you decide whether to switch it on. It just can't have history.
@@ -248,9 +436,16 @@ class SimulateCommand extends Command
         foreach ($detectors as $name => $detector) {
             $this->newLine();
             $this->line(sprintf(
-                'Detector %s [%s]%s',
+                'Detector %s [%s]%s%s',
                 $name,
                 $detector['mode'],
+                $replayed ? sprintf(
+                    ' — %d in %d min, shared IP %s%s',
+                    $detector['threshold'],
+                    $detector['window_minutes'],
+                    $detector['shared_ip_user_threshold'] === 0 ? 'off' : $detector['shared_ip_user_threshold'],
+                    $detector['overridden'] ? ' (overridden)' : '',
+                ) : '',
                 match (true) {
                     ! $detector['enabled']        => ' — switched off now',
                     $detector['switched_to_warn'] => ' — switched to warn on the management page',
@@ -262,6 +457,20 @@ class SimulateCommand extends Command
             $offenders = $detector['offenders'];
 
             $this->reportRealBlocks($detector['blocks']);
+
+            // Nothing is counted from a blocked address, so the log goes quiet
+            // where a real block stood: a replay at a higher threshold can't
+            // see what the address would have done instead.
+            if ($replayed && $detector['blocks'] !== []) {
+                $this->line('  The log holds nothing from these addresses while they were blocked, so the replay can\'t');
+                $this->line('  show what they would have done had a higher threshold let them through.');
+            }
+
+            if ($offenders === [] && $replayed) {
+                $this->line('  No crossings.');
+
+                continue;
+            }
 
             if ($offenders === []) {
                 $this->line('  No would-have-blocked reports.');
@@ -287,7 +496,7 @@ class SimulateCommand extends Command
             $users = static fn (array $o): int => $userless ? (int) ($o['logscope_users'] ?? 0) : count($o['user_ids']);
 
             $this->table(
-                ['IP', 'Reports', 'First', 'Last', $userless ? 'Users seen at IP' : 'Signed-in users', 'In block mode'],
+                ['IP', $replayed ? 'Crossings' : 'Reports', 'First', 'Last', $userless ? 'Users seen at IP' : 'Signed-in users', 'In block mode'],
                 array_map(static fn (array $o): array => [
                     $o['ip'],
                     $o['reports'],

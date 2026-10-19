@@ -208,6 +208,8 @@ Two limits:
 - **Blocked addresses stop adding rows.** Once an address is blocked, it is turned away before the detectors run, so the log can't show what a higher threshold would have seen after the real block. Signals logged while a detector ran in warn mode are complete.
 - **Addresses that never get blocked keep writing, in any mode.** That covers a warn-mode detector, an address in `never_auto_block`, and one the shared-IP guard holds back. Each adds a row for every signal it sends until `WATCHTOWER_SIGNAL_LOG_DAYS` ages them out. The rows are kept on purpose: replaying the shared-IP threshold needs them.
 
+`watchtower:simulate` replays the detectors from this log — see [replaying the detectors](#the-detectors-replayed-from-the-signal-log).
+
 `watchtower:cleanup` deletes rows older than `WATCHTOWER_SIGNAL_LOG_DAYS`, including after the log is turned off. What's stored, and why, is in the [security notes](security.md).
 
 ## Log rules
@@ -304,14 +306,61 @@ whole `/64`, which keeps its siblings out for the duration, while the replay
 judges each address on its own rows — so a sibling that kept going shows
 blocks the live `/64` block would already have covered.
 
-### The detectors: observed, not replayed
+### The detectors: replayed from the signal log
 
-The [detectors](#detectors) can't be replayed. They count failed logins,
-lockouts, response statuses, request paths and User-Agents as they happen,
-and LogScope stores log lines, not requests: there is no status column, and
-a request that logged nothing left no row. A replay built from the few
-requests that did log something would mostly report zero and look like a
-clean bill of health.
+With the [signal log](#signal-log) on, `simulate` replays each detector from
+it — at the detector's own settings, or at the ones you want to try:
+
+```
+php artisan watchtower:simulate --days=7
+php artisan watchtower:simulate --detector=response_bursts --count=20 --window=1 --shared-ip-users=2
+```
+
+```
+Detector response_bursts [warn] — 20 in 1 min, shared IP 2 (overridden)
++--------------+-----------+------------------+------------------+-----------------+---------------+
+| IP           | Crossings | First            | Last             | Signed-in users | In block mode |
++--------------+-----------+------------------+------------------+-----------------+---------------+
+| 203.0.113.9  | 4         | 2026-10-13 08:14 | 2026-10-16 17:40 | 0               | blocked       |
+| 198.51.100.7 | 1         | 2026-10-15 11:02 | 2026-10-15 11:02 | 2               | shared IP     |
++--------------+-----------+------------------+------------------+-----------------+---------------+
+```
+
+The replay counts the way the engine counts: a window fixed from its first
+hit, a count that starts again at every decision, an IPv6 address counted
+with the rest of its `/64`, and the signed-in users seen in the window for
+the shared-IP guard. It holds the way the engine holds: a decision warn mode
+or `never_auto_block` held back isn't made again for `block_duration_minutes`,
+a block takes the address out of play for as long, and the shared-IP guard is
+measured afresh at every crossing. Run at the settings that were in force, it
+reproduces the would-have-blocked lines the detector wrote — a test checks
+exactly that.
+
+**Crossings** counts decisions, and the columns after it read as in the
+observed report below. `--count`, `--window` and `--shared-ip-users` (`0` is
+off) need `--detector`, which also leaves the rules out. Real blocks and
+**Users seen at IP** still come from LogScope; without LogScope, the
+detectors are replayed and the rules are skipped.
+
+What it can't see:
+
+- **After a real block.** A blocked address adds no rows, so a higher
+  threshold than the one that blocked it can't show what it would have done
+  next. A detector with real blocks in the period says so.
+- **Past the log's retention.** The log keeps `WATCHTOWER_SIGNAL_LOG_DAYS`
+  (14 by default); a `--days` reaching further back gets a warning.
+- **Other detectors.** Each detector is replayed on its own. Live, a block by
+  one stops every detector counting the address.
+- **Escalation**, as for rules: every block lasts `block_duration_minutes`.
+
+### The detectors without the signal log: observed
+
+With the signal log off, or empty for the period, the [detectors](#detectors)
+can't be replayed. They count failed logins, lockouts, response statuses,
+request paths and User-Agents as they happen, and LogScope stores log lines,
+not requests: there is no status column, and a request that logged nothing
+left no row. A replay built from the few requests that did log something
+would mostly report zero and look like a clean bill of health.
 
 So for each enabled detector, `simulate` reports what it **actually saw**: the
 `would-have-blocked` lines it wrote over `--days`, grouped by address. Those
@@ -380,6 +429,12 @@ LogScope if it captures `watchtower.log_channel` (its default `all` capture
 does). `--rule` narrows the report to one rule and leaves the detectors out.
 
 ### Cost, honestly
+
+A detector replay streams that detector's rows in time order over the
+`(detector, occurred_at)` index, and keeps a few numbers per address that is
+still inside a window, a hold or a block — not per address in the period.
+
+The rest of this section is about rules.
 
 Memory is bounded: each address is replayed through a ring buffer holding at
 most `count` timestamps, so one that logged a million rows costs the same as

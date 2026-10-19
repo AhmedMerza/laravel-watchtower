@@ -594,7 +594,7 @@ class AutoBlockService
         int $durationMinutes,
         array $context,
     ): ?string {
-        $notBlockedBecause = $this->holdBack($mode, $distinctUsers, $sharedIpThreshold);
+        $notBlockedBecause = self::holdBack($mode, $distinctUsers, $sharedIpThreshold);
 
         // A shared address on a scoped rule is the case scopes exist for.
         // Warning and moving on protects the people behind that gateway and
@@ -616,7 +616,7 @@ class AutoBlockService
         // check above runs before every guard — so say what they would have
         // done, or every near miss reads the same (#121).
         if ($notBlockedBecause === 'warn mode') {
-            $context['in_block_mode'] = $this->inBlockMode($ip, $scope, $distinctUsers, $sharedIpThreshold);
+            $context['in_block_mode'] = self::inBlockMode($ip, $scope, $distinctUsers, $sharedIpThreshold);
         }
 
         if ($notBlockedBecause !== null) {
@@ -763,7 +763,7 @@ class AutoBlockService
      * warns on a bad value, and run() resolves it once for a whole tick —
      * reading it per offender would repeat that warning per offender.
      */
-    private function holdBack(string $mode, int $distinctUsers, int $sharedIpThreshold): ?string
+    private static function holdBack(string $mode, int $distinctUsers, int $sharedIpThreshold): ?string
     {
         return match (true) {
             $mode === 'warn' => 'warn mode',
@@ -786,10 +786,13 @@ class AutoBlockService
      * Asks the lists for $ip, not the prefix, for the reason
      * holdStillSpeaksFor() gives: block() checks the address before it is
      * widened.
+     *
+     * Public so SignalReplay judges a replayed crossing with this, not a
+     * copy of it (#177).
      */
-    private function inBlockMode(string $ip, string $scope, int $distinctUsers, int $sharedIpThreshold): string
+    public static function inBlockMode(string $ip, string $scope, int $distinctUsers, int $sharedIpThreshold): string
     {
-        $shared = $this->holdBack('block', $distinctUsers, $sharedIpThreshold) === self::HELD_BY_SHARED_IP;
+        $shared = self::holdBack('block', $distinctUsers, $sharedIpThreshold) === self::HELD_BY_SHARED_IP;
 
         return match (true) {
             $shared && $scope === BlockScope::GLOBAL => self::HELD_BY_SHARED_IP,
