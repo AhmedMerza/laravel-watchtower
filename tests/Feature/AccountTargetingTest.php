@@ -78,7 +78,7 @@ it('fires once one account has failed from enough distinct addresses', function 
     failLogin('192.0.2.3', 'Alice@Example.com ', 7);
 
     Event::assertDispatched(AccountTargeted::class, fn (AccountTargeted $e) => $e->rule === 'one_account'
-        && $e->subject === SignalLog::targetHash(['email' => 'alice@example.com'])
+        && $e->subject === '7'
         && $e->members === ['198.51.100.1', '203.0.113.2', '192.0.2.3']
         && $e->targetUserIds === ['7']
         && $e->guard === 'web'
@@ -89,7 +89,7 @@ it('logs the crossing', function () {
     $channel = Mockery::mock();
     $channel->shouldReceive('warning')->once()->with(AccountTargeting::MESSAGE, Mockery::on(fn (array $context) => $context === [
         'rule'            => 'one_account',
-        'subject'         => SignalLog::targetHash(['email' => 'alice@example.com']),
+        'subject'         => '7',
         'count'           => 3,
         'window_minutes'  => 15,
         'members'         => ['198.51.100.1', '203.0.113.2', '192.0.2.3'],
@@ -280,7 +280,7 @@ it('replays the signal log to the events that fired live', function () {
     unset($byRule);
 
     expect($replayed)->toBe($live)
-        ->and($live['one_account'])->toBe([SignalLog::targetHash(['email' => 'alice@example.com']) => 1])
+        ->and($live['one_account'])->toBe(['7' => 1])
         ->and($live['one_subnet'])->toBe(['198.18.0.0/20' => 1, '2001:db8:5::/64' => 2]);
 });
 
@@ -307,7 +307,7 @@ it('replays at another count and window', function () {
     };
 
     expect($crossings([]))->toBe([])
-        ->and($crossings(['--window' => '60'])[0])->toMatchArray(['subject' => $hash, 'guard' => 'web', 'crossings' => 1, 'members' => 3])
+        ->and($crossings(['--window' => '60'])[0])->toMatchArray(['subject' => '7', 'guard' => 'web', 'crossings' => 1, 'members' => 3])
         ->and($crossings(['--count' => '2', '--window' => '30'])[0]['crossings'])->toBe(1);
 });
 
@@ -506,6 +506,7 @@ it('defaults and clamps the settings', function (array $configured, array $expec
 
 it('keys nothing for an address that is not one', function () {
     expect(AccountTargeting::keys('one_account', 'not-an-ip', str_repeat('a', 64), '7', 'web', 24))->toBeNull()
+        ->and(AccountTargeting::keys('one_account', '2001:db8::5', str_repeat('a', 64), '7', 'web', 24))->toBe(['web:7', '2001:db8::/64'])
         ->and(AccountTargeting::keys('one_subnet', 'not-an-ip', str_repeat('a', 64), null, null, 24))->toBeNull()
         ->and(AccountTargeting::keys('one_account', '198.51.100.1', str_repeat('a', 64), null, 'web', 24))->toBeNull()
         ->and(AccountTargeting::keys('one_subnet', '::ffff:198.51.100.1', str_repeat('a', 64), null, null, 24))->toBe(['198.51.100.0/24', str_repeat('a', 64)]);
@@ -542,7 +543,10 @@ it('keeps live windows when it sweeps stale ones', function () {
     foreach (range(1, 1001) as $i) {
         $rows[] = ['detector' => 'failed_logins', 'ip' => '10.'.intdiv($i, 256).'.'.($i % 256).'.1', 'target_hash' => str_repeat('b', 64), 'occurred_at' => now()->subMinutes(9)];
     }
-    DB::table(SignalLog::TABLE)->insert($rows);
+    // Chunked: SQLite before 3.32 binds at most 999 variables per statement.
+    foreach (array_chunk($rows, 200) as $chunk) {
+        DB::table(SignalLog::TABLE)->insert($chunk);
+    }
 
     loggedFailure('198.51.100.3', 'c@example.com', null, 8);
 
@@ -566,13 +570,13 @@ it('reports what it judged by, and sorts by crossings', function () {
     expect($json)->toHaveKeys(['from', 'to', 'days', 'signal_log_oldest'])
         ->and($json['days'])->toBe(7)
         ->and(array_diff_key($json['account_targeting']['one_account'], ['subjects' => true]))
-        ->toBe(['enabled' => false, 'count' => 3, 'window_minutes' => 15, 'ipv4_prefix' => null, 'overridden' => false])
+        ->toBe(['enabled' => false, 'count' => 3, 'window_minutes' => 15, 'ipv4_prefix' => null, 'overridden' => false, 'not_replayed' => null])
         ->and(array_diff_key($json['account_targeting']['one_subnet'], ['subjects' => true]))
-        ->toBe(['enabled' => true, 'count' => 3, 'window_minutes' => 15, 'ipv4_prefix' => 24, 'overridden' => false]);
+        ->toBe(['enabled' => true, 'count' => 3, 'window_minutes' => 15, 'ipv4_prefix' => 24, 'overridden' => false, 'not_replayed' => null]);
 
     [$first, $second] = $json['account_targeting']['one_subnet']['subjects'];
 
-    expect($first)->toMatchArray(['subject' => '198.18.5.0/24', 'guard' => null, 'crossings' => 2, 'members' => 6, 'target_user_ids' => ['1', '2', '3', '4', '5', '6']])
+    expect($first)->toMatchArray(['subject' => '198.18.5.0/24', 'guard' => null, 'crossings' => 2, 'members' => 6, 'target_users' => 6, 'target_user_ids' => ['1', '2', '3', '4', '5', '6']])
         ->and($first['first_at'] < $first['last_at'])->toBeTrue()
         ->and($second)->toMatchArray(['subject' => '198.18.0.0/24', 'crossings' => 1, 'target_user_ids' => []]);
 
@@ -610,8 +614,102 @@ it('prints the account table and truncates long lists', function () {
 
     expect($out)
         ->toContain('Guard')
-        ->toContain(substr((string) SignalLog::targetHash(['email' => 'alice@example.com']), 0, 12).'…')
+        ->toContain('Account ')
         ->toContain('admin')
-        ->toContain('1, 2, 3, 4, 5, …')
+        ->toContain('1, 2, 3, 4, 5, … (6)')
         ->toContain('… and 2 more. --json lists them all.');
+});
+
+it('counts spellings of one account as one account', function () {
+    Event::fake([AccountTargeted::class]);
+
+    // The app's lookup folds accents; the hash doesn't.
+    failLogin('198.51.100.1', 'alice@example.com', 7);
+    failLogin('203.0.113.2', 'álice@example.com', 7);
+    failLogin('192.0.2.3', 'ALICE@example.com ', 7);
+
+    Event::assertDispatched(AccountTargeted::class, fn (AccountTargeted $e) => $e->rule === 'one_account' && $e->subject === '7');
+});
+
+it('still dispatches a crossing when a later rule fails with the failure window open', function () {
+    Event::fake([AccountTargeted::class]);
+    FailureWindow::open('account_targeting');
+
+    // one_subnet's window can't be read; one_account's can.
+    Cache::extend('subnet-fails', fn () => Cache::repository(new class extends ArrayStore
+    {
+        public function get($key): mixed
+        {
+            if (str_contains((string) $key, ':one_subnet:')) {
+                throw new RuntimeException('cache down');
+            }
+
+            return parent::get($key);
+        }
+    }));
+    config()->set('cache.stores.subnet-fails', ['driver' => 'subnet-fails']);
+    config()->set('watchtower.cache.store', 'subnet-fails');
+
+    foreach (['198.51.100.1', '203.0.113.2', '192.0.2.3'] as $ip) {
+        failLogin($ip, 'alice@example.com', 7);
+    }
+
+    Event::assertDispatched(AccountTargeted::class, fn (AccountTargeted $e) => $e->rule === 'one_account');
+});
+
+it('dispatches every crossing before a listener error ends the request', function () {
+    $seen = [];
+    Event::listen(AccountTargeted::class, function (AccountTargeted $e) use (&$seen) {
+        $seen[] = $e->rule;
+    });
+    Event::listen(AccountTargeted::class, function (AccountTargeted $e) {
+        if ($e->rule === 'one_account') {
+            throw new RuntimeException('listener broke');
+        }
+    });
+
+    failLogin('198.51.100.1', 'alice@example.com', 7);
+    failLogin('203.0.113.2', 'alice@example.com', 7);
+    failLogin('192.0.2.9', 'a@example.com', 1);
+    failLogin('192.0.2.9', 'b@example.com', 2);
+
+    // Alice's third address and the /24's third account, in one login.
+    $this->withServerVariables(['REMOTE_ADDR' => '192.0.2.9'])
+        ->post('/login', ['email' => 'alice@example.com', 'user_id' => 7])
+        ->assertServerError();
+
+    expect($seen)->toBe(['one_account', 'one_subnet']);
+});
+
+it('says one_account has nothing to replay when no logged failure names an account', function () {
+    config()->set('watchtower.auto_block.signal_log.enabled', true);
+
+    foreach (['a', 'b', 'c'] as $i => $name) {
+        loggedFailure('198.51.100.'.($i + 1), "{$name}@example.com", null, 10 - $i);
+    }
+
+    $json = accountsJson();
+
+    expect($json['account_targeting']['one_account']['not_replayed'])->toContain('names an existing account')
+        ->and($json['account_targeting']['one_subnet']['not_replayed'])->toBeNull();
+
+    expect(Artisan::call('watchtower:simulate', ['--accounts' => true]))->toBe(0)
+        ->and(Artisan::output())->toContain('Not replayed: no failed login in the period names an existing account.');
+});
+
+it('lists at most 100 account ids per subject, and counts them all', function () {
+    config()->set('watchtower.auto_block.signal_log.enabled', true);
+
+    foreach (range(1, 102) as $i) {
+        loggedFailure('198.51.100.1', "u{$i}@example.com", (string) $i, 10 - $i / 100);
+    }
+
+    $subject = accountsJson(['--accounts' => 'one_subnet', '--count' => '102'])['account_targeting']['one_subnet']['subjects'][0];
+
+    expect($subject['target_users'])->toBe(102)
+        ->and($subject['target_user_ids'])->toHaveCount(100)
+        ->and($subject['target_user_ids'][0])->toBe('1');
+
+    expect(Artisan::call('watchtower:simulate', ['--accounts' => 'one_subnet', '--count' => '102']))->toBe(0)
+        ->and(Artisan::output())->toContain('1, 2, 3, 4, 5, … (102)');
 });

@@ -452,6 +452,10 @@ class SimulateCommand extends Command
                 'window_minutes' => $window,
                 'ipv4_prefix'    => $name === 'one_subnet' ? $settings['ipv4_prefix'] : null,
                 'overridden'     => $overrides !== [],
+                // A log of failed logins at accounts that don't exist has
+                // nothing one_account counts; "no crossings" would pass for
+                // a clean result there.
+                'not_replayed'   => $this->accountReplay->covers($from, $to, $name) ? null : 'no failed login in the period names an existing account',
                 'subjects'       => $this->accountReplay->replay($name, $count, $window, $settings['ipv4_prefix'], $from, $to),
             ];
         }
@@ -484,24 +488,24 @@ class SimulateCommand extends Command
             ));
 
             if ($result['subjects'] === []) {
-                $this->line('  No crossings.');
+                $this->line($result['not_replayed'] !== null ? "  Not replayed: {$result['not_replayed']}." : '  No crossings.');
 
                 continue;
             }
 
             $rows = array_map(static fn (array $s): array => [
-                $name === 'one_account' ? substr($s['subject'], 0, 12).'…' : $s['subject'],
+                self::plain($s['subject']),
                 ...($name === 'one_account' ? [self::plain((string) $s['guard'])] : []),
                 $s['crossings'],
                 $s['members'],
-                self::plain(implode(', ', array_slice($s['target_user_ids'], 0, 5)).(count($s['target_user_ids']) > 5 ? ', …' : '')),
+                self::plain(implode(', ', array_slice($s['target_user_ids'], 0, 5)).($s['target_users'] > 5 ? sprintf(', … (%d)', $s['target_users']) : '')),
                 self::minutePrecision($s['first_at']),
                 self::minutePrecision($s['last_at']),
             ], array_slice($result['subjects'], 0, self::MAX_ROWS));
 
             $this->table(
                 $name === 'one_account'
-                    ? ['Account (hash)', 'Guard', 'Crossings', 'Addresses', 'Target user ids', 'First', 'Last']
+                    ? ['Account', 'Guard', 'Crossings', 'Addresses', 'Target user ids', 'First', 'Last']
                     : ['Subnet', 'Crossings', 'Accounts', 'Target user ids', 'First', 'Last'],
                 $rows,
             );

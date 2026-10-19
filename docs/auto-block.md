@@ -227,7 +227,7 @@ WATCHTOWER_DETECT_ONE_ACCOUNT=true
 WATCHTOWER_DETECT_ONE_SUBNET=true
 ```
 
-Both rules read `Illuminate\Auth\Events\Failed`, so they work with `failed_logins` off. An account is the [signal log](#signal-log)'s `target_hash`, a keyed hash of the identifier typed in. `one_account` only counts attempts at accounts that exist, because an account that doesn't exist can't be taken over, and counting every made-up name would open a window per guess. `one_subnet` counts made-up names too, which is how a spray of them shows up. An IPv6 address counts as its `/64`, so one client moving around its own block counts as one address. Each rule's window starts at its first failure and starts over when the rule fires, the same way the detectors count.
+Both rules read `Illuminate\Auth\Events\Failed`, so they work with `failed_logins` off. `one_account` counts only attempts at accounts that exist, and keys them by the account's id. Your user lookup may treat `usér@x.com` and `user@x.com` as the same account, and keying by id stops an attacker splitting attempts across spellings like that. An account that doesn't exist can't be taken over, and counting every made-up name would open a window per guess. `one_subnet` counts accounts by the [signal log](#signal-log)'s `target_hash`, a keyed hash of the identifier typed in, so it counts made-up names too. That's how a spray of them shows up. An IPv6 address counts as its `/64`, so one client moving around its own block counts as one address. Each rule's window starts at its first failure and starts over when the rule fires, the same way the detectors count.
 
 **Report-only.** When a rule fires, Watchtower logs `Watchtower: account targeted` and fires `Watchtower\Events\AccountTargeted`. It blocks nothing and doesn't touch the account. A wrong guess here would lock a real customer out, and only your app knows its reset and step-up flows. Listen for the event to act:
 
@@ -236,20 +236,20 @@ use Watchtower\Events\AccountTargeted;
 
 Event::listen(function (AccountTargeted $event) {
     // $event->rule           'one_account' or 'one_subnet'
-    // $event->subject        the account's hash, or the subnet ('198.51.100.0/24')
+    // $event->subject        the account's id (one_account), or the subnet ('198.51.100.0/24')
     // $event->members        the addresses (one_account) or account hashes (one_subnet) seen
     // $event->targetUserIds  the existing accounts among them
     // $event->guard          one_account only
 });
 ```
 
-To match an event to a login you have in hand, `Watchtower\Support\SignalLog::targetHash($credentials)` gives the same hash.
+For `one_subnet`, `Watchtower\Support\SignalLog::targetHash($credentials)` gives the hash a login was counted under.
 
 Limits:
 
 - **No `Failed` event, no count.** A login flow that rejects an attempt without calling `Auth::attempt()` (or dispatching `Failed` itself) is invisible here, as it is to `failed_logins`.
 - **Rotating `APP_KEY`** changes every hash, so windows open at the time of a rotation never fill, and stored rows no longer match newer ones.
-- **Concurrent failures race.** A window is read and written back without a lock, so two failures at the same moment can lose a member, or both cross and report the same attack twice. Write your listener so a duplicate event does no harm.
+- **Concurrent failures race.** A window is read and written back without a lock, so two failures at the same moment can lose a member, or both cross and report the same attack twice. Write your listener so a duplicate event does no harm. A listener that throws fails the login request, as any listener would, after every event has been dispatched.
 - **`count` is capped at 1000**, because every failed login reads and writes its rule's whole window.
 
 Backtest the counts before you rely on them. `simulate --accounts` replays the signal log's failed logins through the same code the live count runs, so it needs the signal log and `failed_logins` on:
@@ -259,7 +259,7 @@ php artisan watchtower:simulate --accounts
 php artisan watchtower:simulate --accounts=one_subnet --count=10 --window=30
 ```
 
-It lists each account or subnet that crossed, how often, how many addresses or accounts it took, and the existing accounts among them. At the settings in force, it reproduces the events that fired, except for logins from an address `failed_logins` skipped because it was already blocked where the detector aims. Those reach the live count but not the log.
+It lists each account or subnet that crossed, how often, how many addresses or accounts it took, and the existing accounts among them (up to 100 ids each, with a count). A rule that has nothing to read in the period, such as `one_account` when no logged failure named an existing account, says so instead of reporting no crossings. At the settings in force, it reproduces the events that fired, except for logins from an address `failed_logins` skipped because it was already blocked where the detector aims. Those reach the live count but not the log.
 
 ## Log rules
 

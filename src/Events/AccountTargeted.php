@@ -17,8 +17,8 @@ class AccountTargeted
 {
     /**
      * @param  string  $rule  `one_account` or `one_subnet`
-     * @param  string  $subject  the account's target hash (SignalLog::targetHash()),
-     *                           or the subnet in CIDR form
+     * @param  string  $subject  the account's id (`one_account`), or the
+     *                           subnet in CIDR form (`one_subnet`)
      * @param  list<string>  $members  the distinct addresses that failed against
      *                                 the account, or the distinct target hashes
      *                                 the subnet failed against

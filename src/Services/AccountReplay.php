@@ -28,10 +28,13 @@ final class AccountReplay
     /** See SignalReplay::SWEEP_AT. */
     private const SWEEP_AT = 1000;
 
+    /** Account ids listed per subject; the rest are only counted. */
+    private const MAX_USER_IDS = 100;
+
     /**
      * Each crossing, grouped by its subject.
      *
-     * @return list<array{subject: string, guard: ?string, crossings: int, first_at: string, last_at: string, members: int, target_user_ids: list<string>}>
+     * @return list<array{subject: string, guard: ?string, crossings: int, first_at: string, last_at: string, members: int, target_users: int, target_user_ids: list<string>}>
      */
     public function replay(string $rule, int $threshold, int $windowMinutes, int $ipv4Prefix, CarbonInterface $from, CarbonInterface $to): array
     {
@@ -73,13 +76,13 @@ final class AccountReplay
             unset($windows[$subject]);
 
             $s = $subjects[$subject] ?? [
-                'subject'         => $rule === 'one_account' ? (string) $row->target_hash : $subject,
+                'subject'         => $rule === 'one_account' ? (string) $userId : $subject,
                 'guard'           => $rule === 'one_account' ? $guard : null,
                 'crossings'       => 0,
                 'first_at'        => $at,
                 'last_at'         => $at,
                 'members'         => [],
-                'target_user_ids' => [],
+                'target_users'    => [],
             ];
             $s['crossings']++;
             $s['last_at'] = $at;
@@ -90,7 +93,7 @@ final class AccountReplay
                 $s['members'][hash('xxh64', (string) $crossedMember, true)] = true;
 
                 if ($crossedUser !== null) {
-                    $s['target_user_ids']["u:{$crossedUser}"] = true;
+                    $s['target_users'][hash('xxh64', $crossedUser, true)] ??= count($s['target_users']) < self::MAX_USER_IDS ? $crossedUser : null;
                 }
             }
 
@@ -102,7 +105,8 @@ final class AccountReplay
             'first_at'        => Carbon::createFromTimestamp($s['first_at'])->toIso8601String(),
             'last_at'         => Carbon::createFromTimestamp($s['last_at'])->toIso8601String(),
             'members'         => count($s['members']),
-            'target_user_ids' => array_map(static fn ($key): string => substr((string) $key, 2), array_keys($s['target_user_ids'])),
+            'target_users'    => count($s['target_users']),
+            'target_user_ids' => array_values(array_filter($s['target_users'], static fn (?string $id): bool => $id !== null)),
         ], array_values($subjects));
 
         usort($list, static fn (array $a, array $b): int => $b['crossings'] <=> $a['crossings'] ?: strcmp($a['subject'], $b['subject']));
@@ -115,11 +119,13 @@ final class AccountReplay
      * one the replay has nothing to read, and "no crossings" would pass for
      * a clean result.
      */
-    public function covers(CarbonInterface $from, CarbonInterface $to): bool
+    public function covers(CarbonInterface $from, CarbonInterface $to, ?string $rule = null): bool
     {
         return DB::table(SignalLog::TABLE)
             ->where('detector', 'failed_logins')
             ->whereNotNull('target_hash')
+            // one_account reads only attempts at an existing account.
+            ->when($rule === 'one_account', static fn ($query) => $query->whereNotNull('target_user_id'))
             ->where('occurred_at', '>=', $from)
             ->where('occurred_at', '<=', $to)
             ->exists();

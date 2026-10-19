@@ -104,10 +104,14 @@ final class AccountTargeting
      * An IPv6 address counts as its block target, so one client walking its
      * own /64 is one address, not thousands.
      *
-     * `one_account` only counts an attempt at an existing account. One that
-     * doesn't exist can't be taken over, and counting every identifier an
-     * attacker types would open a window per guess; `one_subnet` still
-     * counts a spray of made-up names.
+     * `one_account` only counts an attempt at an existing account, and
+     * keys it by the account's id rather than the hash of what was typed:
+     * the app's lookup may fold case and accents the hash doesn't, so
+     * `usér@x.com` and `user@x.com` would otherwise split one account's
+     * attempts — and its window — in two. An account that doesn't exist
+     * can't be taken over, and counting every identifier an attacker types
+     * would open a window per guess; `one_subnet` still counts a spray of
+     * made-up names.
      *
      * @return array{0: string, 1: string}|null [subject, member], or null when the rule doesn't count it
      */
@@ -120,7 +124,7 @@ final class AccountTargeting
         }
 
         if ($rule === 'one_account') {
-            return [($guard ?? '').':'.$targetHash, IpRange::blockTarget($canonical) ?? $canonical];
+            return [($guard ?? '').':'.$targetUserId, IpRange::blockTarget($canonical) ?? $canonical];
         }
 
         $subnet = str_contains($canonical, ':')
@@ -170,7 +174,8 @@ final class AccountTargeting
      * login request, and a cache that is down must not turn a wrong password
      * into a 500. The events go out after, so an app listener that throws
      * surfaces as its own error rather than as a counting failure, and
-     * doesn't cost the other rule its count.
+     * doesn't cost the other rule its count — or its event: every event is
+     * dispatched before the first listener error is rethrown.
      */
     public function record(string $ip, string $targetHash, int|string|null $targetUserId, ?string $guard): void
     {
@@ -183,24 +188,34 @@ final class AccountTargeting
                 }
             }
         } catch (\Throwable $e) {
-            if (FailureWindow::isOpen('account_targeting')) {
-                return;
-            }
+            // No early return: a rule that crossed before this one threw has
+            // already forgotten its window, so its event is all that's left.
+            if (! FailureWindow::isOpen('account_targeting')) {
+                FailureWindow::open('account_targeting');
 
-            FailureWindow::open('account_targeting');
-
-            try {
-                Log::channel(config('watchtower.log_channel', 'stack'))
-                    ->error('Watchtower: account targeting failed, letting the login through uncounted', [
-                        'error' => $e->getMessage(),
-                    ]);
-            } catch (\Throwable) {
-                // A broken log channel must not undo the fail-open.
+                try {
+                    Log::channel(config('watchtower.log_channel', 'stack'))
+                        ->error('Watchtower: account targeting failed, letting the login through uncounted', [
+                            'error' => $e->getMessage(),
+                        ]);
+                } catch (\Throwable) {
+                    // A broken log channel must not undo the fail-open.
+                }
             }
         }
 
+        $failed = null;
+
         foreach (array_filter($events) as $event) {
-            event($event);
+            try {
+                event($event);
+            } catch (\Throwable $e) {
+                $failed ??= $e;
+            }
+        }
+
+        if ($failed !== null) {
+            throw $failed;
         }
     }
 
@@ -245,7 +260,7 @@ final class AccountTargeting
 
         $event = new AccountTargeted(
             $rule,
-            $rule === 'one_account' ? $targetHash : $subject,
+            $rule === 'one_account' ? (string) $targetUserId : $subject,
             array_map('strval', array_keys((array) $crossed)),
             array_values(array_unique(array_filter((array) $crossed, static fn (?string $id): bool => $id !== null))),
             $rule === 'one_account' ? $guard : null,
