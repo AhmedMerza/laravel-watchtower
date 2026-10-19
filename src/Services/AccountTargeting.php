@@ -26,8 +26,9 @@ use Watchtower\Support\IpRange;
  * MESSAGE, and nothing is blocked or reset — Watchtower blocks addresses,
  * the app decides what an attacked account needs. So there is no mode.
  *
- * The account is the signal log's target hash, so a crossing here and a
- * replay of the log (AccountReplay) name the same account. Each rule keeps a
+ * `one_account` keys an account by its guard and id, `one_subnet` by the
+ * signal log's target hash — both columns the log keeps, so a crossing here
+ * and a replay of the log (AccountReplay) name the same account. Each rule keeps a
  * window fixed from its first member that restarts at every crossing, the
  * way HitWindow does, and step() is the one place that says so for both.
  */
