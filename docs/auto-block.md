@@ -205,8 +205,8 @@ Only counted signals are written: a request no detector counted adds nothing, an
 
 Two limits:
 
-- **Blocked addresses stop adding rows.** In block mode, an address is turned away before the detectors run, so the log can't show what a higher threshold would have seen after the real block. Signals logged while a detector ran in warn mode are complete.
-- **Warn mode keeps writing.** An address a warn-mode detector never blocks adds a row for every signal it sends, until `WATCHTOWER_SIGNAL_LOG_DAYS` ages them out.
+- **Blocked addresses stop adding rows.** Once an address is blocked, it is turned away before the detectors run, so the log can't show what a higher threshold would have seen after the real block. Signals logged while a detector ran in warn mode are complete.
+- **Addresses that never get blocked keep writing, in any mode.** That covers a warn-mode detector, an address in `never_auto_block`, and one the shared-IP guard holds back. Each adds a row for every signal it sends until `WATCHTOWER_SIGNAL_LOG_DAYS` ages them out. The rows are kept on purpose: replaying the shared-IP threshold needs them.
 
 `watchtower:cleanup` deletes rows older than `WATCHTOWER_SIGNAL_LOG_DAYS`, including after the log is turned off. What's stored, and why, is in the [security notes](security.md).
 

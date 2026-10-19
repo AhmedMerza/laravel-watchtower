@@ -121,7 +121,10 @@ class WatchtowerServiceProvider extends PackageServiceProvider
 
         // After the response is sent, so the signal log never holds up a
         // request. Costs nothing when no detector counted anything.
-        $this->app->terminating(fn () => $this->app->make(SignalLog::class)->flush());
+        // Type-hinted rather than resolved off $this->app: terminate() calls
+        // this through the app that handled the request, which under Octane
+        // is a per-request sandbox, not the app the provider booted with.
+        $this->app->terminating(fn (SignalLog $log) => $log->flush());
 
         if (config('watchtower.auto_block.enabled', false)) {
             Schedule::call(fn () => $this->app->make(AutoBlockService::class)->run())

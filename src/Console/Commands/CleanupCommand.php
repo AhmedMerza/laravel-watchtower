@@ -172,7 +172,9 @@ class CleanupCommand extends Command
         do {
             $ids = DB::table(SignalLog::TABLE)
                 ->where('occurred_at', '<', $cutoff)
-                ->orderBy('id')
+                // No orderBy: every match goes, so any 1000 will do, and
+                // sorting by id would make the database sort the whole
+                // expired backlog on every batch.
                 ->limit(1000)
                 ->pluck('id');
 

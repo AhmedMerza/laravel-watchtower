@@ -3,12 +3,15 @@
 declare(strict_types=1);
 
 use Illuminate\Auth\Events\Failed;
+use Illuminate\Auth\Events\Lockout;
 use Illuminate\Foundation\Auth\User;
+use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Route;
 use Illuminate\Support\Facades\Schema;
 use Watchtower\Services\AutoBlockService;
+use Watchtower\Services\BlacklistService;
 use Watchtower\Support\FailureWindow;
 use Watchtower\Support\SignalLog;
 use Watchtower\Tests\TestCase;
@@ -22,7 +25,7 @@ beforeAll(function () {
         $app['config']->set('watchtower.auto_block.enabled', true);
         $app['config']->set('watchtower.auto_block.mode', 'warn');
 
-        foreach (['failed_logins', 'scanner_paths', 'response_bursts'] as $detector) {
+        foreach (['failed_logins', 'login_lockouts', 'scanner_paths', 'response_bursts'] as $detector) {
             $app['config']->set("watchtower.auto_block.detectors.{$detector}.enabled", true);
         }
     };
@@ -134,6 +137,10 @@ it('hashes one identifier the same whatever its case, spacing or password', func
     $hash = SignalLog::targetHash(['email' => 'alice@example.com', 'password' => 'a']);
 
     expect(SignalLog::targetHash(['email' => ' ALICE@example.com ', 'password' => 'b']))->toBe($hash)
+        // Laravel's own rule for which keys identify a user: none containing "password".
+        ->and(SignalLog::targetHash(['email' => 'alice@example.com', 'current_password' => 'c', 'password_confirmation' => 'd']))->toBe($hash)
+        // Invalid UTF-8 must not collapse every such identifier into one hash.
+        ->and(SignalLog::targetHash(['email' => "a\xFF@example.com"]))->not->toBe(SignalLog::targetHash(['email' => "b\xFF@example.com"]))
         ->and(SignalLog::targetHash(['email' => 'bob@example.com']))->not->toBe($hash)
         ->and(SignalLog::targetHash(['password' => 'only']))->toBeNull()
         ->and(SignalLog::targetHash([]))->toBeNull();
@@ -144,13 +151,65 @@ it('hashes one identifier the same whatever its case, spacing or password', func
     expect(SignalLog::targetHash(['email' => 'alice@example.com']))->not->toBe($hash);
 });
 
-it('writes nothing for an address it already blocked', function () {
-    config()->set('watchtower.auto_block.mode', 'block');
+it('writes nothing for an address already blocked app-wide', function () {
+    // Called directly: over HTTP, BlockedIpMiddleware turns a blocked
+    // address away before any detector runs, so detect()'s own check would
+    // never be reached.
+    app(BlacklistService::class)->block('203.0.113.7');
 
-    $this->withServerVariables(['REMOTE_ADDR' => '203.0.113.7'])->get('/.env')->assertForbidden();
-    $this->withServerVariables(['REMOTE_ADDR' => '203.0.113.7'])->get('/.git/config')->assertForbidden();
+    // Both ways detect() learns it: the verdict the middleware passes, and
+    // its own lookup when there is none.
+    app(AutoBlockService::class)->record('scanner_paths', '203.0.113.7', null, true, ['path' => '.env']);
+    app(AutoBlockService::class)->record('scanner_paths', '203.0.113.7', null, null, ['path' => '.env']);
+    app()->terminate();
 
-    expect(signals())->toHaveCount(1);
+    expect(signals())->toBe([]);
+});
+
+it('writes nothing for an address already blocked where a scoped detector aims, and logs the rest', function () {
+    config()->set('watchtower.auto_block.detectors.scanner_paths.scope', 'auth');
+    app(BlacklistService::class)->block('203.0.113.30', ['scope' => 'auth']);
+
+    app(AutoBlockService::class)->record('scanner_paths', '203.0.113.30', null, false, ['path' => '.env']);
+    app(AutoBlockService::class)->record('scanner_paths', '203.0.113.31', null, false, ['path' => '.env']);
+    app()->terminate();
+
+    expect(collect(signals())->pluck('ip')->all())->toBe(['203.0.113.31']);
+});
+
+it('logs a login lockout', function () {
+    Route::post('/login', function (Request $request) {
+        event(new Lockout($request));
+
+        return 'locked';
+    });
+
+    $this->withServerVariables(['REMOTE_ADDR' => '203.0.113.32'])->post('/login');
+
+    expect(signals('login_lockouts'))->toHaveCount(1)
+        ->and(signals('login_lockouts')[0])->toMatchArray([
+            'ip'          => '203.0.113.32',
+            'path'        => 'login',
+            'user_id'     => null,
+            'target_hash' => null,
+        ]);
+});
+
+it('stores an IPv6 address as it came in, not widened to its block target', function () {
+    $this->withServerVariables(['REMOTE_ADDR' => '2001:db8::1'])->get('/.env');
+
+    expect(signals('scanner_paths')[0]['ip'])->toBe('2001:db8::1');
+});
+
+it('stores a path with invalid UTF-8 or a NUL byte as text a database accepts', function () {
+    app(AutoBlockService::class)->record('scanner_paths', '203.0.113.33', null, false, ['path' => ".env\xFF\x00x"]);
+    app()->terminate();
+
+    $path = signals()[0]['path'];
+
+    expect(mb_check_encoding($path, 'UTF-8'))->toBeTrue()
+        ->and($path)->not->toContain("\0")
+        ->and($path)->toStartWith('.env');
 });
 
 it('writes nothing for a detector that is switched off', function () {
@@ -207,16 +266,18 @@ describe('watchtower:cleanup', function () {
 
     it('drops rows past retention_days and keeps the rest, with the log switched off', function () {
         config()->set('watchtower.auto_block.signal_log.enabled', false);
-        config()->set('watchtower.auto_block.signal_log.retention_days', 14);
+        // Not the default, so a hardcoded 14 can't pass.
+        config()->set('watchtower.auto_block.signal_log.retention_days', 3);
+        $this->freezeTime();
 
         DB::table(SignalLog::TABLE)->insert([
-            signalRow('203.0.113.20', now()->subDays(15)),
-            signalRow('203.0.113.21', now()->subDays(13)),
+            signalRow('203.0.113.20', now()->subDays(3)->subMinute()),
+            signalRow('203.0.113.21', now()->subDays(3)->addMinute()),
         ]);
 
         $this->artisan('watchtower:cleanup')
             ->assertSuccessful()
-            ->expectsOutputToContain('Dropped 1 signal log row(s) older than 14 days.');
+            ->expectsOutputToContain('Dropped 1 signal log row(s) older than 3 days.');
 
         expect(collect(signals())->pluck('ip')->all())->toBe(['203.0.113.21']);
     });

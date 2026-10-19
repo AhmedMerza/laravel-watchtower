@@ -40,7 +40,7 @@ class SignalLog
             'detector'       => $detector,
             'ip'             => $ip,
             'user_id'        => $userId === null ? null : (string) $userId,
-            'path'           => $path === null ? null : mb_substr($path, 0, 255),
+            'path'           => $path === null ? null : self::cleanPath($path),
             'status'         => $signal['status'] ?? null,
             'target_hash'    => $signal['target_hash'] ?? null,
             'target_user_id' => $targetUserId === null ? null : (string) $targetUserId,
@@ -86,9 +86,11 @@ class SignalLog
      * attempt at one identifier, whatever its case or stray spaces, and
      * useless without the app key.
      *
-     * Every credential except the password goes in, sorted by key, so an
-     * app that signs in by email, by username, or by phone and tenant
-     * hashes whatever its identifier is.
+     * Every credential whose key doesn't contain "password" goes in, sorted
+     * by key — the same rule Laravel's EloquentUserProvider uses to pick the
+     * fields it looks a user up by — so an app that signs in by email, by
+     * username, or by phone and tenant hashes whatever its identifier is,
+     * and a `password_confirmation` or `current_password` never does.
      *
      * @param  array<mixed>  $credentials
      */
@@ -96,11 +98,13 @@ class SignalLog
     {
         $key = config('app.key');
 
-        unset($credentials['password']);
-
         $identifier = array_map(
             static fn ($value): string => mb_strtolower(trim((string) $value)),
-            array_filter($credentials, is_scalar(...)),
+            array_filter(
+                $credentials,
+                static fn ($value, $name): bool => is_scalar($value) && ! str_contains((string) $name, 'password'),
+                ARRAY_FILTER_USE_BOTH,
+            ),
         );
 
         if (! is_string($key) || $key === '' || $identifier === []) {
@@ -109,6 +113,23 @@ class SignalLog
 
         ksort($identifier);
 
-        return hash_hmac('sha256', (string) json_encode($identifier), 'watchtower-signal-log|'.$key);
+        // SUBSTITUTE, because json_encode() returns false on invalid UTF-8,
+        // and every such identifier would then hash the same empty string.
+        return hash_hmac(
+            'sha256',
+            (string) json_encode($identifier, JSON_INVALID_UTF8_SUBSTITUTE),
+            'watchtower-signal-log|'.$key,
+        );
+    }
+
+    /**
+     * The path as a column can hold it. It is the decoded path, so `/%FF`
+     * or `/a%00b` arrive as invalid UTF-8 or a NUL byte, which MySQL and
+     * Postgres refuse — and one refused row fails the request's whole
+     * insert, which would let a scanner keep itself out of the log.
+     */
+    private static function cleanPath(string $path): string
+    {
+        return mb_substr(str_replace("\0", '', mb_scrub($path, 'UTF-8')), 0, 255);
     }
 }
