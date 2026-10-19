@@ -218,7 +218,7 @@ Credential stuffing gets past `failed_logins`. Each address tries a few logins a
 
 | Rule | Counts | Default |
 |---|---|---|
-| `one_account` | distinct addresses failing against one account (per guard) | 10 in 15 min |
+| `one_account` | distinct addresses failing against one existing account (per guard) | 10 in 15 min |
 | `one_subnet` | distinct accounts failed against from one subnet: IPv4 `/24` (`ipv4_prefix`, 16–32), IPv6 `ipv6_block_prefix` | 20 in 15 min |
 
 ```dotenv
@@ -227,7 +227,7 @@ WATCHTOWER_DETECT_ONE_ACCOUNT=true
 WATCHTOWER_DETECT_ONE_SUBNET=true
 ```
 
-Both rules read `Illuminate\Auth\Events\Failed`, so they work with `failed_logins` off. An account is the [signal log](#signal-log)'s `target_hash`, a keyed hash of the identifier typed in, so a login at an account that doesn't exist counts too. An IPv6 address counts as its `/64`, so one client moving around its own block counts as one address. Each rule's window starts at its first failure and starts over when the rule fires, the same way the detectors count.
+Both rules read `Illuminate\Auth\Events\Failed`, so they work with `failed_logins` off. An account is the [signal log](#signal-log)'s `target_hash`, a keyed hash of the identifier typed in. `one_account` only counts attempts at accounts that exist, because an account that doesn't exist can't be taken over, and counting every made-up name would open a window per guess. `one_subnet` counts made-up names too, which is how a spray of them shows up. An IPv6 address counts as its `/64`, so one client moving around its own block counts as one address. Each rule's window starts at its first failure and starts over when the rule fires, the same way the detectors count.
 
 **Report-only.** When a rule fires, Watchtower logs `Watchtower: account targeted` and fires `Watchtower\Events\AccountTargeted`. It blocks nothing and doesn't touch the account. A wrong guess here would lock a real customer out, and only your app knows its reset and step-up flows. Listen for the event to act:
 
@@ -249,7 +249,8 @@ Limits:
 
 - **No `Failed` event, no count.** A login flow that rejects an attempt without calling `Auth::attempt()` (or dispatching `Failed` itself) is invisible here, as it is to `failed_logins`.
 - **Rotating `APP_KEY`** changes every hash, so windows open at the time of a rotation never fill, and stored rows no longer match newer ones.
-- **Concurrent failures can lose a member.** A window is read and written back without a lock. That can only delay a crossing, because an attack keeps adding members.
+- **Concurrent failures race.** A window is read and written back without a lock, so two failures at the same moment can lose a member, or both cross and report the same attack twice. Write your listener so a duplicate event does no harm.
+- **`count` is capped at 1000**, because every failed login reads and writes its rule's whole window.
 
 Backtest the counts before you rely on them. `simulate --accounts` replays the signal log's failed logins through the same code the live count runs, so it needs the signal log and `failed_logins` on:
 

@@ -433,16 +433,22 @@ class SimulateCommand extends Command
             return self::FAILURE;
         }
 
+        if (! $this->accountReplay->covers($from, $to)) {
+            $this->error('--accounts replays the signal log\'s failed logins, and it holds none with an account hash from the period. They are only logged while failed_logins is on.');
+
+            return self::FAILURE;
+        }
+
         $results = [];
 
         foreach ($names as $name) {
             $settings = AccountTargeting::settings($name);
-            $count = $overrides['count'] ?? $settings['count'];
+            $count = AccountTargeting::clampCount($overrides['count'] ?? $settings['count']);
             $window = $overrides['window'] ?? $settings['window_minutes'];
 
             $results[$name] = [
-                'enabled'        => AccountTargeting::enabled() && (bool) config("watchtower.auto_block.account_targeting.{$name}.enabled", false),
-                'count'          => max(2, $count),
+                'enabled'        => AccountTargeting::ruleEnabled($name),
+                'count'          => $count,
                 'window_minutes' => $window,
                 'ipv4_prefix'    => $name === 'one_subnet' ? $settings['ipv4_prefix'] : null,
                 'overridden'     => $overrides !== [],

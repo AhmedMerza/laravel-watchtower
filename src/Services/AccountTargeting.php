@@ -18,7 +18,7 @@ use Watchtower\Support\IpRange;
  * under that: each address tries a few logins and moves on. It shows up
  * when the failures are counted the other way round —
  *
- * - `one_account`: distinct addresses failing against one account;
+ * - `one_account`: distinct addresses failing against one existing account;
  * - `one_subnet`: distinct accounts failed against from one subnet
  *   (IPv4 `ipv4_prefix`, IPv6 `ipv6_block_prefix`).
  *
@@ -47,20 +47,36 @@ final class AccountTargeting
     /** Narrower than a /16 is one network; broader is half a provider. */
     private const MIN_IPV4_PREFIX = 16;
 
+    /**
+     * The most members a window holds. Every failed login reads and writes
+     * its whole window back, so a count in the thousands would make each
+     * one cost that much, on a path an attacker sets the pace of.
+     */
+    public const MAX_COUNT = 1000;
+
     /** Whether any rule is on — the listener and the target hash cost nothing otherwise. */
     public static function enabled(): bool
     {
-        if (! config('watchtower.auto_block.enabled', false)) {
-            return false;
-        }
-
         foreach (self::RULES as $rule) {
-            if (config("watchtower.auto_block.account_targeting.{$rule}.enabled", false)) {
+            if (self::ruleEnabled($rule)) {
                 return true;
             }
         }
 
         return false;
+    }
+
+    /** Whether this rule is on, behind the auto_block master switch like every detector. */
+    public static function ruleEnabled(string $rule): bool
+    {
+        return (bool) config('watchtower.auto_block.enabled', false)
+            && (bool) config("watchtower.auto_block.account_targeting.{$rule}.enabled", false);
+    }
+
+    /** A count as a window can hold it: at least 2, since 1 fires on every failure. */
+    public static function clampCount(int $count): int
+    {
+        return min(self::MAX_COUNT, max(2, $count));
     }
 
     /**
@@ -75,7 +91,7 @@ final class AccountTargeting
         $prefix = (int) ($settings['ipv4_prefix'] ?? self::DEFAULT_IPV4_PREFIX);
 
         return [
-            'count'          => max(2, (int) ($settings['count'] ?? self::DEFAULTS[$rule]['count'])),
+            'count'          => self::clampCount((int) ($settings['count'] ?? self::DEFAULTS[$rule]['count'])),
             'window_minutes' => max(1, (int) ($settings['window_minutes'] ?? self::DEFAULTS[$rule]['window_minutes'])),
             'ipv4_prefix'    => $prefix >= self::MIN_IPV4_PREFIX && $prefix <= 32 ? $prefix : self::DEFAULT_IPV4_PREFIX,
         ];
@@ -88,13 +104,18 @@ final class AccountTargeting
      * An IPv6 address counts as its block target, so one client walking its
      * own /64 is one address, not thousands.
      *
-     * @return array{0: string, 1: string}|null [subject, member], or null for an address that isn't one
+     * `one_account` only counts an attempt at an existing account. One that
+     * doesn't exist can't be taken over, and counting every identifier an
+     * attacker types would open a window per guess; `one_subnet` still
+     * counts a spray of made-up names.
+     *
+     * @return array{0: string, 1: string}|null [subject, member], or null when the rule doesn't count it
      */
-    public static function keys(string $rule, string $ip, string $targetHash, ?string $guard, int $ipv4Prefix): ?array
+    public static function keys(string $rule, string $ip, string $targetHash, ?string $targetUserId, ?string $guard, int $ipv4Prefix): ?array
     {
         $canonical = IpRange::canonical($ip);
 
-        if ($canonical === null) {
+        if ($canonical === null || ($rule === 'one_account' && $targetUserId === null)) {
             return null;
         }
 
@@ -147,14 +168,18 @@ final class AccountTargeting
      *
      * Fails open, as AutoBlockService::record() does: this runs inside the
      * login request, and a cache that is down must not turn a wrong password
-     * into a 500.
+     * into a 500. The events go out after, so an app listener that throws
+     * surfaces as its own error rather than as a counting failure, and
+     * doesn't cost the other rule its count.
      */
     public function record(string $ip, string $targetHash, int|string|null $targetUserId, ?string $guard): void
     {
+        $events = [];
+
         try {
             foreach (self::RULES as $rule) {
-                if (config("watchtower.auto_block.account_targeting.{$rule}.enabled", false)) {
-                    $this->count($rule, $ip, $targetHash, $targetUserId === null ? null : (string) $targetUserId, $guard);
+                if (self::ruleEnabled($rule)) {
+                    $events[] = $this->countRule($rule, $ip, $targetHash, $targetUserId === null ? null : (string) $targetUserId, $guard);
                 }
             }
         } catch (\Throwable $e) {
@@ -173,20 +198,28 @@ final class AccountTargeting
                 // A broken log channel must not undo the fail-open.
             }
         }
+
+        foreach (array_filter($events) as $event) {
+            event($event);
+        }
     }
 
     /**
-     * ⚠️ Read-modify-write, like HitWindow::recordUser(), so two concurrent
-     * failures can lose a member. That only delays a crossing — the attack
-     * keeps adding members — and a lock on the login path would cost more.
+     * The crossing this failure made, logged, or null.
+     *
+     * ⚠️ Read-modify-write, like HitWindow::recordUser(), with no lock. Two
+     * concurrent failures can lose a member, and two that both read a
+     * window one short of the count can both cross — so a listener may see
+     * the same attack reported twice. A lock on the login path would cost
+     * more than the precision is worth to a report.
      */
-    private function count(string $rule, string $ip, string $targetHash, ?string $targetUserId, ?string $guard): void
+    private function countRule(string $rule, string $ip, string $targetHash, ?string $targetUserId, ?string $guard): ?AccountTargeted
     {
         $settings = self::settings($rule);
-        $keys = self::keys($rule, $ip, $targetHash, $guard, $settings['ipv4_prefix']);
+        $keys = self::keys($rule, $ip, $targetHash, $targetUserId, $guard, $settings['ipv4_prefix']);
 
         if ($keys === null) {
-            return;
+            return null;
         }
 
         [$subject, $member] = $keys;
@@ -194,12 +227,18 @@ final class AccountTargeting
         $key = (string) config('watchtower.cache.key', 'watchtower:blacklist').":targeted:{$rule}:{$subject}";
         $now = now()->getTimestamp();
 
-        [$window, $crossed] = self::step(self::window($cache->get($key)), $member, $targetUserId, $now, $settings['window_minutes'] * 60, $settings['count']);
+        $stored = self::window($cache->get($key));
+
+        [$window, $crossed] = self::step($stored, $member, $targetUserId, $now, $settings['window_minutes'] * 60, $settings['count']);
 
         if ($window !== null) {
-            $cache->put($key, $window, max(1, $window['expires'] - $now));
+            // A member already in a running window changes nothing, and is
+            // what a retrying attacker sends most: no write for it.
+            if ($window !== $stored) {
+                $cache->put($key, $window, max(1, $window['expires'] - $now));
+            }
 
-            return;
+            return null;
         }
 
         $cache->forget($key);
@@ -224,10 +263,10 @@ final class AccountTargeting
                 'guard'           => $event->guard,
             ]);
         } catch (\Throwable) {
-            // The event below is the output that matters.
+            // The event is the output that matters.
         }
 
-        event($event);
+        return $event;
     }
 
     /**

@@ -36,7 +36,7 @@ final class AccountReplay
     public function replay(string $rule, int $threshold, int $windowMinutes, int $ipv4Prefix, CarbonInterface $from, CarbonInterface $to): array
     {
         $seconds = max(1, $windowMinutes) * 60;
-        $threshold = max(2, $threshold);
+        $threshold = AccountTargeting::clampCount($threshold);
 
         /** @var array<string, array{expires: int, members: array<string, ?string>}> $windows */
         $windows = [];
@@ -48,7 +48,8 @@ final class AccountReplay
         foreach (KeysetStream::rows($query, $from, $to, ['ip', 'target_hash', 'target_user_id', 'guard']) as $row) {
             $at = Carbon::parse($row->occurred_at)->getTimestamp();
             $guard = $row->guard === null ? null : (string) $row->guard;
-            $keys = AccountTargeting::keys($rule, (string) $row->ip, (string) $row->target_hash, $guard, $ipv4Prefix);
+            $userId = $row->target_user_id === null ? null : (string) $row->target_user_id;
+            $keys = AccountTargeting::keys($rule, (string) $row->ip, (string) $row->target_hash, $userId, $guard, $ipv4Prefix);
 
             if ($keys === null) {
                 continue;
@@ -60,7 +61,6 @@ final class AccountReplay
             }
 
             [$subject, $member] = $keys;
-            $userId = $row->target_user_id === null ? null : (string) $row->target_user_id;
 
             [$window, $crossed] = AccountTargeting::step($windows[$subject] ?? null, $member, $userId, $at, $seconds, $threshold);
 
@@ -84,8 +84,10 @@ final class AccountReplay
             $s['crossings']++;
             $s['last_at'] = $at;
 
+            // Only counted, so a short binary digest stands in for each: a
+            // subnet sprayed for days can cross with a million accounts.
             foreach ((array) $crossed as $crossedMember => $crossedUser) {
-                $s['members']["m:{$crossedMember}"] = true;
+                $s['members'][hash('xxh64', (string) $crossedMember, true)] = true;
 
                 if ($crossedUser !== null) {
                     $s['target_user_ids']["u:{$crossedUser}"] = true;
@@ -106,5 +108,20 @@ final class AccountReplay
         usort($list, static fn (array $a, array $b): int => $b['crossings'] <=> $a['crossings'] ?: strcmp($a['subject'], $b['subject']));
 
         return $list;
+    }
+
+    /**
+     * Whether the period holds a failed login with an account hash — without
+     * one the replay has nothing to read, and "no crossings" would pass for
+     * a clean result.
+     */
+    public function covers(CarbonInterface $from, CarbonInterface $to): bool
+    {
+        return DB::table(SignalLog::TABLE)
+            ->where('detector', 'failed_logins')
+            ->whereNotNull('target_hash')
+            ->where('occurred_at', '>=', $from)
+            ->where('occurred_at', '<=', $to)
+            ->exists();
     }
 }

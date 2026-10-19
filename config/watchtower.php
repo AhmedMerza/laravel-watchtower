@@ -710,9 +710,12 @@ return [
         | other way round, from Illuminate\Auth\Events\Failed:
         |
         | 'one_account': this many distinct addresses failing against one
-        |   account (per guard) inside the window.
+        |   existing account (per guard) inside the window.
         | 'one_subnet':  this many distinct accounts failed against from one
         |   subnet — IPv4 'ipv4_prefix' (16–32), IPv6 ipv6_block_prefix.
+        |   Made-up account names count here, not under one_account.
+        |
+        | 'count' runs from 2 to 1000.
         |
         | Report-only: a crossing logs "Watchtower: account targeted" and
         | fires Watchtower\Events\AccountTargeted. Nothing is blocked and no
