@@ -13,6 +13,7 @@ php artisan watchtower:sync
 
 # Delete expired temporary blocks and rebuild the cache
 # Also forgets offence ledgers that have decayed (see Escalating durations)
+# and deletes signal log rows older than WATCHTOWER_SIGNAL_LOG_DAYS
 # Runs automatically every day — set WATCHTOWER_CLEANUP_ENABLED=false to manage manually
 # Permanent blocks (no expiry) are never touched
 php artisan watchtower:cleanup

@@ -682,6 +682,27 @@ return [
                 'scope'          => null,
             ],
         ],
+
+        /*
+        | Signal log (#138) — a table of every signal the detectors above
+        | counted, so they can be replayed at other settings later. Off by
+        | default; needs the watchtower_signals migration.
+        |
+        | Each row holds the detector, the address, the signed-in user if
+        | any, the path, the status (response_bursts) and, for a failed
+        | login, a keyed hash of the identifier typed in plus the account it
+        | named. Never a password or a User-Agent. Rows are written after the
+        | response is sent. A detector in warn mode keeps counting an address
+        | that never gets blocked, so its rows grow with that address's
+        | traffic until retention_days drops them.
+        |
+        | 'retention_days': watchtower:cleanup deletes older rows, even with
+        | the log turned off.
+        */
+        'signal_log' => [
+            'enabled'        => env('WATCHTOWER_SIGNAL_LOG', false),
+            'retention_days' => (int) env('WATCHTOWER_SIGNAL_LOG_DAYS', 14),
+        ],
     ],
 
     /*

@@ -45,6 +45,10 @@ WATCHTOWER_DETECT_SCANNER_PATHS=false     # /.env, /.git/*, …       — start 
 WATCHTOWER_DETECT_RESPONSE_BURSTS=false   # 404 bursts              — start at 40 in 1 min
 WATCHTOWER_DETECT_BAD_USER_AGENT=false    # rejected User-Agents    — start at 5 in 10 min
 
+# Keep every signal the detectors count, for later analysis (off by default) — see docs/auto-block.md
+WATCHTOWER_SIGNAL_LOG=false
+WATCHTOWER_SIGNAL_LOG_DAYS=14             # watchtower:cleanup deletes older rows
+
 # Reject requests whose User-Agent names a known attack tool (ON by default)
 WATCHTOWER_USER_AGENT_FILTER=true
 WATCHTOWER_VERIFY_SEARCH_BOTS=false       # forward-confirmed reverse DNS for Googlebot/Bingbot claims

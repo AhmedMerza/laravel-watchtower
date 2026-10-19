@@ -9,6 +9,7 @@ use Illuminate\Auth\Events\Lockout;
 use Illuminate\Http\Request;
 use Watchtower\Http\Middleware\BlockedIpMiddleware;
 use Watchtower\Services\AutoBlockService;
+use Watchtower\Support\SignalLog;
 
 /**
  * The two detectors that read Laravel's own auth events.
@@ -30,7 +31,16 @@ class DetectAuthFailures
 
     public function handleFailed(Failed $event): void
     {
-        $this->record('failed_logins', request());
+        $targetUserId = $event->user?->getAuthIdentifier();
+
+        // The account the attempt was aimed at goes to the signal log only,
+        // in its own columns — never to record()'s user id, for the reason
+        // below.
+        $this->record('failed_logins', request(), [
+            'target_hash'    => SignalLog::targetHash($event->credentials),
+            'target_user_id' => is_int($targetUserId) || is_string($targetUserId) ? $targetUserId : null,
+            'guard'          => $event->guard,
+        ]);
     }
 
     public function handleLockout(Lockout $event): void
@@ -56,7 +66,10 @@ class DetectAuthFailures
      * log-based guard documents — and never_auto_block is the answer for a
      * known office or carrier range.
      */
-    private function record(string $detector, ?Request $request): void
+    /**
+     * @param  array{target_hash?: ?string, target_user_id?: int|string|null, guard?: ?string}  $signal
+     */
+    private function record(string $detector, ?Request $request, array $signal = []): void
     {
         $ip = $request === null ? null : BlockedIpMiddleware::clientIp($request);
 
@@ -67,6 +80,12 @@ class DetectAuthFailures
 
         // These fire inside the route, so BlockedIpMiddleware has already
         // run and its verdict is on the request — see its BLOCKED constant.
-        $this->autoBlock->record($detector, $ip, null, BlockedIpMiddleware::verdict($request));
+        $this->autoBlock->record(
+            $detector,
+            $ip,
+            null,
+            BlockedIpMiddleware::verdict($request),
+            ['path' => $request->decodedPath(), ...$signal],
+        );
     }
 }

@@ -14,6 +14,7 @@ use Watchtower\Services\BlacklistService;
 use Watchtower\Services\OffenceLedger;
 use Watchtower\Support\BlockScope;
 use Watchtower\Support\HitWindow;
+use Watchtower\Support\SignalLog;
 
 // logEntry() is defined in AutoBlockServiceTest.php, which Pest loads for this
 // directory too.
@@ -34,7 +35,7 @@ beforeEach(function () {
 
     $this->cache = new BlacklistCache;
     $this->blacklist = new BlacklistService($this->cache);
-    $this->service = new AutoBlockService($this->blacklist, new HitWindow, new OffenceLedger);
+    $this->service = new AutoBlockService($this->blacklist, new HitWindow, new OffenceLedger, app(SignalLog::class));
 });
 
 function scopedRule(?string $scope, string $mode = 'block'): void

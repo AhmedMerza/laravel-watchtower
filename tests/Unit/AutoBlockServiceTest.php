@@ -17,6 +17,7 @@ use Watchtower\Services\BlacklistCache;
 use Watchtower\Services\BlacklistService;
 use Watchtower\Services\OffenceLedger;
 use Watchtower\Support\HitWindow;
+use Watchtower\Support\SignalLog;
 
 beforeEach(function () {
     // Use the array cache store — real cache, no Redis-facade mocking.
@@ -37,7 +38,7 @@ beforeEach(function () {
 
     $this->cache = new BlacklistCache;
     $this->blacklist = new BlacklistService($this->cache);
-    $this->service = new AutoBlockService($this->blacklist, new HitWindow, new OffenceLedger);
+    $this->service = new AutoBlockService($this->blacklist, new HitWindow, new OffenceLedger, app(SignalLog::class));
 });
 
 it('does nothing when auto-block is disabled', function () {
@@ -922,7 +923,7 @@ it('keeps evaluating warn-mode rules when the hold cache is down, reporting with
             && $context['error'] === 'cache down');
     Log::shouldReceive('channel')->andReturn($logChannel);
 
-    (new AutoBlockService($this->blacklist, $hits, new OffenceLedger))->run();
+    (new AutoBlockService($this->blacklist, $hits, new OffenceLedger, app(SignalLog::class)))->run();
 
     expect($reported->getArrayCopy())->toBe([5, 10]);
 });

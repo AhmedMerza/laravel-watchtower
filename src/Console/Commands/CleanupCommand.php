@@ -12,6 +12,7 @@ use Watchtower\Models\BlacklistedIp;
 use Watchtower\Services\BlacklistCache;
 use Watchtower\Services\OffenceLedger;
 use Watchtower\Support\BlockScope;
+use Watchtower\Support\SignalLog;
 
 class CleanupCommand extends Command
 {
@@ -69,6 +70,13 @@ class CleanupCommand extends Command
             $this->pruneDigest();
         } catch (\Throwable $e) {
             $this->warn('Could not prune the alert digest, carrying on with the blocks: '.$e->getMessage());
+        }
+
+        // Caught like the digest: an optional table that may not exist.
+        try {
+            $this->pruneSignals();
+        } catch (\Throwable $e) {
+            $this->warn('Could not prune the signal log, carrying on with the blocks: '.$e->getMessage());
         }
 
         // Fetched before the bulk delete below: this is the OTHER path a
@@ -140,6 +148,39 @@ class CleanupCommand extends Command
 
         if ($pruned > 0) {
             $this->info("Dropped {$pruned} alert digest row(s) older than ".self::DIGEST_RETENTION_DAYS.' days that no digest sent.');
+        }
+    }
+
+    /**
+     * Delete signal log rows past auto_block.signal_log.retention_days.
+     *
+     * Runs with the log turned off too, so switching it off drains what it
+     * kept. A batch of ids at a time, because a log left running in warn
+     * mode can hold millions of rows, and one delete of all of them would
+     * hold a lock that long.
+     */
+    private function pruneSignals(): void
+    {
+        if (! Schema::hasTable(SignalLog::TABLE)) {
+            return;
+        }
+
+        $days = max(1, (int) config('watchtower.auto_block.signal_log.retention_days', 14));
+        $cutoff = now()->subDays($days);
+        $pruned = 0;
+
+        do {
+            $ids = DB::table(SignalLog::TABLE)
+                ->where('occurred_at', '<', $cutoff)
+                ->orderBy('id')
+                ->limit(1000)
+                ->pluck('id');
+
+            $pruned += DB::table(SignalLog::TABLE)->whereIn('id', $ids)->delete();
+        } while ($ids->count() === 1000);
+
+        if ($pruned > 0) {
+            $this->info("Dropped {$pruned} signal log row(s) older than {$days} days.");
         }
     }
 

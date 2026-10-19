@@ -183,6 +183,33 @@ The count lives in the `ip_offences` table, one row per address per scope, so it
 
 > Counts are **per environment**. Sync carries blocks, not ledgers, so a satellite that has seen one offence won't inherit the master's count. That is deliberate: the offence happened where it happened.
 
+## Signal log
+
+The detectors count in cache windows that expire, so by default nothing records what they saw. The signal log keeps it: one row in `watchtower_signals` for every signal a detector counted, so the detectors can be analysed and replayed at other settings later.
+
+```dotenv
+WATCHTOWER_SIGNAL_LOG=true
+# WATCHTOWER_SIGNAL_LOG_DAYS=14
+```
+
+Publish and run the `watchtower_signals` migration first.
+
+| Column | |
+|---|---|
+| `detector`, `ip`, `occurred_at` | Which detector counted what, from where, and when. |
+| `user_id` | The signed-in user on the request, as the [shared-IP guard](#shared-ips) saw it. Always empty for the two login detectors. |
+| `path`, `status` | The request path, and the response status for `response_bursts`. |
+| `target_hash`, `target_user_id`, `guard` | `failed_logins` only: a keyed hash of the identifier typed in, the account it named if there is one, and that account's guard. Kept apart from `user_id`, and never read by the shared-IP guard. |
+
+Only counted signals are written: a request no detector counted adds nothing, and neither does a disabled detector or an address that is already blocked. Rows are written in one insert after the response is sent, so the log never slows a request. If the insert fails, the rows are dropped, a warning is logged at most once a minute, and blocking carries on unaffected.
+
+Two limits:
+
+- **Blocked addresses stop adding rows.** In block mode, an address is turned away before the detectors run, so the log can't show what a higher threshold would have seen after the real block. Signals logged while a detector ran in warn mode are complete.
+- **Warn mode keeps writing.** An address a warn-mode detector never blocks adds a row for every signal it sends, until `WATCHTOWER_SIGNAL_LOG_DAYS` ages them out.
+
+`watchtower:cleanup` deletes rows older than `WATCHTOWER_SIGNAL_LOG_DAYS`, including after the log is turned off. What's stored, and why, is in the [security notes](security.md).
+
 ## Log rules
 
 These read LogScope's log table, so they need LogScope installed — and they only see what your app actually logged, which is why Laravel's own 404s are invisible to them and `scanner_paths` exists. Define them in `config/watchtower.php`:

@@ -100,6 +100,9 @@ class UserAgentMiddleware
             $ip,
             is_int($userId) || is_string($userId) ? $userId : null,
             BlockedIpMiddleware::verdict($request),
+            // Not the User-Agent itself: it is whatever the client chose to
+            // send, and the filter's debug line already records it.
+            ['path' => $request->decodedPath()],
         );
     }
 

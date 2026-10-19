@@ -4,7 +4,11 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 ## [Unreleased]
 
+One new migration, `create_watchtower_signals_table`; it's only needed if you turn the signal log on. Publish and run it: `php artisan vendor:publish --tag=watchtower-migrations` then `php artisan migrate`. One new config block, `auto_block.signal_log`. If you've published the config, copy the block in by hand.
+
 ### Added
+
+- **Signal log.** Set `WATCHTOWER_SIGNAL_LOG=true` and every signal a real-time detector counts is kept in `watchtower_signals`: the detector, address, signed-in user, path and status. A failed login also stores a keyed hash of the identifier typed in, and the account it named. This is the history a detector needs to be analysed and replayed later. Before this, it only existed in cache windows that expire. Rows are written in one insert after the response is sent, a failed insert never affects the request or the block decision, and `watchtower:cleanup` deletes rows after `WATCHTOWER_SIGNAL_LOG_DAYS` (default 14). `AutoBlockService::record()` takes an optional fifth argument for these fields ([#138](https://github.com/AhmedMerza/laravel-watchtower/issues/138)).
 
 - **`watchtower:reconcile` says how many blocks it pushed to the master.** It used to print `Reconciled laravel.` whether it queued no pushes or 400. It now prints `Reconciled laravel: 3 pushed to master.` and logs a warning (`Watchtower: reconcile pushed blocks master was missing`) when the count isn't zero. Some blocks never converge: the master refuses them (`never_block`, or `never_auto_block` for an auto block), or holds its own block for the address with an earlier expiry. Those are pushed again on every run, and the same count showing up run after run is how you spot them ([#172](https://github.com/AhmedMerza/laravel-watchtower/issues/172)).
 

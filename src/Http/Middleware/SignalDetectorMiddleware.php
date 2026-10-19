@@ -93,7 +93,7 @@ class SignalDetectorMiddleware
             return;
         }
 
-        $this->record('response_bursts', $request);
+        $this->record('response_bursts', $request, $response->getStatusCode());
     }
 
     /**
@@ -126,7 +126,7 @@ class SignalDetectorMiddleware
      * booting a guard mid-detector — which is the right answer anyway, since
      * a scanner probing `/.env` is nobody.
      */
-    private function record(string $detector, Request $request): bool
+    private function record(string $detector, Request $request, ?int $status = null): bool
     {
         $ip = BlockedIpMiddleware::clientIp($request);
 
@@ -141,6 +141,7 @@ class SignalDetectorMiddleware
             $ip,
             is_int($userId) || is_string($userId) ? $userId : null,
             BlockedIpMiddleware::verdict($request),
+            ['path' => $request->decodedPath(), 'status' => $status],
         );
     }
 }
