@@ -9,8 +9,8 @@ use Illuminate\Notifications\Notification;
 use Illuminate\Notifications\Slack\SlackMessage;
 
 /**
- * The daily digest: every block and near miss since the last one, grouped by
- * address (#124).
+ * The daily digest: every block, near miss and account-targeting crossing
+ * since the last one, grouped by address, account or subnet (#124, #180).
  *
  * Not queued, unlike BlockAlert. It is sent from the scheduler, where waiting
  * on the mailer costs nothing, and sending it in place is what lets
@@ -26,9 +26,9 @@ class BlockDigest extends Notification
      * @param  array{
      *     since: string,
      *     instant: bool,
-     *     totals: array{blocked: int, would_have_blocked: int},
+     *     totals: array{blocked: int, would_have_blocked: int, account_targeted: int},
      *     entries: list<array{
-     *         type: 'blocked'|'would_have_blocked',
+     *         type: 'blocked'|'would_have_blocked'|'account_targeted',
      *         ip: string,
      *         scope: ?string,
      *         reason: string,
@@ -56,7 +56,11 @@ class BlockDigest extends Notification
     {
         $totals = $this->digest['totals'];
 
-        return "Watchtower digest: {$totals['blocked']} blocked, {$totals['would_have_blocked']} would have been";
+        $subject = "Watchtower digest: {$totals['blocked']} blocked, {$totals['would_have_blocked']} would have been";
+
+        return $totals['account_targeted'] > 0
+            ? "{$subject}, {$totals['account_targeted']} accounts or subnets targeted"
+            : $subject;
     }
 
     /**
@@ -67,11 +71,17 @@ class BlockDigest extends Notification
         $lines = ['Since '.$this->minute($this->digest['since']).'.'];
 
         foreach ($this->digest['entries'] as $entry) {
-            $line = ($entry['type'] === 'blocked' ? 'Blocked ' : 'Would have blocked ')
-                .$entry['ip']
-                .($entry['events'] > 1 ? " ({$entry['events']} times)" : '')
+            // An account-targeting entry holds the account or subnet where
+            // the address goes, and an account's guard where the scope goes.
+            $line = match ($entry['type']) {
+                'blocked'          => 'Blocked '.$entry['ip'],
+                'account_targeted' => ($entry['scope'] !== null ? "Account {$entry['ip']} (guard {$entry['scope']})" : $entry['ip']).' targeted',
+                default            => 'Would have blocked '.$entry['ip'],
+            };
+
+            $line .= ($entry['events'] > 1 ? " ({$entry['events']} times)" : '')
                 .' — '.$entry['reason']
-                .' — scope: '.($entry['scope'] ?? 'whole app');
+                .($entry['type'] === 'account_targeted' ? '' : ' — scope: '.($entry['scope'] ?? 'whole app'));
 
             if ($entry['not_blocked_because'] !== null) {
                 $line .= " — not blocked because: {$entry['not_blocked_because']}";

@@ -10,6 +10,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Notification;
 use Watchtower\Enums\BlockSource;
+use Watchtower\Events\AccountTargeted;
 use Watchtower\Events\IpBlocked;
 use Watchtower\Events\WouldHaveBlocked;
 use Watchtower\Notifications\BlockAlert;
@@ -18,7 +19,8 @@ use Watchtower\Support\AlertChannels;
 use Watchtower\Support\BlockScope;
 
 /**
- * Mail/Slack/any-channel alerts on a block or a near miss (#124).
+ * Mail/Slack/any-channel alerts on a block, a near miss (#124), or an
+ * account-targeting crossing (#180).
  *
  * Not queued itself: the throttle check is a couple of cache writes, and
  * doing it here keeps a scanner rotating through a hundred addresses from
@@ -27,7 +29,7 @@ use Watchtower\Support\BlockScope;
  */
 class SendBlockAlert
 {
-    public function handle(IpBlocked|WouldHaveBlocked $event): void
+    public function handle(IpBlocked|WouldHaveBlocked|AccountTargeted $event): void
     {
         $config = config('watchtower.notifications.alerts', []);
 
@@ -35,9 +37,11 @@ class SendBlockAlert
             return;
         }
 
-        $alert = $event instanceof IpBlocked
-            ? $this->blocked($event, $config)
-            : $this->wouldHaveBlocked($event, $config);
+        $alert = match (true) {
+            $event instanceof IpBlocked        => $this->blocked($event, $config),
+            $event instanceof WouldHaveBlocked => $this->wouldHaveBlocked($event, $config),
+            default                            => $this->accountTargeted($event, $config),
+        };
 
         if ($alert === null) {
             return;
@@ -259,11 +263,57 @@ class SendBlockAlert
         ];
     }
 
+    /** Addresses or account ids an account-targeting alert lists; the rest are counted. */
+    public const MAX_LISTED = 10;
+
     /**
-     * Two limits, both per kind (blocked, would have blocked) so a near miss
+     * The account or subnet stands where a block's address would: it is what
+     * the throttle, the cap and the digest key on. An account is only one
+     * account on its own guard — the same id on another guard is another —
+     * so the guard takes the scope's place, the way a scope separates two
+     * blocks of one address.
+     *
+     * The reason names the rule and no count, so a subject that crosses
+     * again is one digest row counting its crossings, not a row per count.
+     *
+     * @param  array<string, mixed>  $config
+     * @return array<string, mixed>|null
+     */
+    private function accountTargeted(AccountTargeted $event, array $config): ?array
+    {
+        if (! ($config['account_targeted'] ?? true)) {
+            return null;
+        }
+
+        $account = $event->rule === 'one_account';
+        $listed = $account ? $event->members : $event->targetUserIds;
+
+        return [
+            'type'    => 'account_targeted',
+            'ip'      => $event->subject,
+            'reason'  => $account
+                ? 'Credential stuffing: one account failing from many addresses'
+                : 'Credential stuffing: one subnet failing against many accounts',
+            'scope'   => $event->guard,
+            'context' => [
+                'rule'           => $event->rule,
+                'count'          => count($event->members),
+                'window_minutes' => $event->windowMinutes,
+                // The addresses for an account; for a subnet, the existing
+                // accounts among the hashes, which mean nothing to a reader.
+                'listed'         => array_slice($listed, 0, self::MAX_LISTED),
+                'unlisted'       => max(0, count($listed) - self::MAX_LISTED),
+            ],
+        ];
+    }
+
+    /**
+     * Two limits, both per kind (blocked, would have blocked, account
+     * targeted) so a near miss
      * can't swallow the alert for the real block that follows:
      *
-     * - one alert per address and scope per window. The address is the block
+     * - one alert per address and scope per window (per account and guard,
+     *   or per subnet, for account targeting). The address is the block
      *   target, so an IPv6 near miss counts against its /64 the way the block
      *   would — and a scope escalating to the whole app still reports.
      * - at most $max alerts of the kind per window across all addresses, so a

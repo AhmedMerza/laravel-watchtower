@@ -11,7 +11,8 @@ use Illuminate\Notifications\Notification;
 use Illuminate\Notifications\Slack\SlackMessage;
 
 /**
- * One alert: an address was blocked, or would have been.
+ * One alert: an address was blocked, or would have been — or an account or
+ * subnet crossed an account-targeting rule (#180), which blocks nothing.
  *
  * Carries a plain array rather than the BlacklistedIp model. A queued
  * notification re-fetches its models when the job runs, and a one-minute
@@ -27,7 +28,7 @@ class BlockAlert extends Notification implements ShouldQueue
 
     /**
      * @param  array{
-     *     type: 'blocked'|'would_have_blocked',
+     *     type: 'blocked'|'would_have_blocked'|'account_targeted',
      *     ip: string,
      *     reason: string,
      *     scope: ?string,
@@ -56,9 +57,15 @@ class BlockAlert extends Notification implements ShouldQueue
 
     public function subject(): string
     {
-        return $this->alert['type'] === 'blocked'
-            ? "Watchtower blocked {$this->alert['ip']}"
-            : "Watchtower would have blocked {$this->alert['ip']}";
+        $a = $this->alert;
+
+        return match ($a['type']) {
+            'blocked'          => "Watchtower blocked {$a['ip']}",
+            'account_targeted' => ($a['context']['rule'] ?? null) === 'one_account'
+                ? "Watchtower: account {$a['ip']} failed logins from {$a['context']['count']} addresses"
+                : "Watchtower: subnet {$a['ip']} failed logins against {$a['context']['count']} accounts",
+            default            => "Watchtower would have blocked {$a['ip']}",
+        };
     }
 
     /**
@@ -67,6 +74,11 @@ class BlockAlert extends Notification implements ShouldQueue
     public function lines(): array
     {
         $a = $this->alert;
+
+        if ($a['type'] === 'account_targeted') {
+            return $this->accountLines($a);
+        }
+
         $lines = ["Address: {$a['ip']}", "Reason: {$a['reason']}"];
 
         if (isset($a['context']['detector'])) {
@@ -89,6 +101,32 @@ class BlockAlert extends Notification implements ShouldQueue
                 $lines[] = 'In block mode: '.($a['context']['in_block_mode'] ?? 'it would have been blocked');
             }
         }
+
+        return $lines;
+    }
+
+    /**
+     * @param  array<string, mixed>  $a
+     * @return list<string>
+     */
+    private function accountLines(array $a): array
+    {
+        $c = $a['context'];
+        $account = $c['rule'] === 'one_account';
+        $listed = implode(', ', $c['listed']).($c['unlisted'] > 0 ? " and {$c['unlisted']} more" : '');
+
+        $lines = $account
+            ? ["Account: {$a['ip']}", 'Guard: '.($a['scope'] ?? 'none')]
+            : ["Subnet: {$a['ip']}"];
+
+        $lines[] = "Reason: {$a['reason']}";
+        $lines[] = $account
+            ? "Rule: one_account — {$c['count']} addresses in {$c['window_minutes']} minutes"
+            : "Rule: one_subnet — {$c['count']} accounts in {$c['window_minutes']} minutes";
+        $lines[] = $account
+            ? "Addresses: {$listed}"
+            : 'Existing accounts among them: '.($listed === '' ? 'none' : $listed);
+        $lines[] = 'Nothing was blocked: act on it in an AccountTargeted listener.';
 
         return $lines;
     }

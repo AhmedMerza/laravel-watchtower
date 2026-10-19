@@ -24,6 +24,7 @@ use Watchtower\Console\Commands\ReconcileCommand;
 use Watchtower\Console\Commands\SimulateCommand;
 use Watchtower\Console\Commands\SyncCommand;
 use Watchtower\Enums\SyncRole;
+use Watchtower\Events\AccountTargeted;
 use Watchtower\Events\IpBlocked;
 use Watchtower\Events\IpUnblocked;
 use Watchtower\Events\WouldHaveBlocked;
@@ -114,7 +115,7 @@ class WatchtowerServiceProvider extends PackageServiceProvider
         $this->registerSyncRoutes();
 
         Event::listen(IpBlocked::class, NotifyOnBlock::class);
-        Event::listen([IpBlocked::class, WouldHaveBlocked::class], SendBlockAlert::class);
+        Event::listen([IpBlocked::class, WouldHaveBlocked::class, AccountTargeted::class], SendBlockAlert::class);
         Event::listen(IpBlocked::class, DispatchBlockToTargets::class);
         Event::listen(IpUnblocked::class, DispatchUnblockToTargets::class);
 
