@@ -85,6 +85,7 @@ A global middleware checks each request against the cache right after `TrustProx
 | **Attack-tool filter** | Rejects sqlmap, Nikto, WPScan, masscan and zgrab. On by default | [User-Agents](docs/user-agents.md) |
 | **Auto-block** | Real-time detectors (failed logins, lockouts, scanner paths, 404 bursts) and rules over your logs | [Auto-Block](docs/auto-block.md) |
 | **Backtesting** | `watchtower:simulate` replays a rule over past logs, or a detector over its signal log, before you arm it | [Backtesting](docs/auto-block.md#backtesting-a-rule-before-you-arm-it) |
+| **Account targeting** | Spots credential stuffing: one account failing from many addresses, or one subnet trying many accounts. Fires an event, blocks nothing | [Account Targeting](docs/auto-block.md#account-targeting) |
 | **Shared-IP guard** | Holds back an auto-block on an address several signed-in users share | [Shared IPs](docs/auto-block.md#shared-ips) |
 | **Escalating durations** | Longer blocks for addresses that come back | [Escalation](docs/auto-block.md#escalating-durations) |
 | **Public blocklists** | Imports Spamhaus DROP or FireHOL level1 daily. Off by default, and never imports private ranges | [Feeds](docs/feeds.md) |

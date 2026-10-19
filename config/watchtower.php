@@ -703,6 +703,40 @@ return [
             'enabled'        => env('WATCHTOWER_SIGNAL_LOG', false),
             'retention_days' => (int) env('WATCHTOWER_SIGNAL_LOG_DAYS', 14),
         ],
+
+        /*
+        | Account targeting (#180) — credential stuffing, which failed_logins
+        | misses because each address only tries a few logins. Counted the
+        | other way round, from Illuminate\Auth\Events\Failed:
+        |
+        | 'one_account': this many distinct addresses failing against one
+        |   existing account (per guard) inside the window.
+        | 'one_subnet':  this many distinct accounts failed against from one
+        |   subnet — IPv4 'ipv4_prefix' (16–32), IPv6 ipv6_block_prefix.
+        |   Made-up account names count here, not under one_account.
+        |
+        | 'count' runs from 2 to 1000.
+        |
+        | Report-only: a crossing logs "Watchtower: account targeted" and
+        | fires Watchtower\Events\AccountTargeted. Nothing is blocked and no
+        | account is touched — listen for the event to act. Needs
+        | auto_block.enabled. Backtest the counts first with
+        | `watchtower:simulate --accounts`, which replays the signal log (so
+        | needs it on, and failed_logins on).
+        */
+        'account_targeting' => [
+            'one_account' => [
+                'enabled'        => env('WATCHTOWER_DETECT_ONE_ACCOUNT', false),
+                'count'          => 10,
+                'window_minutes' => 15,
+            ],
+            'one_subnet' => [
+                'enabled'        => env('WATCHTOWER_DETECT_ONE_SUBNET', false),
+                'count'          => 20,
+                'window_minutes' => 15,
+                'ipv4_prefix'    => 24,
+            ],
+        ],
     ],
 
     /*

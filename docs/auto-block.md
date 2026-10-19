@@ -212,6 +212,55 @@ Two limits:
 
 `watchtower:cleanup` deletes rows older than `WATCHTOWER_SIGNAL_LOG_DAYS`, including after the log is turned off. What's stored, and why, is in the [security notes](security.md).
 
+## Account targeting
+
+Credential stuffing gets past `failed_logins`. Each address tries a few logins and moves on, so no single address reaches the threshold. The attack shows up when the same failures are counted by account or by subnet instead:
+
+| Rule | Counts | Default |
+|---|---|---|
+| `one_account` | distinct addresses failing against one existing account (per guard) | 10 in 15 min |
+| `one_subnet` | distinct accounts failed against from one subnet: IPv4 `/24` (`ipv4_prefix`, 16–32), IPv6 `ipv6_block_prefix` | 20 in 15 min |
+
+```dotenv
+WATCHTOWER_AUTO_BLOCK_ENABLED=true
+WATCHTOWER_DETECT_ONE_ACCOUNT=true
+WATCHTOWER_DETECT_ONE_SUBNET=true
+```
+
+Both rules read `Illuminate\Auth\Events\Failed`, so they work with `failed_logins` off. `one_account` counts only attempts at accounts that exist, and keys them by the account's id. Your user lookup may treat `usér@x.com` and `user@x.com` as the same account, and keying by id stops an attacker splitting attempts across spellings like that. An account that doesn't exist can't be taken over, and counting every made-up name would open a window per guess. `one_subnet` counts accounts by the [signal log](#signal-log)'s `target_hash`, a keyed hash of the identifier typed in, so it counts made-up names too. That's how a spray of them shows up. An IPv6 address counts as its `/64`, so one client moving around its own block counts as one address. Each rule's window starts at its first failure and starts over when the rule fires, the same way the detectors count.
+
+**Report-only.** When a rule fires, Watchtower logs `Watchtower: account targeted` and fires `Watchtower\Events\AccountTargeted`. It blocks nothing and doesn't touch the account. A wrong guess here would lock a real customer out, and only your app knows its reset and step-up flows. Listen for the event to act:
+
+```php
+use Watchtower\Events\AccountTargeted;
+
+Event::listen(function (AccountTargeted $event) {
+    // $event->rule           'one_account' or 'one_subnet'
+    // $event->subject        the account's id (one_account), or the subnet ('198.51.100.0/24')
+    // $event->members        the addresses (one_account) or account hashes (one_subnet) seen
+    // $event->targetUserIds  the existing accounts among them
+    // $event->guard          one_account only
+});
+```
+
+For `one_subnet`, `Watchtower\Support\SignalLog::targetHash($credentials)` gives the hash a login was counted under.
+
+Limits:
+
+- **No `Failed` event, no count.** A login flow that rejects an attempt without calling `Auth::attempt()` (or dispatching `Failed` itself) is invisible here, as it is to `failed_logins`.
+- **Rotating `APP_KEY`** changes every hash, so windows open at the time of a rotation never fill, and stored rows no longer match newer ones.
+- **Concurrent failures race.** A window is read and written back without a lock, so two failures at the same moment can lose a member, or both cross and report the same attack twice. Write your listener so a duplicate event does no harm. A listener that throws fails the login request, as any listener would, after every event has been dispatched.
+- **`count` is capped at 1000**, because every failed login reads and writes its rule's whole window.
+
+Backtest the counts before you rely on them. `simulate --accounts` replays the signal log's failed logins through the same code the live count runs, so it needs the signal log and `failed_logins` on:
+
+```bash
+php artisan watchtower:simulate --accounts
+php artisan watchtower:simulate --accounts=one_subnet --count=10 --window=30
+```
+
+It lists each account or subnet that crossed, how often, how many addresses or accounts it took, and the existing accounts among them (up to 100 ids each, with a count). A rule that has nothing to read in the period, such as `one_account` when no logged failure named an existing account, says so instead of reporting no crossings. At the settings in force, it reproduces the events that fired, except for logins from an address `failed_logins` skipped because it was already blocked where the detector aims. Those reach the live count but not the log.
+
 ## Log rules
 
 These read LogScope's log table, so they need LogScope installed — and they only see what your app actually logged, which is why Laravel's own 404s are invisible to them and `scanner_paths` exists. Define them in `config/watchtower.php`:
