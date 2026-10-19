@@ -9,6 +9,8 @@ use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Schema;
 use Symfony\Component\Console\Formatter\OutputFormatter;
 use Watchtower\Exceptions\UnknownScopeException;
+use Watchtower\Services\AccountReplay;
+use Watchtower\Services\AccountTargeting;
 use Watchtower\Services\AutoBlockService;
 use Watchtower\Services\DetectorHistory;
 use Watchtower\Services\RuleSimulator;
@@ -53,6 +55,7 @@ class SimulateCommand extends Command
                             {--count= : With --detector: replay at this many signals instead of its own count}
                             {--window= : With --detector: replay over this many minutes instead of its own window}
                             {--shared-ip-users= : With --detector: replay at this shared-IP user threshold (0 = off)}
+                            {--accounts= : Replay account targeting from the signal log — both rules, or one_account / one_subnet — and skip everything else}
                             {--json : Emit machine-readable JSON instead of tables}';
 
     protected $description = 'Backtest the auto-block rules from LogScope history, and the detectors from the signal log. Writes nothing.';
@@ -61,6 +64,7 @@ class SimulateCommand extends Command
         private readonly RuleSimulator $simulator,
         private readonly DetectorHistory $history,
         private readonly SignalReplay $replay,
+        private readonly AccountReplay $accountReplay,
     ) {
         parent::__construct();
     }
@@ -81,6 +85,12 @@ class SimulateCommand extends Command
             $this->error($overrides);
 
             return self::FAILURE;
+        }
+
+        // Its own report: the rules and detectors judge addresses for a
+        // block, account targeting judges accounts and blocks nothing.
+        if ($this->input->hasParameterOption('--accounts')) {
+            return $this->accounts($days, $overrides);
         }
 
         $to = now();
@@ -380,11 +390,122 @@ class SimulateCommand extends Command
 
         $detector = $this->option('detector');
 
-        if ($overrides !== [] && (! is_string($detector) || $detector === '')) {
+        if ($overrides !== [] && (! is_string($detector) || $detector === '') && ! $this->input->hasParameterOption('--accounts')) {
             return '--count, --window and --shared-ip-users replay one detector; name it with --detector.';
         }
 
         return $overrides;
+    }
+
+    /**
+     * `--accounts`: replay the account-targeting rules (#180) over the
+     * signal log's failed logins. There is nothing to fall back to without
+     * the log — these rules never wrote anything to observe in LogScope.
+     *
+     * @param  array{count?: int, window?: int, shared_ip_users?: int}  $overrides
+     */
+    private function accounts(int $days, array $overrides): int
+    {
+        $named = $this->option('accounts');
+        $names = is_string($named) && $named !== '' ? [$named] : AccountTargeting::RULES;
+
+        $error = match (true) {
+            array_diff($names, AccountTargeting::RULES) !== [] => '--accounts takes one_account or one_subnet, or no value for both.',
+            ($this->option('rule') ?? '') !== '' || ($this->option('detector') ?? '') !== '' => '--accounts is a report of its own; drop --rule and --detector.',
+            isset($overrides['shared_ip_users']) => '--shared-ip-users is for the detectors; account targeting has no shared-IP guard.',
+            $overrides !== [] && count($names) > 1 => '--count and --window replay one rule; name it, as --accounts=one_account or --accounts=one_subnet.',
+            default => null,
+        };
+
+        if ($error !== null) {
+            $this->error($error);
+
+            return self::FAILURE;
+        }
+
+        $to = now();
+        $from = $to->copy()->subDays($days);
+        $whyNotReplayed = $this->whyNotReplayed($from, $to);
+
+        if ($whyNotReplayed !== null) {
+            $this->error("--accounts replays the signal log, and {$whyNotReplayed}.");
+
+            return self::FAILURE;
+        }
+
+        $results = [];
+
+        foreach ($names as $name) {
+            $settings = AccountTargeting::settings($name);
+            $count = $overrides['count'] ?? $settings['count'];
+            $window = $overrides['window'] ?? $settings['window_minutes'];
+
+            $results[$name] = [
+                'enabled'        => AccountTargeting::enabled() && (bool) config("watchtower.auto_block.account_targeting.{$name}.enabled", false),
+                'count'          => max(2, $count),
+                'window_minutes' => $window,
+                'ipv4_prefix'    => $name === 'one_subnet' ? $settings['ipv4_prefix'] : null,
+                'overridden'     => $overrides !== [],
+                'subjects'       => $this->accountReplay->replay($name, $count, $window, $settings['ipv4_prefix'], $from, $to),
+            ];
+        }
+
+        if ($this->option('json')) {
+            $this->line((string) json_encode([
+                'from'              => $from->toIso8601String(),
+                'to'                => $to->toIso8601String(),
+                'days'              => $days,
+                'signal_log_oldest' => $this->replay->oldest()?->toIso8601String(),
+                'account_targeting' => $results,
+            ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+
+            return self::SUCCESS;
+        }
+
+        $this->info(sprintf('Account targeting over %d day(s) — replayed from the signal log\'s failed logins.', $days));
+        $this->line('Report-only: a crossing fires AccountTargeted and blocks nothing.');
+
+        foreach ($results as $name => $result) {
+            $this->newLine();
+            $this->line(sprintf(
+                '<comment>%s</comment> — %d distinct %s in %d min (%s%s)',
+                $name,
+                $result['count'],
+                $name === 'one_account' ? 'addresses per account' : sprintf('accounts per subnet (IPv4 /%d)', $result['ipv4_prefix']),
+                $result['window_minutes'],
+                $result['enabled'] ? 'on' : 'off',
+                $result['overridden'] ? ', at --count/--window' : '',
+            ));
+
+            if ($result['subjects'] === []) {
+                $this->line('  No crossings.');
+
+                continue;
+            }
+
+            $rows = array_map(static fn (array $s): array => [
+                $name === 'one_account' ? substr($s['subject'], 0, 12).'…' : $s['subject'],
+                ...($name === 'one_account' ? [self::plain((string) $s['guard'])] : []),
+                $s['crossings'],
+                $s['members'],
+                self::plain(implode(', ', array_slice($s['target_user_ids'], 0, 5)).(count($s['target_user_ids']) > 5 ? ', …' : '')),
+                self::minutePrecision($s['first_at']),
+                self::minutePrecision($s['last_at']),
+            ], array_slice($result['subjects'], 0, self::MAX_ROWS));
+
+            $this->table(
+                $name === 'one_account'
+                    ? ['Account (hash)', 'Guard', 'Crossings', 'Addresses', 'Target user ids', 'First', 'Last']
+                    : ['Subnet', 'Crossings', 'Accounts', 'Target user ids', 'First', 'Last'],
+                $rows,
+            );
+
+            if (count($result['subjects']) > self::MAX_ROWS) {
+                $this->line(sprintf('  … and %d more. --json lists them all.', count($result['subjects']) - self::MAX_ROWS));
+            }
+        }
+
+        return self::SUCCESS;
     }
 
     /**

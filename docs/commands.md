@@ -48,6 +48,7 @@ php artisan watchtower:import-firewall --undo --commit   # remove what an import
 php artisan watchtower:simulate --days=7
 php artisan watchtower:simulate --rule=0 --json
 php artisan watchtower:simulate --detector=response_bursts --count=20 --window=1
+php artisan watchtower:simulate --accounts                 # account targeting, from the signal log
 ```
 
 To turn on a feed, see [Public Blocklist Feeds](feeds.md).

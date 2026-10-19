@@ -8,6 +8,7 @@ use Illuminate\Auth\Events\Failed;
 use Illuminate\Auth\Events\Lockout;
 use Illuminate\Http\Request;
 use Watchtower\Http\Middleware\BlockedIpMiddleware;
+use Watchtower\Services\AccountTargeting;
 use Watchtower\Services\AutoBlockService;
 use Watchtower\Support\SignalLog;
 
@@ -27,26 +28,39 @@ use Watchtower\Support\SignalLog;
  */
 class DetectAuthFailures
 {
-    public function __construct(private readonly AutoBlockService $autoBlock) {}
+    public function __construct(
+        private readonly AutoBlockService $autoBlock,
+        private readonly AccountTargeting $targeting,
+    ) {}
 
     public function handleFailed(Failed $event): void
     {
-        $this->record('failed_logins', request(), $this->target($event));
+        $request = request();
+        $target = $this->target($event);
+
+        $this->record('failed_logins', $request, $target);
+
+        $ip = BlockedIpMiddleware::clientIp($request);
+
+        // Same address failed_logins counted, so a replay of the signal log
+        // keys this login the way the live count did.
+        if ($ip !== null && ($target['target_hash'] ?? null) !== null && AccountTargeting::enabled()) {
+            $this->targeting->record($ip, $target['target_hash'], $target['target_user_id'] ?? null, $target['guard'] ?? null);
+        }
     }
 
     /**
-     * The account the attempt was aimed at, for the signal log only, in its
-     * own columns — never record()'s user id, for the reason given there.
+     * The account the attempt was aimed at, for the signal log and account
+     * targeting only — never record()'s user id, for the reason given there.
      *
-     * Empty while the log is off: it is off by default, and this runs at
-     * whatever pace an attacker sets, so nothing is hashed for a log that
-     * isn't kept.
+     * Empty while neither is on: both are off by default, and this runs at
+     * whatever pace an attacker sets, so nothing is hashed for nobody.
      *
      * @return array{target_hash?: ?string, target_user_id?: int|string|null, guard?: ?string}
      */
     private function target(Failed $event): array
     {
-        if (! config('watchtower.auto_block.signal_log.enabled', false)) {
+        if (! config('watchtower.auto_block.signal_log.enabled', false) && ! AccountTargeting::enabled()) {
             return [];
         }
 

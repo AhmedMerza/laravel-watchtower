@@ -41,6 +41,7 @@ use Watchtower\Listeners\DispatchBlockToTargets;
 use Watchtower\Listeners\DispatchUnblockToTargets;
 use Watchtower\Listeners\NotifyOnBlock;
 use Watchtower\Listeners\SendBlockAlert;
+use Watchtower\Services\AccountTargeting;
 use Watchtower\Services\AutoBlockService;
 use Watchtower\Services\BlacklistCache;
 use Watchtower\Services\BlacklistService;
@@ -171,7 +172,10 @@ class WatchtowerServiceProvider extends PackageServiceProvider
             return;
         }
 
-        if (config('watchtower.auto_block.detectors.failed_logins.enabled', false)) {
+        // Account targeting (#180) reads the same event, and runs with
+        // failed_logins off — though then the signal log has nothing to
+        // replay it from.
+        if (config('watchtower.auto_block.detectors.failed_logins.enabled', false) || AccountTargeting::enabled()) {
             Event::listen(Failed::class, [DetectAuthFailures::class, 'handleFailed']);
         }
 

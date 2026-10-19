@@ -212,6 +212,54 @@ Two limits:
 
 `watchtower:cleanup` deletes rows older than `WATCHTOWER_SIGNAL_LOG_DAYS`, including after the log is turned off. What's stored, and why, is in the [security notes](security.md).
 
+## Account targeting
+
+Credential stuffing gets past `failed_logins`. Each address tries a few logins and moves on, so no single address reaches the threshold. The attack shows up when the same failures are counted by account or by subnet instead:
+
+| Rule | Counts | Default |
+|---|---|---|
+| `one_account` | distinct addresses failing against one account (per guard) | 10 in 15 min |
+| `one_subnet` | distinct accounts failed against from one subnet: IPv4 `/24` (`ipv4_prefix`, 16–32), IPv6 `ipv6_block_prefix` | 20 in 15 min |
+
+```dotenv
+WATCHTOWER_AUTO_BLOCK_ENABLED=true
+WATCHTOWER_DETECT_ONE_ACCOUNT=true
+WATCHTOWER_DETECT_ONE_SUBNET=true
+```
+
+Both rules read `Illuminate\Auth\Events\Failed`, so they work with `failed_logins` off. An account is the [signal log](#signal-log)'s `target_hash`, a keyed hash of the identifier typed in, so a login at an account that doesn't exist counts too. An IPv6 address counts as its `/64`, so one client moving around its own block counts as one address. Each rule's window starts at its first failure and starts over when the rule fires, the same way the detectors count.
+
+**Report-only.** When a rule fires, Watchtower logs `Watchtower: account targeted` and fires `Watchtower\Events\AccountTargeted`. It blocks nothing and doesn't touch the account. A wrong guess here would lock a real customer out, and only your app knows its reset and step-up flows. Listen for the event to act:
+
+```php
+use Watchtower\Events\AccountTargeted;
+
+Event::listen(function (AccountTargeted $event) {
+    // $event->rule           'one_account' or 'one_subnet'
+    // $event->subject        the account's hash, or the subnet ('198.51.100.0/24')
+    // $event->members        the addresses (one_account) or account hashes (one_subnet) seen
+    // $event->targetUserIds  the existing accounts among them
+    // $event->guard          one_account only
+});
+```
+
+To match an event to a login you have in hand, `Watchtower\Support\SignalLog::targetHash($credentials)` gives the same hash.
+
+Limits:
+
+- **No `Failed` event, no count.** A login flow that rejects an attempt without calling `Auth::attempt()` (or dispatching `Failed` itself) is invisible here, as it is to `failed_logins`.
+- **Rotating `APP_KEY`** changes every hash, so windows open at the time of a rotation never fill, and stored rows no longer match newer ones.
+- **Concurrent failures can lose a member.** A window is read and written back without a lock. That can only delay a crossing, because an attack keeps adding members.
+
+Backtest the counts before you rely on them. `simulate --accounts` replays the signal log's failed logins through the same code the live count runs, so it needs the signal log and `failed_logins` on:
+
+```bash
+php artisan watchtower:simulate --accounts
+php artisan watchtower:simulate --accounts=one_subnet --count=10 --window=30
+```
+
+It lists each account or subnet that crossed, how often, how many addresses or accounts it took, and the existing accounts among them. At the settings in force, it reproduces the events that fired, except for logins from an address `failed_logins` skipped because it was already blocked where the detector aims. Those reach the live count but not the log.
+
 ## Log rules
 
 These read LogScope's log table, so they need LogScope installed — and they only see what your app actually logged, which is why Laravel's own 404s are invisible to them and `scanner_paths` exists. Define them in `config/watchtower.php`:

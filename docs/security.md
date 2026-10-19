@@ -14,6 +14,8 @@ How Watchtower behaves at the edges: behind proxies, during a cache outage, and 
 
 **Signal log:** off by default. When on, the `watchtower_signals` table holds personal data: IP addresses, signed-in user ids and request paths for every signal the detectors counted ([Signal log](auto-block.md#signal-log)). It never stores a password or a User-Agent. For a failed login it stores a keyed hash of the identifier typed in, not the identifier. The hash is `hash_hmac('sha256', …)` keyed with your `APP_KEY`, so it can be matched across attempts but not read back without the key. Rotating `APP_KEY` changes every hash, so attempts before and after a rotation no longer match each other. Rows are deleted after `WATCHTOWER_SIGNAL_LOG_DAYS` (default 14) by `watchtower:cleanup`, so keep that scheduled, and set the retention to what your privacy policy allows.
 
+**Account targeting:** off by default. When on, it hashes the identifier of every failed login the same way, even with the signal log off. For up to `window_minutes`, its cache windows hold those hashes, the addresses that failed against them, and the matching account ids ([Account targeting](auto-block.md#account-targeting)). It never blocks an address or touches an account; it reports.
+
 ## What Watchtower doesn't do, and why
 
 Watchtower decides which addresses to turn away, and turns them away. Other firewall packages do more, and these are the gaps people look for first. Each answer says what to use instead.
