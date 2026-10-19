@@ -18,7 +18,7 @@ class AlertDigestCommand extends Command
 {
     protected $signature = 'watchtower:alert-digest';
 
-    protected $description = 'Send every block and near miss since the last digest as one message';
+    protected $description = 'Send every block, near miss and account-targeting report since the last digest as one message';
 
     /** Addresses listed in one digest; the rest are counted, not listed. */
     public const MAX_ENTRIES = 50;
@@ -96,7 +96,7 @@ class AlertDigestCommand extends Command
         $sealed()->delete();
 
         $addresses = array_sum($digest['totals']);
-        $this->info("Sent the digest: {$addresses} address(es).");
+        $this->info("Sent the digest: {$addresses} address(es), account(s) or subnet(s).");
 
         return self::SUCCESS;
     }
@@ -113,13 +113,14 @@ class AlertDigestCommand extends Command
     {
         $group = ['type', 'ip', 'scope', 'reason', 'not_blocked_because'];
 
-        // Blocks first ('blocked' sorts before 'would_have_blocked'), then
-        // the busiest.
+        // Blocks first, then account targeting, then near misses — then the
+        // busiest. Blocks lead: subnet crossings on made-up names are cheap
+        // to make, and must not push the day's blocks out of the listing.
         $entries = $sealed()
             ->select($group)
             ->selectRaw('sum(events) as events, sum(held_back) as held_back, min(first_at) as first_at, max(last_at) as last_at')
             ->groupBy($group)
-            ->orderBy('type')
+            ->orderByRaw("case type when 'blocked' then 0 when 'account_targeted' then 1 else 2 end")
             ->orderByRaw('sum(events) desc')
             ->orderBy('ip')
             ->limit(self::MAX_ENTRIES)
@@ -152,6 +153,7 @@ class AlertDigestCommand extends Command
             'totals'  => [
                 'blocked'            => (int) ($totals['blocked'] ?? 0),
                 'would_have_blocked' => (int) ($totals['would_have_blocked'] ?? 0),
+                'account_targeted'   => (int) ($totals['account_targeted'] ?? 0),
             ],
             'entries' => $entries,
             'omitted' => max(0, $groups - count($entries)),

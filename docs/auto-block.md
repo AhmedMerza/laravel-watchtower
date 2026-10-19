@@ -243,6 +243,8 @@ Event::listen(function (AccountTargeted $event) {
 });
 ```
 
+With [alerts](configuration.md#alerts-mail-slack-any-notification-channel) on, a crossing also sends an alert and goes into the daily digest. `WATCHTOWER_ALERT_ACCOUNT_TARGETED=false` turns that off.
+
 For `one_subnet`, `Watchtower\Support\SignalLog::targetHash($credentials)` gives the hash a login was counted under.
 
 Limits:

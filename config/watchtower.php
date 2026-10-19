@@ -979,8 +979,14 @@ return [
         | shared-IP guard, never_auto_block — the same events the
         | `would_have_blocked` log line reports.
         |
+        | 'account_targeted': also alert when an auto_block.account_targeting
+        | rule fires (#180) — on by default, since those rules report and do
+        | nothing else. Throttled and capped like the others, per account
+        | (and guard) or subnet.
+        |
         | 'digest': one message a day, at 'at' (app timezone), listing every
-        | block and near miss since the last one, grouped by address — and
+        | block, near miss and account-targeting report since the last one,
+        | grouped by address — and
         | which of them the throttle or cap kept from alerting at the time.
         | It goes to the same routes, and needs the scheduler and the
         | watchtower_alert_digest migration. 'instant' => false sends only
@@ -997,6 +1003,7 @@ return [
             'max_per_window'     => (int) env('WATCHTOWER_ALERT_MAX_PER_WINDOW', 20),
             'manual'             => env('WATCHTOWER_ALERT_MANUAL', false),
             'would_have_blocked' => env('WATCHTOWER_ALERT_WOULD_HAVE_BLOCKED', false),
+            'account_targeted'   => env('WATCHTOWER_ALERT_ACCOUNT_TARGETED', true),
             'notification'       => BlockAlert::class,
             'digest'             => [
                 'enabled'      => env('WATCHTOWER_ALERT_DIGEST', false),
