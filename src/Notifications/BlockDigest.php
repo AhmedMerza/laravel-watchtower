@@ -7,6 +7,7 @@ namespace Watchtower\Notifications;
 use Illuminate\Notifications\Messages\MailMessage;
 use Illuminate\Notifications\Notification;
 use Illuminate\Notifications\Slack\SlackMessage;
+use Watchtower\Listeners\SendBlockAlert;
 
 /**
  * The daily digest: every block, near miss and account-targeting crossing
@@ -26,7 +27,7 @@ class BlockDigest extends Notification
      * @param  array{
      *     since: string,
      *     instant: bool,
-     *     totals: array{blocked: int, would_have_blocked: int, account_targeted: int},
+     *     totals: array{blocked: int, would_have_blocked: int, account_targeted?: int},
      *     entries: list<array{
      *         type: 'blocked'|'would_have_blocked'|'account_targeted',
      *         ip: string,
@@ -58,7 +59,7 @@ class BlockDigest extends Notification
 
         $subject = "Watchtower digest: {$totals['blocked']} blocked, {$totals['would_have_blocked']} would have been";
 
-        return $totals['account_targeted'] > 0
+        return ($totals['account_targeted'] ?? 0) > 0
             ? "{$subject}, {$totals['account_targeted']} accounts or subnets targeted"
             : $subject;
     }
@@ -75,7 +76,9 @@ class BlockDigest extends Notification
             // the address goes, and an account's guard where the scope goes.
             $line = match ($entry['type']) {
                 'blocked'          => 'Blocked '.$entry['ip'],
-                'account_targeted' => ($entry['scope'] !== null ? "Account {$entry['ip']} (guard {$entry['scope']})" : $entry['ip']).' targeted',
+                'account_targeted' => $entry['reason'] === SendBlockAlert::ONE_SUBNET_REASON
+                    ? "Subnet {$entry['ip']} targeted"
+                    : "Account {$entry['ip']}".($entry['scope'] !== null ? " (guard {$entry['scope']})" : '').' targeted',
                 default            => 'Would have blocked '.$entry['ip'],
             };
 

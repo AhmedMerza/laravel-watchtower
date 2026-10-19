@@ -266,6 +266,10 @@ class SendBlockAlert
     /** Addresses or account ids an account-targeting alert lists; the rest are counted. */
     public const MAX_LISTED = 10;
 
+    public const ONE_ACCOUNT_REASON = 'Credential stuffing: one account failing from many addresses';
+
+    public const ONE_SUBNET_REASON = 'Credential stuffing: one subnet failing against many accounts';
+
     /**
      * The account or subnet stands where a block's address would: it is what
      * the throttle, the cap and the digest key on. An account is only one
@@ -291,9 +295,7 @@ class SendBlockAlert
         return [
             'type'    => 'account_targeted',
             'ip'      => $event->subject,
-            'reason'  => $account
-                ? 'Credential stuffing: one account failing from many addresses'
-                : 'Credential stuffing: one subnet failing against many accounts',
+            'reason'  => $account ? self::ONE_ACCOUNT_REASON : self::ONE_SUBNET_REASON,
             'scope'   => $event->guard,
             'context' => [
                 'rule'           => $event->rule,
@@ -318,7 +320,10 @@ class SendBlockAlert
      *   would — and a scope escalating to the whole app still reports.
      * - at most $max alerts of the kind per window across all addresses, so a
      *   scanner rotating through a thousand addresses sends $max, not a
-     *   thousand. The first one over the cap is logged, once.
+     *   thousand. The first one over the cap is logged, once. Each
+     *   account-targeting rule is its own kind here: one_subnet crosses on
+     *   made-up names, which cost an attacker nothing, and must not use up
+     *   the cap a real one_account attack would report under.
      *
      * The cap counts in fixed windows named by their start, not a key whose
      * TTL is set once by add(): a key that expires between add() and
@@ -351,7 +356,8 @@ class SendBlockAlert
         }
 
         $window = intdiv(now()->getTimestamp(), $seconds);
-        $counter = "{$prefix}:alert:{$alert['type']}:count:{$window}";
+        $kind = $alert['type'] === 'account_targeted' ? "account_targeted:{$alert['context']['rule']}" : $alert['type'];
+        $counter = "{$prefix}:alert:{$kind}:count:{$window}";
 
         $this->cache()->add($counter, 0, $seconds * 2);
         $sent = (int) $this->cache()->increment($counter);
@@ -363,7 +369,7 @@ class SendBlockAlert
 
         if ($sent === $max + 1) {
             Log::channel(config('watchtower.log_channel', 'stack'))->warning('Watchtower: alert cap reached, further alerts suppressed', [
-                'type'           => $alert['type'],
+                'type'           => $kind,
                 'max_per_window' => $max,
                 'window_minutes' => $minutes,
             ]);

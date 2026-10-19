@@ -142,7 +142,7 @@ Each alert gives the address, the reason, which detector or rule fired, the scop
 | `max_per_window` | `WATCHTOWER_ALERT_MAX_PER_WINDOW` | `20` | Sends at most this many alerts of each kind per window across all addresses, so a scanner rotating through a thousand addresses sends 20 alerts, not a thousand. Reaching the cap is logged on `WATCHTOWER_LOG_CHANNEL`. `0` means no cap. |
 | `manual` | `WATCHTOWER_ALERT_MANUAL` | `false` | Also alerts on blocks made by hand. Blocks from sync and feeds never alert. |
 | `would_have_blocked` | `WATCHTOWER_ALERT_WOULD_HAVE_BLOCKED` | `false` | Also alerts on near misses: the same events as the `would_have_blocked` log line (warn mode, the shared-IP guard, `never_auto_block`), each with why nothing was blocked. Useful while a warn-mode round is running. |
-| `account_targeted` | `WATCHTOWER_ALERT_ACCOUNT_TARGETED` | `true` | Also alerts when an [account-targeting](auto-block.md#account-targeting) rule fires. The alert names the account and guard, or the subnet, with the addresses (or the existing accounts) seen, up to 10. It's throttled and capped like the others, per account and guard or per subnet. Nothing is sent while both rules are off, as they are by default. |
+| `account_targeted` | `WATCHTOWER_ALERT_ACCOUNT_TARGETED` | `true` | Also alerts when an [account-targeting](auto-block.md#account-targeting) rule fires. The alert names the account and guard, or the subnet, with the addresses (or the existing accounts) seen, up to 10. It's throttled like the others, per account and guard or per subnet. Each rule has its own cap, so cheap subnet crossings on made-up names can't use up the one a real attack on an account would report under. Nothing is sent while both rules are off, as they are by default. |
 
 ### Daily digest
 
@@ -159,7 +159,7 @@ The digest uses the same routes as the instant alerts and is sent by `watchtower
 - Laravel's scheduler must be running.
 - Publish and run the `watchtower_alert_digest` migration.
 
-Events are stored as one row per address and reason, which counts its repeats, until the digest that reports them goes out. If the digest can't be sent on any channel, the rows are kept and the next run reports them. `watchtower:cleanup` deletes rows that no digest has sent within 7 days, for example because the scheduler has stopped. The digest lists the 50 busiest addresses and counts the rest.
+Events are stored as one row per address and reason, which counts its repeats, until the digest that reports them goes out. If the digest can't be sent on any channel, the rows are kept and the next run reports them. `watchtower:cleanup` deletes rows that no digest has sent within 7 days, for example because the scheduler has stopped. The digest lists blocks first, then account targeting, then near misses, up to 50 entries, and counts the rest.
 
 | Setting | Env | Default | |
 |---|---|---|---|

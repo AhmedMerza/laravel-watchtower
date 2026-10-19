@@ -9,9 +9,13 @@ use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Notification;
 use Illuminate\Support\Facades\Route;
+use Watchtower\Enums\BlockSource;
+use Watchtower\Events\WouldHaveBlocked;
 use Watchtower\Listeners\SendBlockAlert;
 use Watchtower\Notifications\BlockAlert;
 use Watchtower\Notifications\BlockDigest;
+use Watchtower\Services\BlacklistService;
+use Watchtower\Support\BlockScope;
 use Watchtower\Support\FailureWindow;
 use Watchtower\Tests\TestCase;
 
@@ -186,5 +190,67 @@ it('counts the crossings into the digest, keyed by account and guard', function 
                 $line,
                 'Account 7 (guard web) targeted (2 times) — Credential stuffing: one account failing from many addresses — 2026-10-19 12:00 — 1 not alerted at the time',
             ));
+    });
+});
+
+it('alerts with the key missing from a config published before it existed', function () {
+    $alerts = config('watchtower.notifications.alerts');
+    unset($alerts['account_targeted']);
+    config()->set('watchtower.notifications.alerts', $alerts);
+
+    stuffAccount();
+
+    expect(accountAlerts())->toHaveCount(1);
+});
+
+it('says so when a subnet tried no existing account, and renders on mail and Slack', function () {
+    failAt('198.51.100.1', 'a@example.com');
+    failAt('198.51.100.2', 'b@example.com');
+    failAt('198.51.100.3', 'c@example.com');
+
+    $alert = accountAlerts()[0];
+    $mail = implode("\n", $alert->toMail(new AnonymousNotifiable)->introLines);
+    $slack = $alert->toSlack(new AnonymousNotifiable)->toArray()['text'];
+
+    expect($alert->lines())->toContain('Existing accounts among them: none')
+        ->and($mail)->toContain('Subnet: 198.51.100.0/24', 'Nothing was blocked')
+        ->and($slack)->toStartWith('*Watchtower: subnet 198.51.100.0/24 failed logins against 3 accounts*')
+        ->and($slack)->toContain('Rule: one_subnet — 3 accounts in 15 minutes');
+});
+
+it('caps each rule on its own, so subnet crossings cannot silence an account alert', function () {
+    config()->set('watchtower.notifications.alerts.max_per_window', 1);
+
+    // Two subnets spraying made-up names: the second is over the cap.
+    foreach (['198.51.100', '203.0.113'] as $net) {
+        foreach ([1, 2, 3] as $host) {
+            failAt("{$net}.{$host}", "guess{$host}@example.com");
+        }
+    }
+
+    stuffAccount('web', '192.0.2');
+
+    expect(array_map(fn (BlockAlert $a) => $a->alert['context']['rule'], accountAlerts()))->toBe(['one_subnet', 'one_account']);
+});
+
+it('lists blocks before account targeting, and labels a subnet line as one', function () {
+    config()->set('watchtower.notifications.alerts.digest.enabled', true);
+    config()->set('watchtower.notifications.alerts.would_have_blocked', true);
+
+    failAt('198.51.100.1', 'a@example.com');
+    failAt('198.51.100.2', 'b@example.com');
+    failAt('198.51.100.3', 'c@example.com');
+    app(BlacklistService::class)->block('192.0.2.50', ['reason' => 'test', 'source' => BlockSource::Auto]);
+    event(new WouldHaveBlocked('192.0.2.60', 'near miss', 'warn mode', BlockScope::GLOBAL));
+
+    $this->artisan('watchtower:alert-digest')->assertSuccessful();
+
+    Notification::assertSentOnDemand(BlockDigest::class, function (BlockDigest $digest) {
+        $lines = array_slice($digest->lines(), 1);
+
+        return count($lines) === 3
+            && str_starts_with($lines[0], 'Blocked 192.0.2.50')
+            && str_starts_with($lines[1], 'Subnet 198.51.100.0/24 targeted — Credential stuffing: one subnet failing against many accounts — 2026-10-19 12:00')
+            && str_starts_with($lines[2], 'Would have blocked 192.0.2.60');
     });
 });

@@ -113,14 +113,14 @@ class AlertDigestCommand extends Command
     {
         $group = ['type', 'ip', 'scope', 'reason', 'not_blocked_because'];
 
-        // By type, which happens to read as severity: account targeting
-        // ('account_targeted'), then blocks, then near misses — then the
-        // busiest.
+        // Blocks first, then account targeting, then near misses — then the
+        // busiest. Blocks lead: subnet crossings on made-up names are cheap
+        // to make, and must not push the day's blocks out of the listing.
         $entries = $sealed()
             ->select($group)
             ->selectRaw('sum(events) as events, sum(held_back) as held_back, min(first_at) as first_at, max(last_at) as last_at')
             ->groupBy($group)
-            ->orderBy('type')
+            ->orderByRaw("case type when 'blocked' then 0 when 'account_targeted' then 1 else 2 end")
             ->orderByRaw('sum(events) desc')
             ->orderBy('ip')
             ->limit(self::MAX_ENTRIES)
