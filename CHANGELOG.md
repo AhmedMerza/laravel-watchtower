@@ -4,13 +4,15 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-10-20
+
 One new config block, `auto_block.account_targeting`, and one new key, `notifications.alerts.account_targeted`. If you've published the config, copy them in by hand. No migrations.
 
 ### Added
 
 - **Account targeting: credential stuffing counted by account and by subnet.** `failed_logins` counts per address, and a stuffing run stays under that. Two new rules count the same `Failed` events the other way round. `one_account` fires when one existing account fails from 10 distinct addresses in 15 minutes. `one_subnet` fires when one IPv4 `/24` or IPv6 `/64` fails against 20 distinct accounts in 15 minutes. A crossing logs `Watchtower: account targeted` and fires `Watchtower\Events\AccountTargeted` with the account id or subnet, the addresses or accounts seen, and the existing account ids among them. It blocks nothing and touches no account, so there is no mode. Both rules are off by default (`WATCHTOWER_DETECT_ONE_ACCOUNT`, `WATCHTOWER_DETECT_ONE_SUBNET`). `watchtower:simulate --accounts[=one_account|one_subnet]`, with `--count` and `--window`, replays them from the signal log through the same code the live count runs ([#180](https://github.com/AhmedMerza/laravel-watchtower/issues/180)).
 
-- **Alerts and the digest report account targeting.** With `WATCHTOWER_ALERTS=true`, a crossing sends an alert naming the account and guard, or the subnet, with up to 10 of the addresses (or existing accounts) seen. It's throttled and capped per account and guard, or per subnet, separately from blocks and near misses. The daily digest lists these first and counts them in its subject. On by default; `WATCHTOWER_ALERT_ACCOUNT_TARGETED=false` (`notifications.alerts.account_targeted`) turns it off. A custom `notifications.alerts.notification` class, or a `BlockAlert` subclass that overrides `subject()` or `lines()`, now also receives `type` `account_targeted`, and should handle it before you turn a rule on ([#180](https://github.com/AhmedMerza/laravel-watchtower/issues/180)).
+- **Alerts and the digest report account targeting.** With `WATCHTOWER_ALERTS=true`, a crossing sends an alert naming the account and guard, or the subnet, with up to 10 of the addresses (or existing accounts) seen. It's throttled per account and guard, or per subnet, and each rule has its own cap, separate from blocks and near misses, so cheap subnet crossings on made-up names can't use up the cap a real attack on an account alerts under. The daily digest lists them after blocks and before near misses, and counts them in its subject. On by default; `WATCHTOWER_ALERT_ACCOUNT_TARGETED=false` (`notifications.alerts.account_targeted`) turns it off. A custom `notifications.alerts.notification` class, or a `BlockAlert` subclass that overrides `subject()` or `lines()`, now also receives `type` `account_targeted`, and should handle it before you turn a rule on ([#180](https://github.com/AhmedMerza/laravel-watchtower/issues/180)).
 
 ## [1.2.0] - 2026-10-19
 
@@ -427,7 +429,8 @@ No migrations and nothing breaking: a `composer update` is enough.
 
 - **There is no transitional `ahmedmerza/logscope-guard` package.** It has been removed from Packagist. To upgrade, `composer remove ahmedmerza/logscope-guard`, `composer require ahmedmerza/watchtower`, then work through the BREAKING entries under Changed.
 
-[Unreleased]: https://github.com/AhmedMerza/laravel-watchtower/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/AhmedMerza/laravel-watchtower/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/AhmedMerza/laravel-watchtower/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/AhmedMerza/laravel-watchtower/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/AhmedMerza/laravel-watchtower/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/AhmedMerza/laravel-watchtower/compare/v0.17.0...v1.0.0
