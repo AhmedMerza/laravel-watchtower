@@ -448,7 +448,9 @@ class AutoBlockService
         // winner's block may yet be refused or held back, and turning a
         // request away on a block nobody wrote is the failure that matters.
         // Letting it through costs what arriving a moment earlier would have.
-        if (! $this->hits->claimCrossing($detector, $counted)) {
+        $claim = $this->hits->claimCrossing($detector, $counted);
+
+        if ($claim === null) {
             return false;
         }
 
@@ -532,7 +534,14 @@ class AutoBlockService
             // re-check above answers every crossing after this one, and a
             // claim left standing would hold up an admin's unblock or the
             // shared-IP guard's re-measure for no reason.
-            $this->hits->releaseCrossing($detector, $counted);
+            //
+            // A failed release is swallowed: the lock's TTL bounds it, and a
+            // throw from here would replace this crossing's answer — a block
+            // already written would be let through as a detector failure.
+            try {
+                $claim->release();
+            } catch (\Throwable) {
+            }
         }
     }
 

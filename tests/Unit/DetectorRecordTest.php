@@ -2,12 +2,14 @@
 
 declare(strict_types=1);
 
+use Illuminate\Contracts\Cache\Lock;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Queue;
 use Watchtower\Enums\BlockSource;
 use Watchtower\Events\IpBlocked;
+use Watchtower\Events\WouldHaveBlocked;
 use Watchtower\Models\BlacklistedIp;
 use Watchtower\Services\AutoBlockService;
 use Watchtower\Services\BlacklistCache;
@@ -296,11 +298,121 @@ it('lets a crossing through untouched while another request is still deciding it
     ]);
 
     // A concurrent request holds the claim and has not written its block yet.
-    expect($this->hits->claimCrossing('scanner_paths', '198.51.100.12'))->toBeTrue();
+    expect($this->hits->claimCrossing('scanner_paths', '198.51.100.12'))->not->toBeNull();
 
     expect($this->service->record('scanner_paths', '198.51.100.12', null, false))->toBeFalse();
     $this->assertDatabaseMissing('blacklisted_ips', ['ip' => '198.51.100.12']);
     Event::assertNotDispatched(IpBlocked::class);
+
+    // And the loser left the winner's claim where it was.
+    expect($this->hits->claimCrossing('scanner_paths', '198.51.100.12'))->toBeNull();
+});
+
+/**
+ * A service whose claim plays the concurrent winner: $winner runs inside
+ * claimCrossing(), after this request's pre-claim checks and before it holds
+ * the claim — the exact window a real race lands a block or hold in.
+ */
+function serviceRacedBy(Closure $winner): AutoBlockService
+{
+    $hits = new class($winner) extends HitWindow
+    {
+        public function __construct(private Closure $winner) {}
+
+        public function claimCrossing(string $detector, string $ip): ?Lock
+        {
+            ($this->winner)();
+
+            return parent::claimCrossing($detector, $ip);
+        }
+    };
+
+    return new AutoBlockService(new BlacklistService(new BlacklistCache), $hits, new OffenceLedger, app(SignalLog::class));
+}
+
+it('stands down under the claim when a concurrent winner already wrote a scoped block (#185)', function () {
+    config()->set('watchtower.scopes', ['auth']);
+    config()->set('watchtower.auto_block.detectors.scanner_paths', [
+        'enabled'        => true,
+        'count'          => 1,
+        'window_minutes' => 5,
+        'scope'          => 'auth',
+    ]);
+
+    $service = serviceRacedBy(fn () => app(BlacklistService::class)->block('198.51.100.13', [
+        'source' => BlockSource::Auto,
+        'scope'  => 'auth',
+    ]));
+
+    expect($service->record('scanner_paths', '198.51.100.13', null, false))->toBeFalse();
+    // The winner's block, and nothing of this request's own.
+    Event::assertDispatchedTimes(IpBlocked::class, 1);
+});
+
+it('stands down under the claim when a concurrent winner already opened a hold (#185)', function () {
+    config()->set('watchtower.auto_block.mode', 'warn');
+    config()->set('watchtower.auto_block.detectors.scanner_paths', [
+        'enabled'        => true,
+        'count'          => 1,
+        'window_minutes' => 5,
+    ]);
+
+    $service = serviceRacedBy(
+        fn () => $this->hits->openNotionalBlock('scanner_paths', '198.51.100.14', 'warn', 'warn mode', 3600),
+    );
+
+    expect($service->record('scanner_paths', '198.51.100.14', null, false))->toBeFalse();
+    // The winner already reported this crossing; a second line would be a
+    // near miss counted twice.
+    Event::assertNotDispatched(WouldHaveBlocked::class);
+});
+
+it('hands a crossing claim to one caller per detector and address, until released (#185)', function () {
+    $claim = $this->hits->claimCrossing('scanner_paths', '198.51.100.16');
+
+    expect($claim)->not->toBeNull()
+        ->and($this->hits->claimCrossing('scanner_paths', '198.51.100.16'))->toBeNull()
+        ->and($this->hits->claimCrossing('response_bursts', '198.51.100.16'))->not->toBeNull()
+        ->and($this->hits->claimCrossing('scanner_paths', '198.51.100.17'))->not->toBeNull();
+
+    $claim->release();
+
+    expect($this->hits->claimCrossing('scanner_paths', '198.51.100.16'))->not->toBeNull();
+});
+
+it('still blocks on the null cache store, whose add() always fails (#185)', function () {
+    config()->set('cache.stores.null', ['driver' => 'null']);
+    config()->set('watchtower.cache.store', 'null');
+    config()->set('watchtower.auto_block.detectors.scanner_paths', [
+        'enabled'        => true,
+        'count'          => 1,
+        'window_minutes' => 5,
+    ]);
+
+    expect($this->hits->claimCrossing('scanner_paths', '198.51.100.18'))->not->toBeNull()
+        ->and($this->service->record('scanner_paths', '198.51.100.18', null, false))->toBeTrue();
+});
+
+it('gives the claim back when deciding throws (#185)', function () {
+    config()->set('watchtower.auto_block.detectors.scanner_paths', [
+        'enabled'        => true,
+        'count'          => 1,
+        'window_minutes' => 5,
+    ]);
+
+    $blacklist = new class(new BlacklistCache) extends BlacklistService
+    {
+        public function block(string $ip, array $options = []): BlacklistedIp
+        {
+            throw new RuntimeException('database down');
+        }
+    };
+    $service = new AutoBlockService($blacklist, $this->hits, new OffenceLedger, app(SignalLog::class));
+
+    // Fails open, as any detector failure does…
+    expect($service->record('scanner_paths', '198.51.100.15', null, false))->toBeFalse();
+    // …and the next crossing is free to decide rather than waiting out the TTL.
+    expect($this->hits->claimCrossing('scanner_paths', '198.51.100.15'))->not->toBeNull();
 });
 
 it('lets a detector override the global mode', function () {

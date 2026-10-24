@@ -88,11 +88,11 @@ it('skips the user-set delete when the traffic was anonymous', function () {
         'add hits:scanner_paths:203.0.113.42',
         'increment hits:scanner_paths:203.0.113.42',
         'get notional:scanner_paths:203.0.113.42',
-        'add crossing:scanner_paths:203.0.113.42',
+        'lock crossing:scanner_paths:203.0.113.42',
         'get notional:scanner_paths:203.0.113.42',
         'get users:scanner_paths:203.0.113.42',
         'forget hits:scanner_paths:203.0.113.42',
-        'forget crossing:scanner_paths:203.0.113.42',
+        'unlock crossing:scanner_paths:203.0.113.42',
     ]);
 });
 

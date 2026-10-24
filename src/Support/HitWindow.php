@@ -4,6 +4,9 @@ declare(strict_types=1);
 
 namespace Watchtower\Support;
 
+use Illuminate\Cache\NoLock;
+use Illuminate\Contracts\Cache\Lock;
+use Illuminate\Contracts\Cache\LockProvider;
 use Illuminate\Contracts\Cache\Repository;
 use Illuminate\Support\Facades\Cache;
 
@@ -24,9 +27,9 @@ use Illuminate\Support\Facades\Cache;
  *   and the hold-back reason, not a flag. See openNotionalBlock(). The
  *   scheduled rules keep theirs here too, under a `rule:{hash}` name in
  *   place of the detector — see AutoBlockService::ruleHolder().
- * - `{prefix}:crossing:{detector}:{ip}` — held only while one request
- *   decides a crossing, so concurrent requests over the threshold decide it
- *   once. See claimCrossing().
+ * - `{prefix}:crossing:{detector}:{ip}` — a cache lock held only while one
+ *   request decides a crossing, so concurrent requests over the threshold
+ *   decide it once. See claimCrossing().
  *
  * Nothing here is written for traffic that doesn't match a detector: an
  * address only gets a counter once it has already done something a
@@ -57,7 +60,7 @@ class HitWindow
     private const MAX_USERS = 20;
 
     /**
-     * How long a crossing claim stands if nothing gives it back. The winner
+     * How long a crossing lock stands if nothing gives it back. The winner
      * always releases it once it has decided, so this only bounds a request
      * that died mid-decision — long enough to cover a slow block write,
      * short enough that a lost claim never stands in for a block.
@@ -260,28 +263,32 @@ class HitWindow
     }
 
     /**
-     * Claim the right to decide this crossing, true for exactly one caller.
+     * Claim the right to decide this crossing: the held lock for exactly one
+     * caller, null for the rest. The winner releases it once it has decided.
      *
      * A scanner sending requests in parallel gets several of them past the
      * isBlocked() check before the first block reaches the cache, and each
      * one crossed: N offences in the escalation ledger, N IpBlocked events,
-     * N auto-blocked lines for one block (#185). add() is atomic on every
-     * store Laravel ships, so the losers find the key and stand down. A
-     * request that wins after the claim was given back re-checks the block
-     * and the hold before deciding — AutoBlockService::blockDetected().
+     * N auto-blocked lines for one block (#185). A request that wins after
+     * the lock was given back re-checks the block and the hold before
+     * deciding — see AutoBlockService::blockDetected().
+     *
+     * A cache lock rather than add(): the release is owner-checked, so a
+     * winner that outran the TTL can't free a later winner's lock; and the
+     * null store, whose add() is always false, hands out a NoLock instead of
+     * refusing every claim and switching the detectors off. A custom store
+     * with no locks decides unguarded, as every store did before #185.
      */
-    public function claimCrossing(string $detector, string $ip): bool
+    public function claimCrossing(string $detector, string $ip): ?Lock
     {
-        return $this->cache()->add($this->key('crossing', $detector, $ip), 1, self::CROSSING_SECONDS);
-    }
+        $store = $this->cache()->getStore();
+        $name = $this->key('crossing', $detector, $ip);
 
-    /**
-     * Give a claim back once its crossing is decided, so the next one is
-     * decided on its own merits rather than waiting out the claim.
-     */
-    public function releaseCrossing(string $detector, string $ip): void
-    {
-        $this->cache()->forget($this->key('crossing', $detector, $ip));
+        $lock = $store instanceof LockProvider
+            ? $store->lock($name, self::CROSSING_SECONDS)
+            : new NoLock($name, self::CROSSING_SECONDS);
+
+        return $lock->get() ? $lock : null;
     }
 
     /**
