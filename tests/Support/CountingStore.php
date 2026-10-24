@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Watchtower\Tests\Support;
 
+use Illuminate\Cache\ArrayLock;
 use Illuminate\Cache\ArrayStore;
 
 /**
@@ -103,6 +104,42 @@ class CountingStore extends ArrayStore
         $this->log('forget', $key);
 
         return parent::forget($key);
+    }
+
+    /**
+     * ArrayLock works on the store's lock table directly, past every method
+     * above, so its traffic is logged here: one op to acquire and one to
+     * release, as RedisLock's SET NX and its release eval are.
+     *
+     * @param  string  $name
+     * @param  int  $seconds
+     * @param  string|null  $owner
+     */
+    public function lock($name, $seconds = 0, $owner = null): ArrayLock
+    {
+        $log = fn (string $op) => $this->log($op, $name);
+
+        return new class($this, $name, $seconds, $owner, $log) extends ArrayLock
+        {
+            public function __construct($store, $name, $seconds, $owner, private \Closure $log)
+            {
+                parent::__construct($store, $name, $seconds, $owner);
+            }
+
+            public function acquire(): bool
+            {
+                ($this->log)('lock');
+
+                return parent::acquire();
+            }
+
+            public function release(): bool
+            {
+                ($this->log)('unlock');
+
+                return parent::release();
+            }
+        };
     }
 
     private function log(string $op, string $key): void

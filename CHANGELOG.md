@@ -4,6 +4,10 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A burst of concurrent requests no longer blocks an address several times over.** When a scanner sent requests in parallel, each one that read "not blocked" before the first block reached the cache crossed the detector's threshold on its own. That meant one `IpBlocked` event, one `Watchtower: auto-blocked` line and one offence per request, all for one block. With escalation on, the address's next block skipped rungs up the ladder, and `watchtower:simulate` counted extra blocks and minutes. A crossing is now decided by one request at a time, and that request re-checks the blocklist and any hold before acting ([#185](https://github.com/AhmedMerza/laravel-watchtower/issues/185)).
+
 ## [1.3.0] - 2026-10-20
 
 One new config block, `auto_block.account_targeting`, and one new key, `notifications.alerts.account_targeted`. If you've published the config, copy them in by hand. No migrations.
