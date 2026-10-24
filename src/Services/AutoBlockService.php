@@ -443,73 +443,106 @@ class AutoBlockService
             return false;
         }
 
-        // Parsed only here, past the hold: parsing warns on a bad value, and
-        // a held address keeps arriving at its threshold on every request —
-        // before the hold that would have been a warning per request. The
-        // detector's own value wins (#121).
-        $sharedIpThreshold = $this->sharedIpUserThreshold($settings);
+        // A concurrent request already crossed and is deciding this one
+        // (#185). It is let through rather than answered as blocked: the
+        // winner's block may yet be refused or held back, and turning a
+        // request away on a block nobody wrote is the failure that matters.
+        // Letting it through costs what arriving a moment earlier would have.
+        if (! $this->hits->claimCrossing($detector, $counted)) {
+            return false;
+        }
 
-        // Whatever is decided below, this crossing has been answered, so the
-        // count starts again. Blocking clears it so a lapsed block doesn't
-        // re-fire on the very next signal; a held-back decision clears it so
-        // a counter left sitting at its threshold doesn't re-decide on every
-        // matching request for the rest of the window.
-        //
-        // That second reason only ever amortised by `count`, though, and
-        // `scanner_paths` ships `count => 1` deliberately — a single request
-        // for /.env is not a mistake, and accumulating before blocking would
-        // both serve the matched request and hand an attacker room to game
-        // the shared-IP guard. A divisor of 1 is no divisor: every probe
-        // crossed, closed and logged. What actually bounds the repeat rate
-        // is the notional block opened below, which keeps the address away
-        // from the detector the way a real block would have.
-        //
-        // close() hands back the users seen in the window it is closing, so
-        // they are read before they are dropped rather than in a separate
-        // call that has to be kept above this one.
-        $users = $this->hits->close($detector, $counted);
+        try {
+            // Asked again now the claim is held, because the answers this
+            // request carried in may be stale: the middleware read "not
+            // blocked" before a concurrent winner wrote its block, or before
+            // it opened its hold. A winner whose claim has already been
+            // given back is exactly what this finds.
+            if ($this->blacklist->isBlocked($ip)) {
+                return true;
+            }
 
-        $reason = sprintf(
-            'Auto-blocked: %s reached %d in %d min',
-            $detector,
-            $threshold,
-            $windowMinutes,
-        );
+            if ($this->blockedInScope($ip, $scope) || $this->isHeld($detector, $counted, $ip, $mode)) {
+                return false;
+            }
 
-        // The ids, not just the count: an operator deciding whether to arm a
-        // detector needs to see WHO was behind a flagged address, since
-        // "three users" reads very differently from three ids they recognise
-        // as staff. Empty for anonymous traffic, which is most of it.
-        $context = [
-            'detector'       => $detector,
-            'threshold'      => $threshold,
-            'window_minutes' => $windowMinutes,
-            'hits'           => $hits,
-            'user_ids'       => $users,
-        ];
+            // Parsed only here, past the hold: parsing warns on a bad value, and
+            // a held address keeps arriving at its threshold on every request —
+            // before the hold that would have been a warning per request. The
+            // detector's own value wins (#121).
+            $sharedIpThreshold = $this->sharedIpUserThreshold($settings);
 
-        $durationMinutes = (int) config('watchtower.auto_block.block_duration_minutes', 60);
+            // Whatever is decided below, this crossing has been answered, so the
+            // count starts again. Blocking clears it so a lapsed block doesn't
+            // re-fire on the very next signal; a held-back decision clears it so
+            // a counter left sitting at its threshold doesn't re-decide on every
+            // matching request for the rest of the window.
+            //
+            // That second reason only ever amortised by `count`, though, and
+            // `scanner_paths` ships `count => 1` deliberately — a single request
+            // for /.env is not a mistake, and accumulating before blocking would
+            // both serve the matched request and hand an attacker room to game
+            // the shared-IP guard. A divisor of 1 is no divisor: every probe
+            // crossed, closed and logged. What actually bounds the repeat rate
+            // is the notional block opened below, which keeps the address away
+            // from the detector the way a real block would have.
+            //
+            // close() hands back the users seen in the window it is closing, so
+            // they are read before they are dropped rather than in a separate
+            // call that has to be kept above this one.
+            $users = $this->hits->close($detector, $counted);
 
-        $heldBy = $this->blockOrReport(
-            $ip,
-            $reason,
-            $mode,
-            $scope,
-            count($users),
-            $sharedIpThreshold,
-            $durationMinutes,
-            $context,
-        );
+            $reason = sprintf(
+                'Auto-blocked: %s reached %d in %d min',
+                $detector,
+                $threshold,
+                $windowMinutes,
+            );
 
-        $this->holdDecision($detector, $counted, $mode, $heldBy, $durationMinutes);
+            // The ids, not just the count: an operator deciding whether to arm a
+            // detector needs to see WHO was behind a flagged address, since
+            // "three users" reads very differently from three ids they recognise
+            // as staff. Empty for anonymous traffic, which is most of it.
+            $context = [
+                'detector'       => $detector,
+                'threshold'      => $threshold,
+                'window_minutes' => $windowMinutes,
+                'hits'           => $hits,
+                'user_ids'       => $users,
+            ];
 
-        return $heldBy === null;
+            $durationMinutes = (int) config('watchtower.auto_block.block_duration_minutes', 60);
+
+            $heldBy = $this->blockOrReport(
+                $ip,
+                $reason,
+                $mode,
+                $scope,
+                count($users),
+                $sharedIpThreshold,
+                $durationMinutes,
+                $context,
+            );
+
+            $this->holdDecision($detector, $counted, $mode, $heldBy, $durationMinutes);
+
+            return $heldBy === null;
+        } finally {
+            // Given back however it ended: the block, the hold or the
+            // re-check above answers every crossing after this one, and a
+            // claim left standing would hold up an admin's unblock or the
+            // shared-IP guard's re-measure for no reason.
+            $this->hits->releaseCrossing($detector, $counted);
+        }
     }
 
     /**
      * Whether $holder already decided about this address and was held back,
      * in this mode, by a hold-back that still speaks for $ip. See
      * holdDecision(), which opens what this reads.
+     *
+     * @phpstan-impure it reads the cache, and blockDetected() asks twice
+     *                 because a concurrent request can open the hold between
      */
     private function isHeld(string $holder, string $counted, string $ip, string $mode): bool
     {

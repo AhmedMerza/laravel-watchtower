@@ -24,6 +24,9 @@ use Illuminate\Support\Facades\Cache;
  *   and the hold-back reason, not a flag. See openNotionalBlock(). The
  *   scheduled rules keep theirs here too, under a `rule:{hash}` name in
  *   place of the detector — see AutoBlockService::ruleHolder().
+ * - `{prefix}:crossing:{detector}:{ip}` — held only while one request
+ *   decides a crossing, so concurrent requests over the threshold decide it
+ *   once. See claimCrossing().
  *
  * Nothing here is written for traffic that doesn't match a detector: an
  * address only gets a counter once it has already done something a
@@ -52,6 +55,14 @@ class HitWindow
      * threshold ever approaches it.
      */
     private const MAX_USERS = 20;
+
+    /**
+     * How long a crossing claim stands if nothing gives it back. The winner
+     * always releases it once it has decided, so this only bounds a request
+     * that died mid-decision — long enough to cover a slow block write,
+     * short enough that a lost claim never stands in for a block.
+     */
+    private const CROSSING_SECONDS = 10;
 
     /**
      * Count one hit for this detector and address, and return the running
@@ -246,6 +257,31 @@ class HitWindow
         }
 
         return ['mode' => $hold['mode'], 'reason' => $hold['reason']];
+    }
+
+    /**
+     * Claim the right to decide this crossing, true for exactly one caller.
+     *
+     * A scanner sending requests in parallel gets several of them past the
+     * isBlocked() check before the first block reaches the cache, and each
+     * one crossed: N offences in the escalation ledger, N IpBlocked events,
+     * N auto-blocked lines for one block (#185). add() is atomic on every
+     * store Laravel ships, so the losers find the key and stand down. A
+     * request that wins after the claim was given back re-checks the block
+     * and the hold before deciding — AutoBlockService::blockDetected().
+     */
+    public function claimCrossing(string $detector, string $ip): bool
+    {
+        return $this->cache()->add($this->key('crossing', $detector, $ip), 1, self::CROSSING_SECONDS);
+    }
+
+    /**
+     * Give a claim back once its crossing is decided, so the next one is
+     * decided on its own merits rather than waiting out the claim.
+     */
+    public function releaseCrossing(string $detector, string $ip): void
+    {
+        $this->cache()->forget($this->key('crossing', $detector, $ip));
     }
 
     /**

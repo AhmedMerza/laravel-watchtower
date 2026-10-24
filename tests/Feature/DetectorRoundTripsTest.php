@@ -82,12 +82,17 @@ it('skips the user-set delete when the traffic was anonymous', function () {
     // The crossing reads the user set to see who would be caught, then closes
     // the window. Most detector traffic is anonymous and never opened that
     // set, so deleting it would spend a round trip on a key never written.
+    // The claim, and the hold re-read under it, are what a crossing pays to
+    // be decided once under concurrency (#185) — a crossing, never a hit.
     expect($this->store->opsMatching(':scanner_paths:'))->toBe([
         'add hits:scanner_paths:203.0.113.42',
         'increment hits:scanner_paths:203.0.113.42',
         'get notional:scanner_paths:203.0.113.42',
+        'add crossing:scanner_paths:203.0.113.42',
+        'get notional:scanner_paths:203.0.113.42',
         'get users:scanner_paths:203.0.113.42',
         'forget hits:scanner_paths:203.0.113.42',
+        'forget crossing:scanner_paths:203.0.113.42',
     ]);
 });
 

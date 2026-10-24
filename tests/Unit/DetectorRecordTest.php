@@ -7,6 +7,7 @@ use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Queue;
 use Watchtower\Enums\BlockSource;
+use Watchtower\Events\IpBlocked;
 use Watchtower\Models\BlacklistedIp;
 use Watchtower\Services\AutoBlockService;
 use Watchtower\Services\BlacklistCache;
@@ -255,6 +256,51 @@ it('clears the counter once it has blocked, so a lapsed block does not re-fire i
 
     // The counter was reset by the block, so this is hit 1 of 3, not 4.
     expect($this->service->record('failed_logins', '198.51.100.10'))->toBeFalse();
+});
+
+it('blocks once when a burst all read "not blocked" before the first block landed (#185)', function () {
+    config()->set('watchtower.auto_block.detectors.scanner_paths', [
+        'enabled'        => true,
+        'count'          => 1,
+        'window_minutes' => 5,
+    ]);
+    config()->set('watchtower.auto_block.escalation.enabled', true);
+    config()->set('watchtower.auto_block.escalation.repeat_durations', [360, 1440]);
+
+    // Every request passed the middleware before the first block reached the
+    // cache, so each arrives carrying `blocked: false`. The later ones are
+    // turned away on the block the first wrote, not on blocks of their own.
+    $answers = array_map(
+        fn () => $this->service->record('scanner_paths', '198.51.100.11', null, false),
+        range(1, 3),
+    );
+
+    expect($answers)->toBe([true, true, true]);
+    Event::assertDispatchedTimes(IpBlocked::class, 1);
+
+    // One offence on the ledger, not three: the next block is the first rung
+    // up, not the top of the ladder. And an unblock takes effect at once —
+    // no claim is left standing to swallow the next crossing.
+    app(BlacklistService::class)->unblock('198.51.100.11');
+
+    expect($this->service->record('scanner_paths', '198.51.100.11', null, false))->toBeTrue();
+    expect(now()->diffInMinutes(BlacklistedIp::where('ip', '198.51.100.11')->sole()->expires_at))
+        ->toEqualWithDelta(360, 1);
+});
+
+it('lets a crossing through untouched while another request is still deciding it (#185)', function () {
+    config()->set('watchtower.auto_block.detectors.scanner_paths', [
+        'enabled'        => true,
+        'count'          => 1,
+        'window_minutes' => 5,
+    ]);
+
+    // A concurrent request holds the claim and has not written its block yet.
+    expect($this->hits->claimCrossing('scanner_paths', '198.51.100.12'))->toBeTrue();
+
+    expect($this->service->record('scanner_paths', '198.51.100.12', null, false))->toBeFalse();
+    $this->assertDatabaseMissing('blacklisted_ips', ['ip' => '198.51.100.12']);
+    Event::assertNotDispatched(IpBlocked::class);
 });
 
 it('lets a detector override the global mode', function () {
