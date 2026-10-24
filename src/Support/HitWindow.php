@@ -277,7 +277,8 @@ class HitWindow
      * winner that outran the TTL can't free a later winner's lock; and the
      * null store, whose add() is always false, hands out a NoLock instead of
      * refusing every claim and switching the detectors off. A custom store
-     * with no locks decides unguarded, as every store did before #185.
+     * with no locks, or a lock that errors, decides unguarded, as every
+     * store did before #185.
      */
     public function claimCrossing(string $detector, string $ip): ?Lock
     {
@@ -288,7 +289,16 @@ class HitWindow
             ? $store->lock($name, self::CROSSING_SECONDS)
             : new NoLock($name, self::CROSSING_SECONDS);
 
-        return $lock->get() ? $lock : null;
+        // A lock that errors decides unguarded rather than failing the
+        // crossing: the database store throws on every acquire when its
+        // cache_locks table is missing, and letting that reach record()'s
+        // fail-open would switch every detector off for the price of
+        // deduplicating its events.
+        try {
+            return $lock->get() ? $lock : null;
+        } catch (\Throwable) {
+            return new NoLock($name, self::CROSSING_SECONDS);
+        }
     }
 
     /**

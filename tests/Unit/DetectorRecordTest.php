@@ -7,6 +7,7 @@ use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Queue;
+use Illuminate\Support\Facades\Schema;
 use Watchtower\Enums\BlockSource;
 use Watchtower\Events\IpBlocked;
 use Watchtower\Events\WouldHaveBlocked;
@@ -391,6 +392,26 @@ it('still blocks on the null cache store, whose add() always fails (#185)', func
 
     expect($this->hits->claimCrossing('scanner_paths', '198.51.100.18'))->not->toBeNull()
         ->and($this->service->record('scanner_paths', '198.51.100.18', null, false))->toBeTrue();
+});
+
+it('still blocks on a database cache store with no cache_locks table (#185)', function () {
+    // The cache table a hand-rolled setup has, without the locks table
+    // Laravel's own cache migration creates next to it.
+    Schema::create('cache', function ($table) {
+        $table->string('key')->primary();
+        $table->mediumText('value');
+        $table->integer('expiration');
+    });
+    config()->set('cache.stores.database', ['driver' => 'database', 'table' => 'cache', 'lock_table' => 'cache_locks']);
+    config()->set('watchtower.cache.store', 'database');
+    config()->set('watchtower.auto_block.detectors.scanner_paths', [
+        'enabled'        => true,
+        'count'          => 1,
+        'window_minutes' => 5,
+    ]);
+
+    expect($this->service->record('scanner_paths', '198.51.100.19', null, false))->toBeTrue();
+    $this->assertDatabaseHas('blacklisted_ips', ['ip' => '198.51.100.19']);
 });
 
 it('gives the claim back when deciding throws (#185)', function () {
