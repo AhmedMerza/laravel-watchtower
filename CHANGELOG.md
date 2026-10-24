@@ -4,6 +4,10 @@ All notable changes to `laravel-watchtower` will be documented in this file.
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-10-24
+
+No migrations, no config changes.
+
 ### Fixed
 
 - **A burst of concurrent requests no longer blocks an address several times over.** When a scanner sent requests in parallel, each one that read "not blocked" before the first block reached the cache crossed the detector's threshold on its own. That meant one `IpBlocked` event, one `Watchtower: auto-blocked` line and one offence per request, all for one block. With escalation on, the address's next block skipped rungs up the ladder, and `watchtower:simulate` counted extra blocks and minutes. A crossing is now decided by one request at a time, and that request re-checks the blocklist and any hold before acting ([#185](https://github.com/AhmedMerza/laravel-watchtower/issues/185)).
@@ -433,7 +437,8 @@ No migrations and nothing breaking: a `composer update` is enough.
 
 - **There is no transitional `ahmedmerza/logscope-guard` package.** It has been removed from Packagist. To upgrade, `composer remove ahmedmerza/logscope-guard`, `composer require ahmedmerza/watchtower`, then work through the BREAKING entries under Changed.
 
-[Unreleased]: https://github.com/AhmedMerza/laravel-watchtower/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/AhmedMerza/laravel-watchtower/compare/v1.3.1...HEAD
+[1.3.1]: https://github.com/AhmedMerza/laravel-watchtower/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/AhmedMerza/laravel-watchtower/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/AhmedMerza/laravel-watchtower/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/AhmedMerza/laravel-watchtower/compare/v1.0.0...v1.1.0
