@@ -293,9 +293,10 @@ return [
     |      a pattern that everyone else benefits from.
     |   3. Remove the entry from `deny`.
     |
-    | Rejections are logged at DEBUG on `log_channel`. A single scan is
-    | thousands of requests and this has no throttle, so production levels
-    | drop them; turn the channel up while you are tuning patterns.
+    | Rejections are logged at DEBUG on `log_channel`, once per address and
+    | matched pattern a minute — a single scan is thousands of requests, and
+    | an attacker's request rate must not set the size of a log that stores
+    | every line. Turn the channel up while you are tuning patterns.
     |
     | Search-bot verification (off by default) checks requests that claim to
     | be Googlebot or Bingbot with forward-confirmed reverse DNS: the PTR

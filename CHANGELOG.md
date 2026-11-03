@@ -10,6 +10,8 @@ No migrations, no config changes.
 
 ### Fixed
 
+- **A scanner's request rate no longer sets how fast the log grows.** `Watchtower: rejected a request by User-Agent` was written once per rejected request. Where the log channel stores every line (LogScope keeps debug in the database) that was one row per attacker request. It is now written once per address and matched pattern a minute, using the package's cache store. A cache that errors skips the line instead of writing it unthrottled.
+
 - **A burst of concurrent requests no longer blocks an address several times over.** When a scanner sent requests in parallel, each one that read "not blocked" before the first block reached the cache crossed the detector's threshold on its own. That meant one `IpBlocked` event, one `Watchtower: auto-blocked` line and one offence per request, all for one block. With escalation on, the address's next block skipped rungs up the ladder, and `watchtower:simulate` counted extra blocks and minutes. A crossing is now decided by one request at a time, and that request re-checks the blocklist and any hold before acting ([#185](https://github.com/AhmedMerza/laravel-watchtower/issues/185)).
 
 ## [1.3.0] - 2026-10-20

@@ -42,7 +42,7 @@ To turn the whole thing off, `WATCHTOWER_USER_AGENT_FILTER=false`. That is read 
 
 Plain **case-insensitive substrings**, not regexes — a `.` is a literal dot. They are compiled into one expression and reused, so matching is a single regex call per request however long the list grows, and a malformed entry cannot break the expression or the request.
 
-Rejections are logged at **debug** level on `log_channel`. A single scan is thousands of requests and this has no throttle, so production levels drop them; turn the channel up while you are tuning patterns.
+Rejections are logged at **debug** level on `log_channel`. A single scan is thousands of requests, so the line is written once per address and matched pattern a minute (not per request, which would let an attacker's request rate set the size of a log that stores every line); production levels drop it anyway, and you can turn the channel up while you are tuning patterns.
 
 ## Escalating to a real block
 
