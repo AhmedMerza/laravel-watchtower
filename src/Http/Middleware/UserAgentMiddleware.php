@@ -6,6 +6,7 @@ namespace Watchtower\Http\Middleware;
 
 use Closure;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 use Symfony\Component\HttpFoundation\Response;
 use Watchtower\Services\AutoBlockService;
@@ -32,6 +33,9 @@ use Watchtower\Support\NeverBlockList;
  */
 class UserAgentMiddleware
 {
+    /** One rejection line per address and reason in this many seconds. */
+    private const LOG_WINDOW_SECONDS = 60;
+
     public function __construct(
         private readonly UserAgentFilter $filter,
         private readonly AutoBlockService $autoBlock,
@@ -107,17 +111,32 @@ class UserAgentMiddleware
     }
 
     /**
-     * Leave a trace, at debug level.
+     * Leave a trace, at debug level, once per address and reason a minute.
      *
      * A filter that silently drops requests is miserable to operate — "why
-     * is this client getting a 403" has to be answerable. Debug rather than
-     * info because a single scan is thousands of requests and this has no
-     * throttle: production log levels drop it, and anyone tuning their
-     * patterns turns the channel up to watch them land.
+     * is this client getting a 403" has to be answerable. The line is
+     * throttled because a scanner's request rate must not set the log's
+     * growth: a sink that stores every line (LogScope keeps debug in the
+     * database) would otherwise take one row per attacker request. One line
+     * per window still names the address, the pattern and the User-Agent;
+     * the rest of the burst is the same facts again.
+     *
+     * The window is a cache `add()`, on the store the rest of the package
+     * uses. A cache that errors skips the line rather than writing it
+     * unthrottled: a diagnostic is not worth a log line per request during
+     * an outage, and BlockedIpMiddleware already reports the outage itself.
      */
     private function report(string $reason, string $agent, ?string $ip): void
     {
         try {
+            $store = config('watchtower.cache.store');
+            $prefix = (string) config('watchtower.cache.key', 'watchtower:blacklist');
+
+            if (! Cache::store(is_string($store) ? $store : null)
+                ->add($prefix.':ua:logged:'.sha1($reason."\0".$ip), true, self::LOG_WINDOW_SECONDS)) {
+                return;
+            }
+
             Log::channel(config('watchtower.log_channel', 'stack'))
                 ->debug('Watchtower: rejected a request by User-Agent', [
                     'matched'    => $reason,
@@ -125,7 +144,7 @@ class UserAgentMiddleware
                     'ip'         => $ip,
                 ]);
         } catch (\Throwable) {
-            // A broken log channel must not turn a rejection into a 500.
+            // A broken cache or log channel must not turn a rejection into a 500.
         }
     }
 }

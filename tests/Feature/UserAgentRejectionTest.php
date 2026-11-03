@@ -2,8 +2,13 @@
 
 declare(strict_types=1);
 
+use Illuminate\Contracts\Cache\Repository;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Route;
 use Watchtower\Enums\BlockSource;
+use Watchtower\Http\Middleware\UserAgentMiddleware;
 
 // End-to-end through the real middleware stack, on the shipped defaults:
 // the filter is on, and the detector that escalates it is not.
@@ -98,4 +103,74 @@ it('respects never_auto_block when the detector is armed', function () {
 
     // Still rejected every time — but the address is left alone.
     $this->assertDatabaseCount('blacklisted_ips', 0);
+});
+
+// The rejection line is throttled so an attacker's request rate can't set
+// the growth of a log sink that stores every line.
+
+function rejectedLines(): array
+{
+    return array_values(array_filter(
+        $GLOBALS['wtUaLog'],
+        fn ($l) => $l === 'Watchtower: rejected a request by User-Agent',
+    ));
+}
+
+function captureRejections(): void
+{
+    $GLOBALS['wtUaLog'] = [];
+    $channel = Mockery::mock();
+    $channel->shouldReceive('debug')->andReturnUsing(function ($m) {
+        $GLOBALS['wtUaLog'][] = $m;
+    });
+    Log::shouldReceive('channel')->andReturn($channel);
+}
+
+it('logs one rejection line per address and pattern in a window, not one per request', function () {
+    captureRejections();
+
+    foreach (range(1, 25) as $ignored) {
+        $this->withServerVariables(['REMOTE_ADDR' => '203.0.113.40'])
+            ->withHeaders(['User-Agent' => $this->sqlmap])
+            ->get('/watchtower-test')
+            ->assertForbidden();
+    }
+
+    expect(rejectedLines())->toHaveCount(1);
+
+    // A different address is its own window: the operator still sees it.
+    $this->withServerVariables(['REMOTE_ADDR' => '203.0.113.41'])
+        ->withHeaders(['User-Agent' => $this->sqlmap])
+        ->get('/watchtower-test')
+        ->assertForbidden();
+
+    expect(rejectedLines())->toHaveCount(2);
+});
+
+it('logs again once the window has passed', function () {
+    captureRejections();
+    $hit = fn () => $this->withServerVariables(['REMOTE_ADDR' => '203.0.113.42'])
+        ->withHeaders(['User-Agent' => $this->sqlmap])
+        ->get('/watchtower-test')
+        ->assertForbidden();
+
+    $hit();
+    $this->travel(61)->seconds();
+    $hit();
+
+    expect(rejectedLines())->toHaveCount(2);
+});
+
+it('still rejects, and writes no line, when the cache errors', function () {
+    captureRejections();
+    $broken = Mockery::mock(Repository::class);
+    $broken->shouldReceive('add')->andThrow(new RuntimeException('cache down'));
+    Cache::shouldReceive('store')->andReturn($broken);
+
+    app(UserAgentMiddleware::class)->handle(
+        Request::create('/x', 'GET', server: ['REMOTE_ADDR' => '203.0.113.43', 'HTTP_USER_AGENT' => $this->sqlmap]),
+        fn () => response('ok'),
+    )->getStatusCode() === 403 or throw new RuntimeException('not rejected');
+
+    expect(rejectedLines())->toHaveCount(0);
 });
